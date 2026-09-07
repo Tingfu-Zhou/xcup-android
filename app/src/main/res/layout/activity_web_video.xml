@@ -18,8 +18,7 @@
             android:layout_width="match_parent"
             android:layout_height="?attr/actionBarSize"
             app:navigationContentDescription="@string/web_video_back"
-            app:navigationIcon="@drawable/ic_back"
-            app:title="@string/web_video_title" />
+            app:navigationIcon="@drawable/ic_back" />
 
     </com.google.android.material.appbar.AppBarLayout>
 
