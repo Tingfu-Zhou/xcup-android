@@ -14,6 +14,7 @@ import androidx.core.content.ContextCompat;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.*;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * BLE通信管理器 - 替代原BluetoothHelper
@@ -50,6 +51,12 @@ public class BLEManager {
     private static final int PATTERN_2 = 2; // 模式2：脉冲
     private static final int PATTERN_3 = 3; // 模式3：波形
     private static int LEVEL = 0;
+
+    // ====== [新增] 手动电子菜单可用范围（对应协议 §9.1 / §9.2）======
+    public static final int PATTERN_MIN = 1;   // 变频模式最小值
+    public static final int PATTERN_MAX = 3;   // 变频模式最大值
+    public static final int LEVEL_MIN = 0;     // 强度档位最小值（0=停止）
+    public static final int LEVEL_MAX = 10;    // 强度档位最大值
     //private static final int LEVEL_L = 1;    // 低
     //private static final int LEVEL_M = 2;    // 中
     //private static final int LEVEL_H = 3;    // 高
@@ -70,8 +77,12 @@ public class BLEManager {
     private volatile boolean pausedByLocal = false; // 本地按键暂停标志
 
     // ====== 回调接口 ======
+    // connectionCallback / pauseStateCallback 由主页面持有（保持原有语义）；
+    // [新增] 额外的监听器列表，供手动控制页等其它界面临时挂载，互不覆盖。
     private ConnectionCallback connectionCallback;
     private PauseStateCallback pauseStateCallback;
+    private final List<ConnectionCallback> connectionListeners = new CopyOnWriteArrayList<>();
+    private final List<PauseStateCallback> pauseStateListeners = new CopyOnWriteArrayList<>();
 
     // ====== 序列号 ======
     private byte seq = 0;
@@ -121,6 +132,72 @@ public class BLEManager {
     }
 
     /**
+     * [新增] 追加一个连接状态监听器（不会覆盖 setConnectionCallback 设置的主回调）
+     */
+    public void addConnectionListener(ConnectionCallback listener) {
+        if (listener != null && !connectionListeners.contains(listener)) {
+            connectionListeners.add(listener);
+        }
+    }
+
+    /**
+     * [新增] 移除连接状态监听器（页面 onDestroy 时务必调用，避免泄漏）
+     */
+    public void removeConnectionListener(ConnectionCallback listener) {
+        connectionListeners.remove(listener);
+    }
+
+    /**
+     * [新增] 追加一个暂停状态监听器（不会覆盖 setPauseStateCallback 设置的主回调）
+     */
+    public void addPauseStateListener(PauseStateCallback listener) {
+        if (listener != null && !pauseStateListeners.contains(listener)) {
+            pauseStateListeners.add(listener);
+        }
+    }
+
+    /**
+     * [新增] 移除暂停状态监听器
+     */
+    public void removePauseStateListener(PauseStateCallback listener) {
+        pauseStateListeners.remove(listener);
+    }
+
+    // ====== [新增] 回调分发（统一切到主线程）======
+
+    private void notifyConnectionState(boolean connected) {
+        runOnMain(() -> {
+            if (connectionCallback != null) connectionCallback.onConnectionStateChanged(connected);
+            for (ConnectionCallback l : connectionListeners) l.onConnectionStateChanged(connected);
+        });
+    }
+
+    private void notifyScanStarted() {
+        runOnMain(() -> {
+            if (connectionCallback != null) connectionCallback.onScanStarted();
+            for (ConnectionCallback l : connectionListeners) l.onScanStarted();
+        });
+    }
+
+    private void notifyScanFailed(String reason) {
+        runOnMain(() -> {
+            if (connectionCallback != null) connectionCallback.onScanFailed(reason);
+            for (ConnectionCallback l : connectionListeners) l.onScanFailed(reason);
+        });
+    }
+
+    private void notifyPauseState(boolean paused) {
+        runOnMain(() -> {
+            if (pauseStateCallback != null) pauseStateCallback.onPauseStateChanged(paused);
+            for (PauseStateCallback l : pauseStateListeners) l.onPauseStateChanged(paused);
+        });
+    }
+
+    private static void runOnMain(Runnable r) {
+        new Handler(Looper.getMainLooper()).post(r);
+    }
+
+    /**
      * 检查蓝牙是否可用
      */
     public boolean isBluetoothAvailable() {
@@ -147,23 +224,17 @@ public class BLEManager {
     @SuppressLint("MissingPermission")
     public void startScanAndConnect() {
         if (scanner == null || adapter == null || !adapter.isEnabled()) {
-            if (connectionCallback != null) {
-                connectionCallback.onScanFailed("蓝牙未开启或不可用");
-            }
+            notifyScanFailed("蓝牙未开启或不可用");
             return;
         }
 
         // 检查权限
         if (!hasRequiredPermissions()) {
-            if (connectionCallback != null) {
-                connectionCallback.onScanFailed("缺少蓝牙权限");
-            }
+            notifyScanFailed("缺少蓝牙权限");
             return;
         }
 
-        if (connectionCallback != null) {
-            connectionCallback.onScanStarted();
-        }
+        notifyScanStarted();
 
         Log.i(TAG, "开始扫描BLE设备...");
 
@@ -180,8 +251,8 @@ public class BLEManager {
         // 设置扫描超时（20秒）
         scanTimeoutRunnable = () -> {
             stopScanSafe();
-            if (connectionCallback != null && !isConnected) {
-                connectionCallback.onScanFailed("扫描超时，未找到设备");
+            if (!isConnected) {
+                notifyScanFailed("扫描超时，未找到设备");
             }
         };
         scanTimeoutHandler.postDelayed(scanTimeoutRunnable, 20000);
@@ -212,9 +283,7 @@ public class BLEManager {
         @Override
         public void onScanFailed(int errorCode) {
             Log.e(TAG, "扫描失败: " + errorCode);
-            if (connectionCallback != null) {
-                connectionCallback.onScanFailed("扫描失败，错误码: " + errorCode);
-            }
+            notifyScanFailed("扫描失败，错误码: " + errorCode);
         }
     };
 
@@ -262,19 +331,13 @@ public class BLEManager {
                     g.discoverServices();
                 }
 
-                if (connectionCallback != null) {
-                    new Handler(Looper.getMainLooper()).post(() ->
-                            connectionCallback.onConnectionStateChanged(true));
-                }
+                notifyConnectionState(true);
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 isConnected = false;
                 isNotifying = false;
                 setPaused(false);
 
-                if (connectionCallback != null) {
-                    new Handler(Looper.getMainLooper()).post(() ->
-                            connectionCallback.onConnectionStateChanged(false));
-                }
+                notifyConnectionState(false);
             }
         }
 
@@ -396,6 +459,52 @@ public class BLEManager {
     }
 
     /**
+     * [新增] 手动电子菜单：直接下发「变频模式 + 马达强度」。
+     * 等价于 buildSetPatternFrame(PATTERN, LEVEL, 0, 1)：
+     * DURATION_MS=0 表示持续运行，FLAGS bit0=1 表示循环。
+     *
+     * @param patternId 变频模式，1..3（协议 §9.1）
+     * @param intLevel  马达强度，0..10，0 为停止（协议 §9.2）
+     * @return 帧已写入 RX 特征返回 true；未连接、被本地按键锁定或参数非法返回 false
+     */
+    public boolean sendManualPattern(int patternId, int intLevel) {
+        if (!isConnected || rxChar == null || gatt == null) {
+            Log.w(TAG, "手动控制发送失败: 蓝牙未连接");
+            return false;
+        }
+        if (pausedByLocal) {
+            // 锁定期内设备会对 SetPattern 回 BUSY，这里直接拦下，由 UI 提示先「恢复控制」
+            Log.w(TAG, "手动控制发送失败: 设备处于本地按键锁定");
+            return false;
+        }
+        if (patternId < PATTERN_MIN || patternId > PATTERN_MAX) {
+            Log.w(TAG, "手动控制发送失败: 非法模式 " + patternId);
+            return false;
+        }
+        int level = Math.max(LEVEL_MIN, Math.min(LEVEL_MAX, intLevel));
+
+        writeRx(buildSetPatternFrame(patternId, level, 0, 1));
+        Log.i(TAG, "手动控制: pattern=" + patternId + " level=" + level);
+        return true;
+    }
+
+    /**
+     * [新增] 手动电子菜单：紧急停机。
+     * StopAll 优先级最高，锁定期内设备也必须接受，因此这里不检查 pausedByLocal。
+     *
+     * @return 帧已写入 RX 特征返回 true
+     */
+    public boolean sendStopAll() {
+        if (!isConnected || rxChar == null || gatt == null) {
+            Log.w(TAG, "停止命令发送失败: 蓝牙未连接");
+            return false;
+        }
+        writeRx(buildStopAllFrame());
+        Log.i(TAG, "手动控制: StopAll");
+        return true;
+    }
+
+    /**
      * 发送恢复控制命令
      */
     public void sendResumeControl() {
@@ -440,9 +549,7 @@ public class BLEManager {
         isNotifying = false;
         setPaused(false);
 
-        if (connectionCallback != null) {
-            connectionCallback.onConnectionStateChanged(false);
-        }
+        notifyConnectionState(false);
     }
 
     /**
@@ -452,6 +559,8 @@ public class BLEManager {
         disconnect();
         connectionCallback = null;
         pauseStateCallback = null;
+        connectionListeners.clear();
+        pauseStateListeners.clear();
     }
 
     // ====== 帧编码（协议实现）======
@@ -631,10 +740,7 @@ public class BLEManager {
      */
     private void setPaused(boolean paused) {
         pausedByLocal = paused;
-        if (pauseStateCallback != null) {
-            new Handler(Looper.getMainLooper()).post(() ->
-                    pauseStateCallback.onPauseStateChanged(paused));
-        }
+        notifyPauseState(paused);
         Log.i(TAG, "暂停状态变更: " + paused);
     }
 

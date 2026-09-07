@@ -185,6 +185,16 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
+        // [新增] 手动电子菜单入口：脱离视频分析，直接在 app 上选模式与强度
+        View btnManualControl = findViewById(R.id.btnManualControl);
+        btnManualControl.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                Intent intent = new Intent(MainActivity.this, ManualControlActivity.class);
+                startActivity(intent);
+            }
+        });
+
         // 网页视频入口：打开 WebView 嗅探视频流，再走离线分析链路
         View btnWebVideo = findViewById(R.id.btnWebVideo);
         btnWebVideo.setOnClickListener(new View.OnClickListener() {

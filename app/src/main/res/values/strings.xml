@@ -15,6 +15,11 @@
     <string name="resume_control_inactive">暂停控制（未激活）</string>
     <string name="connect_bluetooth">连接蓝牙设备</string>
 
+    <!-- Manual control entry (home page) -->
+    <string name="section_manual_control">手动控制</string>
+    <string name="mode_manual_title">手动电子菜单</string>
+    <string name="mode_manual_subtitle">在 app 上直接调节模式与强度</string>
+
     <!-- Web video page -->
     <string name="web_video_title">网页视频</string>
     <string name="web_video_url_hint">粘贴视频网页链接 (https://...)</string>
@@ -35,4 +40,34 @@
     <string name="online_browser_notice_title">温馨提示</string>
     <string name="online_browser_notice_body">部分浏览器（如 Chrome、Firefox）出于安全考虑，会自动将屏幕共享中的视频画面遮黑，并显示 “为了安全起见，屏幕共享画面已隐藏此应用的内容” 等提示。\n\n为了保证分析的准确性，录屏模式建议使用对应视频网站的官方 App 直接观看视频(部分app会禁止屏幕/音频抓取)。</string>
     <string name="online_exit_tip">如需退出在线分析，可点击屏幕上方通知栏 “屏幕共享 共享中” ，并点击停止按钮。</string>
+
+    <!-- Manual control page -->
+    <string name="manual_title">手动电子菜单</string>
+    <string name="manual_back">返回</string>
+    <string name="manual_section_pattern">变频模式</string>
+    <string name="manual_section_level">马达强度</string>
+    <string name="manual_pattern_1">模式 1</string>
+    <string name="manual_pattern_2">模式 2</string>
+    <string name="manual_pattern_3">模式 3</string>
+    <string name="manual_pattern_1_desc">模式 1 · 只有正转，持续同向抽送</string>
+    <string name="manual_pattern_2_desc">模式 2 · 1200ms 反转 → 600ms 正转 → 1100ms 反转</string>
+    <string name="manual_pattern_3_desc">模式 3 · 2000ms 反转 → 3000ms 正转</string>
+    <string name="manual_level_unit">档</string>
+    <string name="manual_level_min">0 停止</string>
+    <string name="manual_level_max">10 最强</string>
+    <string name="manual_level_detail_stop">马达停止</string>
+    <string name="manual_level_detail">约 %1$d RPM · 伸缩 %2$s Hz</string>
+    <string name="manual_stop_all">紧急停止</string>
+    <string name="manual_status_disconnected">蓝牙未连接，请先返回主页面连接设备</string>
+    <string name="manual_status_ready">已连接，调节模式或强度后立即下发</string>
+    <string name="manual_status_sent">已下发：模式 %1$d · 强度 %2$d 档</string>
+    <string name="manual_status_sent_stop">已下发：停止</string>
+    <string name="manual_status_send_failed">下发失败，请检查蓝牙连接</string>
+    <string name="manual_paused_title">设备正在本地按键控制</string>
+    <string name="manual_paused_body">app 控制已被暂停，点击“恢复控制”后可继续在本页面操作。</string>
+    <string name="manual_resume">恢复控制</string>
+    <string name="manual_toast_paused">设备处于本地按键控制，请先点击“恢复控制”</string>
+    <string name="manual_toast_disconnected">蓝牙未连接，请先返回主页面连接设备</string>
+    <string name="manual_toast_resuming">正在恢复控制…</string>
+    <string name="manual_footer_hint">离开本页面不会自动停机，如需停止请点击“紧急停止”。</string>
 </resources>

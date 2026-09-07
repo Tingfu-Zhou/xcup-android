@@ -74,6 +74,13 @@
             android:configChanges="orientation|screenSize|keyboardHidden"
             android:screenOrientation="portrait" />
 
+        <!-- 手动电子菜单（脱离视频分析，直接控制模式/强度） -->
+        <activity
+            android:name=".ManualControlActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize"
+            android:parentActivityName=".MainActivity" />
+
         <!-- 在线分析服务 -->
         <service
             android:name=".OnlineAnalysisService"
