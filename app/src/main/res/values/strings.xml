@@ -52,6 +52,7 @@
     <string name="manual_pattern_1_desc">模式 1 · 只有正转，持续同向抽送</string>
     <string name="manual_pattern_2_desc">模式 2 · 1200ms 反转 → 600ms 正转 → 1100ms 反转</string>
     <string name="manual_pattern_3_desc">模式 3 · 2000ms 反转 → 3000ms 正转</string>
+    <string name="manual_pattern_shared_hint">该模式同时用于视频分析模式：分析只决定「转 / 不转」与强度档位，转动方式（正转 / 反转节拍）以这里的选择为准。</string>
     <string name="manual_level_unit">档</string>
     <string name="manual_level_min">0 停止</string>
     <string name="manual_level_max">10 最强</string>

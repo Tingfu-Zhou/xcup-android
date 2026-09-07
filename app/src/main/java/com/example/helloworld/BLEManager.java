@@ -61,6 +61,15 @@ public class BLEManager {
     //private static final int LEVEL_M = 2;    // 中
     //private static final int LEVEL_H = 3;    // 高
 
+    // ====== [新增] 视频分析模式使用的变频模式 ======
+    // 视频分析链路只决定「转 / 不转 + 强度档位」，「怎么转」由用户在手动电子菜单里选择，
+    // 与手动页共用同一份 SharedPreferences，两个页面语义一致，用户不用学两套。
+    private static final String PREFS_MANUAL = "manual_control";
+    private static final String KEY_PATTERN = "pattern";
+    private volatile int analysisPattern = PATTERN_1;
+    /** 最近一次 sendAction（视频分析链路）下发的是否为「转」；手动下发 / StopAll / 断开会清零 */
+    private volatile boolean analysisRunning = false;
+
     // ====== 全局单例 ======
     public static BLEManager globalManager = null;
 
@@ -112,6 +121,10 @@ public class BLEManager {
      */
     public BLEManager(Context context) {
         this.context = context.getApplicationContext();
+        // 复用手动电子菜单里保存的模式，作为视频分析模式的变频模式
+        analysisPattern = clampPattern(this.context
+                .getSharedPreferences(PREFS_MANUAL, Context.MODE_PRIVATE)
+                .getInt(KEY_PATTERN, PATTERN_1));
         BluetoothManager mgr = (BluetoothManager) context.getSystemService(Context.BLUETOOTH_SERVICE);
         adapter = mgr != null ? mgr.getAdapter() : null;
         scanner = adapter != null ? adapter.getBluetoothLeScanner() : null;
@@ -417,7 +430,9 @@ public class BLEManager {
 
         if (frame != null) {
             writeRx(frame);
-            Log.i(TAG, "发送动作: " + action + " -> " + mappedAction);
+            analysisRunning = !"002".equals(mappedAction); // "002" = 停止
+            Log.i(TAG, "发送动作: " + action + " -> " + mappedAction
+                    + ", pattern=" + analysisPattern + ", level=" + LEVEL);
         }
     }
 
@@ -445,10 +460,10 @@ public class BLEManager {
      */
     private byte[] buildFrameForAction(String action) {
         switch (action) {
-            case "000": // 恒定-低，持续2s
-                return buildSetPatternFrame(PATTERN_1, LEVEL, 0, 1);
-            case "001": // 脉冲-中，持续2s
-                return buildSetPatternFrame(PATTERN_1, LEVEL, 0, 1);
+            case "000": // 转（口交），模式由用户在手动电子菜单里选择
+                return buildSetPatternFrame(analysisPattern, LEVEL, 0, 1);
+            case "001": // 转（性爱），模式由用户在手动电子菜单里选择
+                return buildSetPatternFrame(analysisPattern, LEVEL, 0, 1);
             //case "003": // 波形-中，循环
                 //return buildSetPatternFrame(PATTERN_3, LEVEL, 0, 1);
             case "002": // 停止
@@ -456,6 +471,42 @@ public class BLEManager {
             default:
                 return null;
         }
+    }
+
+    /**
+     * [新增] 设置视频分析模式使用的变频模式（PATTERN_ID 1..3）。
+     *
+     * <p>视频分析链路只决定「转 / 不转 + 强度档位」，本方法决定「怎么转」。
+     * 切换时只有当前正由视频分析驱动转动，才立即补发一帧让新模式生效；
+     * 不转时只记下来，下一次发送时自然带上，避免在停机状态下把马达唤醒。</p>
+     *
+     * @param patternId 变频模式，1..3（协议 §9.1），超范围自动钳制
+     */
+    public void setAnalysisPattern(int patternId) {
+        int p = clampPattern(patternId);
+        if (p == analysisPattern) return;
+
+        analysisPattern = p;
+        Log.i(TAG, "视频分析变频模式更新为: " + p);
+
+        boolean canResend = analysisRunning && LEVEL > 0
+                && isConnected && !pausedByLocal && rxChar != null && gatt != null;
+        if (canResend) {
+            writeRx(buildSetPatternFrame(p, LEVEL, 0, 1));
+            Log.i(TAG, "视频分析正在转动，已补发一帧: pattern=" + p + " level=" + LEVEL);
+        }
+    }
+
+    /** [新增] 当前视频分析模式使用的变频模式（1..3） */
+    public int getAnalysisPattern() {
+        return analysisPattern;
+    }
+
+    /** [新增] 把变频模式钳制到协议允许的 1..3 */
+    public static int clampPattern(int patternId) {
+        if (patternId < PATTERN_MIN) return PATTERN_MIN;
+        if (patternId > PATTERN_MAX) return PATTERN_MAX;
+        return patternId;
     }
 
     /**
@@ -484,6 +535,7 @@ public class BLEManager {
         int level = Math.max(LEVEL_MIN, Math.min(LEVEL_MAX, intLevel));
 
         writeRx(buildSetPatternFrame(patternId, level, 0, 1));
+        analysisRunning = false; // 手动接管，后续切模式不再自动补发
         Log.i(TAG, "手动控制: pattern=" + patternId + " level=" + level);
         return true;
     }
@@ -500,6 +552,7 @@ public class BLEManager {
             return false;
         }
         writeRx(buildStopAllFrame());
+        analysisRunning = false;
         Log.i(TAG, "手动控制: StopAll");
         return true;
     }
@@ -547,6 +600,7 @@ public class BLEManager {
 
         isConnected = false;
         isNotifying = false;
+        analysisRunning = false;
         setPaused(false);
 
         notifyConnectionState(false);

@@ -24,6 +24,8 @@ import com.google.android.material.slider.Slider;
  *  - 每次调节实时下发 SetPattern(0x04)，等价于 buildSetPatternFrame(PATTERN, LEVEL, 0, 1)
  *  - 提供 StopAll(0x02) 紧急停止；设备被本地按键锁定时提示并支持 ResumeAppControl(0x12)
  *  - 顶部返回按钮 / 系统返回键均可回到主页面
+ *  - 这里选择的变频模式同时作为「视频分析模式」的变频模式：分析链路只决定转/不转与强度，
+ *    转动方式由本页决定（见 BLEManager#setAnalysisPattern）
  */
 public class ManualControlActivity extends AppCompatActivity {
 
@@ -98,8 +100,13 @@ public class ManualControlActivity extends AppCompatActivity {
 
         // 恢复上次选择的模式；强度一律从 0（停止）开始，避免进页面就误动
         SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
-        currentPattern = clampPattern(prefs.getInt(KEY_PATTERN, BLEManager.PATTERN_MIN));
+        currentPattern = BLEManager.clampPattern(prefs.getInt(KEY_PATTERN, BLEManager.PATTERN_MIN));
         currentLevel = BLEManager.LEVEL_MIN;
+
+        BLEManager bleOnCreate = BLEManager.globalManager;
+        if (bleOnCreate != null) {
+            bleOnCreate.setAnalysisPattern(currentPattern);
+        }
 
         togglePattern.check(patternToButtonId(currentPattern));
         tvPatternDesc.setText(patternDescRes(currentPattern));
@@ -112,6 +119,12 @@ public class ManualControlActivity extends AppCompatActivity {
             tvPatternDesc.setText(patternDescRes(currentPattern));
             getSharedPreferences(PREFS, MODE_PRIVATE).edit()
                     .putInt(KEY_PATTERN, currentPattern).apply();
+            // 同步给视频分析模式：分析链路下一次发送即用新模式，
+            // 若此刻分析正驱动马达转动，BLEManager 会立即补发一帧
+            BLEManager ble = BLEManager.globalManager;
+            if (ble != null) {
+                ble.setAnalysisPattern(currentPattern);
+            }
             // 停止档位下切模式只更新界面，不唤醒马达
             if (currentLevel > BLEManager.LEVEL_MIN) {
                 sendNow();
@@ -300,12 +313,6 @@ public class ManualControlActivity extends AppCompatActivity {
     }
 
     // ====== 模式与按钮 ID 映射 ======
-
-    private static int clampPattern(int pattern) {
-        if (pattern < BLEManager.PATTERN_MIN) return BLEManager.PATTERN_MIN;
-        if (pattern > BLEManager.PATTERN_MAX) return BLEManager.PATTERN_MAX;
-        return pattern;
-    }
 
     private static int patternToButtonId(int pattern) {
         switch (pattern) {
