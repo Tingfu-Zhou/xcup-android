@@ -30,3 +30,8 @@ google-services.json
 
 # === macOS ===
 .DS_Store
+
+# bench: 原始视频与中间缓存不入库
+bench/videos/
+bench/cache/
+bench/runs/

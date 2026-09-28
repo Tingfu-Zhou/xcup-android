@@ -1,0 +1,934 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Xcup 真值标注器</title>
+<style>
+  :root{
+    --bg:#14171c; --panel:#1c2128; --panel2:#232a33; --line:#2f3844;
+    --fg:#e6ebf2; --muted:#8e9bab; --accent:#4c9aff; --warn:#f0a35e; --err:#e5534b; --ok:#57ab5a;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:var(--bg); color:var(--fg); font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",
+    "PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    display:flex; flex-direction:column; overflow:hidden;
+  }
+  header{
+    display:flex; align-items:center; gap:10px; padding:8px 12px;
+    background:var(--panel); border-bottom:1px solid var(--line); flex:0 0 auto; flex-wrap:wrap;
+  }
+  header .title{font-weight:600; letter-spacing:.3px}
+  .tag{font-size:11px; color:var(--muted); border:1px solid var(--line); border-radius:3px; padding:1px 5px}
+  .btn{
+    background:var(--panel2); color:var(--fg); border:1px solid var(--line); border-radius:4px;
+    padding:5px 10px; cursor:pointer; font-size:12px; white-space:nowrap;
+  }
+  .btn:hover{border-color:var(--accent)}
+  .btn:disabled{opacity:.45; cursor:not-allowed}
+  .spacer{flex:1}
+  .muted{color:var(--muted); font-size:12px}
+  main{flex:1; display:flex; min-height:0}
+  .left{flex:1; display:flex; flex-direction:column; min-width:0; padding:10px; gap:8px; overflow:hidden}
+  .right{
+    width:420px; flex:0 0 420px; border-left:1px solid var(--line); background:var(--panel);
+    display:flex; flex-direction:column; min-height:0;
+  }
+  .videoWrap{
+    flex:1; min-height:120px; background:#000; border:1px solid var(--line); border-radius:4px;
+    display:flex; align-items:center; justify-content:center; overflow:hidden;
+  }
+  video{max-width:100%; max-height:100%; display:block}
+  .row{display:flex; align-items:center; gap:8px; flex-wrap:wrap}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  .clock{font-size:15px; font-weight:600}
+  .curSeg{
+    display:flex; align-items:center; gap:8px; padding:5px 8px; border-radius:4px;
+    background:var(--panel2); border:1px solid var(--line);
+  }
+  .swatch{width:12px; height:12px; border-radius:2px; flex:0 0 auto}
+  canvas{display:block; width:100%; border:1px solid var(--line); border-radius:4px; cursor:crosshair}
+  .stripLabel{font-size:11px; color:var(--muted); margin-bottom:2px}
+  .labelBar{display:flex; gap:6px; flex-wrap:wrap}
+  .lbtn{
+    display:flex; align-items:center; gap:6px; padding:5px 9px; border-radius:4px; cursor:pointer;
+    border:1px solid var(--line); background:var(--panel2); font-size:12px;
+  }
+  .lbtn kbd{
+    background:#0d1117; border:1px solid var(--line); border-radius:3px; padding:0 4px;
+    font-size:11px; font-family:ui-monospace,monospace;
+  }
+  .panel{border-bottom:1px solid var(--line); padding:10px 12px}
+  .panel h3{margin:0 0 7px; font-size:12px; text-transform:uppercase; letter-spacing:.6px; color:var(--muted)}
+  #segsPanel{flex:1; min-height:0; display:flex; flex-direction:column; border-bottom:none}
+  #segsScroll{flex:1; overflow:auto; margin-top:6px}
+  table{width:100%; border-collapse:collapse; font-size:12px}
+  th{
+    text-align:left; color:var(--muted); font-weight:500; font-size:11px; padding:3px 4px;
+    position:sticky; top:0; background:var(--panel); border-bottom:1px solid var(--line);
+  }
+  td{padding:2px 4px; border-bottom:1px solid #222831; vertical-align:middle}
+  tr.cur td{background:#232f3d}
+  tr.bad td{background:#3a2224}
+  select,input[type=text],input[type=number]{
+    background:#0f1318; color:var(--fg); border:1px solid var(--line); border-radius:3px;
+    padding:2px 4px; font-size:12px; font-family:inherit; width:100%;
+  }
+  input[type=number]{width:62px}
+  .w-annot{width:110px}
+  td .x{
+    background:none; border:none; color:var(--muted); cursor:pointer; font-size:14px; padding:0 3px;
+  }
+  td .x:hover{color:var(--err)}
+  .kv{display:grid; grid-template-columns:auto 1fr auto; gap:2px 8px; font-size:12px; align-items:center}
+  .bar{height:6px; border-radius:3px; background:#0f1318; overflow:hidden}
+  .bar i{display:block; height:100%}
+  ul.warns{margin:0; padding-left:16px}
+  ul.warns li{margin:2px 0; cursor:pointer}
+  ul.warns li.e{color:var(--err)}
+  ul.warns li.w{color:var(--warn)}
+  ul.warns li.i{color:var(--muted); cursor:default}
+  ul.warns li.ok{color:var(--ok); cursor:default; list-style:none; margin-left:-16px}
+  details summary{cursor:pointer; color:var(--muted); font-size:12px; outline:none}
+  .help{font-size:12px}
+  .help table{margin-top:6px}
+  .help td:first-child{
+    white-space:nowrap; font-family:ui-monospace,monospace; color:var(--accent); width:1%; padding-right:10px;
+  }
+  #flash{
+    position:fixed; left:50%; bottom:22px; transform:translateX(-50%); background:#0d1117;
+    border:1px solid var(--accent); border-radius:4px; padding:7px 14px; font-size:12px;
+    opacity:0; transition:opacity .18s; pointer-events:none; z-index:99;
+  }
+  #flash.on{opacity:1}
+  #drop{
+    position:fixed; inset:0; background:rgba(10,14,20,.88); display:none; align-items:center;
+    justify-content:center; font-size:18px; z-index:98; border:3px dashed var(--accent);
+  }
+  #drop.on{display:flex}
+</style>
+</head>
+<body>
+
+<header>
+  <span class="title">Xcup 真值标注器</span>
+  <span class="tag">spec v1</span>
+  <label class="btn">打开视频<input type="file" id="fVideo" accept="video/*" hidden></label>
+  <label class="btn">导入 CSV<input type="file" id="fCsv" accept=".csv,text/csv,text/plain" hidden></label>
+  <button class="btn" id="btnExport" disabled>导出 CSV</button>
+  <button class="btn" id="btnClear" disabled>清空标注</button>
+  <span class="spacer"></span>
+  <span class="muted" id="saveState"></span>
+  <span class="muted" id="fileInfo">未打开视频</span>
+</header>
+
+<main>
+  <section class="left">
+    <div class="videoWrap"><video id="vid" playsinline></video></div>
+
+    <div class="row">
+      <span class="clock mono" id="clock">00:00.000</span>
+      <span class="muted mono" id="dur">/ --:--.---</span>
+      <button class="btn" id="btnPlay">播放 / 暂停</button>
+      <span class="muted">倍速</span>
+      <select id="selRate" style="width:auto">
+        <option>0.5</option><option>1</option><option>1.25</option><option>1.5</option>
+        <option>2</option><option>3</option><option>4</option>
+      </select>
+      <span class="muted">帧率</span>
+      <input type="number" id="inFps" min="1" max="240" step="0.001" value="30" title="用 ffprobe 查准确帧率">
+      <span class="muted">放大窗 ±</span>
+      <select id="selZoom" style="width:auto">
+        <option value="2000">2s</option><option value="5000" selected>5s</option>
+        <option value="10000">10s</option><option value="30000">30s</option>
+      </select>
+      <button class="btn" id="btnMute">静音</button>
+      <div class="curSeg">
+        <span class="swatch" id="curSwatch"></span>
+        <span class="mono" id="curInfo">—</span>
+      </div>
+    </div>
+
+    <div>
+      <div class="stripLabel">全片时间轴（点击/拖动跳转）</div>
+      <canvas id="cStrip" height="62"></canvas>
+    </div>
+    <div>
+      <div class="stripLabel">局部放大（用于精修边界；红线 = 播放头，白线 = 边界）</div>
+      <canvas id="cZoom" height="76"></canvas>
+    </div>
+
+    <div class="labelBar" id="labelBar"></div>
+  </section>
+
+  <aside class="right">
+    <div class="panel">
+      <h3>统计</h3>
+      <div class="kv" id="stats"></div>
+    </div>
+    <div class="panel">
+      <h3>自检 / 告警</h3>
+      <ul class="warns" id="warns"></ul>
+    </div>
+    <div class="panel">
+      <h3>元信息</h3>
+      <div class="row">
+        <span class="muted">video_id</span>
+        <input type="text" id="inVid" class="w-annot" style="width:100px">
+        <span class="muted">annotator</span>
+        <input type="text" id="inAnnot" class="w-annot" style="width:92px">
+        <span class="muted">split</span>
+        <select id="inSplit" style="width:auto"><option>dev</option><option>test</option></select>
+      </div>
+    </div>
+    <div class="panel" id="segsPanel">
+      <h3>分段 <span class="muted" id="segCount"></span></h3>
+      <div id="segsScroll">
+        <table>
+          <thead><tr><th>#</th><th>起</th><th>止</th><th>时长</th><th style="width:118px">标签</th><th>备注</th><th></th></tr></thead>
+          <tbody id="segsBody"></tbody>
+        </table>
+      </div>
+    </div>
+    <details class="panel help">
+      <summary>快捷键（点开）</summary>
+      <table>
+        <tr><td>1 2 3 4 5</td><td>在播放头处打点为 plot / oral / sex / other_adult / exclude</td></tr>
+        <tr><td>空格 或 K</td><td>播放 / 暂停</td></tr>
+        <tr><td>, .</td><td>播放头 逐帧 后 / 前</td></tr>
+        <tr><td>&lt; &gt; (Shift+, .)</td><td>把选中的边界 逐帧 左 / 右移（精修用）</td></tr>
+        <tr><td>← →</td><td>播放头 ∓0.5s；按住 Shift 为 ∓5s</td></tr>
+        <tr><td>[ ]</td><td>跳到 上 / 下 一个边界（并选中它）</td></tr>
+        <tr><td>Backspace</td><td>删除选中的边界（前后两段合并）</td></tr>
+        <tr><td>Ctrl/⌘ + Z</td><td>撤销</td></tr>
+        <tr><td>J / L</td><td>降速 / 升速</td></tr>
+        <tr><td>M</td><td>静音</td></tr>
+        <tr><td>N</td><td>编辑当前段的备注</td></tr>
+        <tr><td>G</td><td>跳到指定时间（mm:ss.mmm 或毫秒）</td></tr>
+        <tr><td>Home</td><td>回到 0</td></tr>
+        <tr><td>Ctrl/⌘ + S</td><td>导出 CSV</td></tr>
+      </table>
+      <p class="muted">标注规范见 <span class="mono">bench/ANNOTATION_SPEC.md</span>。标注自动存在浏览器
+      localStorage（按文件名+大小），刷新不丢；换机器请导出 CSV。</p>
+    </details>
+  </aside>
+</main>
+
+<div id="flash"></div>
+<div id="drop">把视频文件拖进来</div>
+
+<script>
+'use strict';
+
+/* ---------------- 常量 ---------------- */
+const SPEC_VERSION = 1;
+const MIN_SEG_MS = 1000;
+const LABELS = {
+  plot:        {k:'1', zh:'剧情',       color:'#5b6b7d', motor:'不转'},
+  oral:        {k:'2', zh:'口交',       color:'#e08e45', motor:'转'},
+  sex:         {k:'3', zh:'性交',       color:'#d1495b', motor:'转'},
+  other_adult: {k:'4', zh:'其他成人',   color:'#8b5fbf', motor:'策略位'},
+  exclude:     {k:'5', zh:'排除',       color:'#39404a', motor:'—'}
+};
+const ORDER = Object.keys(LABELS);
+const BIN = {plot:'noise', oral:'do', sex:'do'};   // other_adult / exclude 不参与二值
+
+/* ---------------- 状态 ---------------- */
+const vid = document.getElementById('vid');
+let cuts = [{t:0, label:'plot', note:''}];   // 边界列表；cuts[i] 起始于 t，一直到下一个边界
+let durationMs = 0;
+let meta = {video_id:'', file_name:'', file_size:0, frame_rate:30, annotator:'', split:'dev'};
+let selT = 0;                                 // 选中的边界时间
+let undoStack = [];
+let saveKey = null;
+let hasVideo = false;
+
+/* ---------------- 小工具 ---------------- */
+const $ = id => document.getElementById(id);
+const clamp = (v,a,b) => v < a ? a : (v > b ? b : v);
+const frameMs = () => 1000 / (meta.frame_rate > 0 ? meta.frame_rate : 30);
+const nowMs = () => Math.round((vid.currentTime || 0) * 1000);
+
+function fmt(ms){
+  if (!isFinite(ms)) return '--:--.---';
+  const s = Math.max(0, ms) / 1000;
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  const p2 = n => String(n).padStart(2, '0');
+  return (h > 0 ? p2(h) + ':' : '') + p2(m) + ':' + sec.toFixed(3).padStart(6, '0');
+}
+function fmtShort(ms){
+  const s = Math.max(0, ms) / 1000;
+  const m = Math.floor(s / 60);
+  return m + ':' + String(Math.floor(s % 60)).padStart(2, '0');
+}
+function parseTime(str){
+  str = String(str || '').trim();
+  if (/^\d+$/.test(str)) return parseInt(str, 10);
+  const m = str.match(/^(?:(\d+):)?(\d+):(\d+(?:\.\d+)?)$/);
+  if (!m) return null;
+  return Math.round(((+(m[1] || 0)) * 3600 + (+m[2]) * 60 + parseFloat(m[3])) * 1000);
+}
+let flashTimer = null;
+function flash(msg){
+  const el = $('flash');
+  el.textContent = msg; el.classList.add('on');
+  clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => el.classList.remove('on'), 1600);
+}
+
+function segEnd(i){ return i + 1 < cuts.length ? cuts[i + 1].t : durationMs; }
+function segIndexAt(t){
+  let idx = 0;
+  for (let i = 0; i < cuts.length; i++) if (cuts[i].t <= t) idx = i;
+  return idx;
+}
+function nearestCutIdx(t){
+  let best = 0, bd = Infinity;
+  for (let i = 0; i < cuts.length; i++){
+    const d = Math.abs(cuts[i].t - t);
+    if (d < bd){ bd = d; best = i; }
+  }
+  return best;
+}
+
+/* ---------------- 变更 ---------------- */
+function pushUndo(){
+  undoStack.push(JSON.stringify(cuts));
+  if (undoStack.length > 400) undoStack.shift();
+}
+function undo(){
+  if (!undoStack.length){ flash('没有可撤销的操作'); return; }
+  cuts = JSON.parse(undoStack.pop());
+  selT = cuts[nearestCutIdx(selT)].t;
+  afterChange();
+  flash('已撤销');
+}
+
+/** 排序、去重同时刻、合并相邻同标签、保证首个边界在 0ms */
+function normalize(){
+  cuts.sort((a, b) => a.t - b.t);
+  if (!cuts.length) cuts = [{t:0, label:'plot', note:''}];
+  cuts[0].t = 0;
+
+  const uniq = [];
+  for (const c of cuts){
+    if (uniq.length && uniq[uniq.length - 1].t === c.t) uniq[uniq.length - 1] = c;
+    else uniq.push(c);
+  }
+  const out = [];
+  for (const c of uniq){
+    const prev = out[out.length - 1];
+    if (prev && prev.label === c.label){                 // 相邻同标签 -> 合并
+      if (c.note) prev.note = prev.note ? prev.note + ' / ' + c.note : c.note;
+      continue;
+    }
+    out.push(c);
+  }
+  cuts = out;
+  selT = cuts[nearestCutIdx(selT)].t;
+}
+
+function afterChange(){ normalize(); saveLocal(); renderAll(); }
+
+function setLabelAtPlayhead(label){
+  if (!hasVideo){ flash('先打开视频'); return; }
+  const t = nowMs();
+  const tol = Math.max(40, frameMs());
+  let hit = -1;
+  for (let i = 0; i < cuts.length; i++) if (Math.abs(cuts[i].t - t) <= tol) hit = i;
+  pushUndo();
+  if (hit >= 0){ cuts[hit].label = label; selT = cuts[hit].t; }
+  else { cuts.push({t:t, label:label, note:''}); selT = t; }
+  afterChange();
+  flash(LABELS[label].zh + ' @ ' + fmt(selT));
+}
+
+function deleteSelectedCut(){
+  const i = nearestCutIdx(selT);
+  if (i <= 0){ flash('0ms 的起始边界不可删除（可改它的标签）'); return; }
+  pushUndo();
+  const t = cuts[i].t;
+  cuts.splice(i, 1);
+  selT = cuts[Math.max(0, i - 1)].t;
+  afterChange();
+  flash('已删除边界 ' + fmt(t));
+}
+
+function nudgeSelected(delta){
+  const i = nearestCutIdx(selT);
+  if (i <= 0){ flash('0ms 的起始边界不可移动'); return; }
+  const lo = cuts[i - 1].t + 1;
+  const hi = (i + 1 < cuts.length ? cuts[i + 1].t : durationMs) - 1;
+  if (lo > hi){ flash('相邻边界太近，无法移动'); return; }
+  pushUndo();
+  cuts[i].t = Math.round(clamp(cuts[i].t + delta, lo, hi));
+  selT = cuts[i].t;
+  seekTo(selT);
+  afterChange();
+}
+
+/* ---------------- 播放控制 ---------------- */
+function seekTo(ms){ if (hasVideo) vid.currentTime = clamp(ms, 0, durationMs) / 1000; }
+function step(nFrames){ vid.pause(); seekTo(nowMs() + nFrames * frameMs()); }
+function nudgePlayhead(ms){ seekTo(nowMs() + ms); }
+function togglePlay(){ if (!hasVideo) return; vid.paused ? vid.play() : vid.pause(); }
+function gotoCut(dir){
+  const t = nowMs();
+  let target = null;
+  if (dir > 0){ for (const c of cuts) if (c.t > t + 2){ target = c.t; break; } }
+  else { for (let i = cuts.length - 1; i >= 0; i--) if (cuts[i].t < t - 2){ target = cuts[i].t; break; } }
+  if (target === null){ flash(dir > 0 ? '已是最后一个边界' : '已是第一个边界'); return; }
+  selT = target; seekTo(target); renderAll();
+}
+const RATES = [0.5, 1, 1.25, 1.5, 2, 3, 4];
+function bumpRate(dir){
+  let i = RATES.indexOf(vid.playbackRate);
+  if (i < 0) i = 1;
+  i = clamp(i + dir, 0, RATES.length - 1);
+  vid.playbackRate = RATES[i];
+  $('selRate').value = String(RATES[i]);
+  flash(RATES[i] + 'x');
+}
+
+/* ---------------- 统计 ---------------- */
+function computeStats(){
+  const per = {}; ORDER.forEach(l => per[l] = 0);
+  const shortIdx = [];
+  for (let i = 0; i < cuts.length; i++){
+    const d = segEnd(i) - cuts[i].t;
+    per[cuts[i].label] += d;
+    if (d < MIN_SEG_MS) shortIdx.push(i);
+  }
+  const bins = [];
+  for (let i = 0; i < cuts.length; i++){
+    const b = BIN[cuts[i].label];
+    if (b) bins.push(b);
+  }
+  let trans = 0;
+  for (let i = 1; i < bins.length; i++) if (bins[i] !== bins[i - 1]) trans++;
+  return {per, shortIdx, trans, nseg: cuts.length};
+}
+
+/* ---------------- 渲染 ---------------- */
+function setupCanvas(cv){
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = parseInt(cv.getAttribute('height'), 10);
+  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)){
+    cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  }
+  cv.style.height = h + 'px';
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  return {ctx, w, h};
+}
+
+function drawStrip(){
+  const cv = $('cStrip');
+  const {ctx, w, h} = setupCanvas(cv);
+  const barTop = 16, barH = h - 16 - 12;
+  ctx.fillStyle = '#0f1318'; ctx.fillRect(0, barTop, w, barH);
+  if (!durationMs) return;
+  const X = t => t / durationMs * w;
+
+  for (let i = 0; i < cuts.length; i++){
+    const x0 = X(cuts[i].t), x1 = X(segEnd(i));
+    ctx.fillStyle = LABELS[cuts[i].label].color;
+    ctx.fillRect(x0, barTop, Math.max(0.6, x1 - x0), barH);
+  }
+  // 分钟刻度
+  ctx.font = '10px ui-monospace,monospace'; ctx.textBaseline = 'top';
+  const stepMs = durationMs > 40 * 60000 ? 300000 : (durationMs > 12 * 60000 ? 120000 : 60000);
+  for (let t = 0; t <= durationMs; t += stepMs){
+    const x = X(t);
+    ctx.strokeStyle = 'rgba(255,255,255,.22)'; ctx.beginPath();
+    ctx.moveTo(x + .5, barTop); ctx.lineTo(x + .5, barTop + 5); ctx.stroke();
+    ctx.fillStyle = '#8e9bab'; ctx.fillText(fmtShort(t), Math.min(x + 3, w - 26), 2);
+  }
+  // 边界
+  for (let i = 1; i < cuts.length; i++){
+    const x = X(cuts[i].t);
+    ctx.strokeStyle = cuts[i].t === selT ? '#ffd166' : 'rgba(255,255,255,.75)';
+    ctx.lineWidth = cuts[i].t === selT ? 2 : 1;
+    ctx.beginPath(); ctx.moveTo(x, barTop); ctx.lineTo(x, barTop + barH); ctx.stroke();
+  }
+  ctx.lineWidth = 1;
+  // 短段标红
+  for (let i = 0; i < cuts.length; i++){
+    if (segEnd(i) - cuts[i].t >= MIN_SEG_MS) continue;
+    const x = X(cuts[i].t);
+    ctx.fillStyle = '#e5534b';
+    ctx.fillRect(Math.max(0, x - 1.5), barTop + barH, 3, 4);
+  }
+  // 播放头
+  const px = X(nowMs());
+  ctx.strokeStyle = '#ff5c5c'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(px, barTop - 3); ctx.lineTo(px, barTop + barH + 3); ctx.stroke();
+  ctx.lineWidth = 1;
+}
+
+function drawZoom(){
+  const cv = $('cZoom');
+  const {ctx, w, h} = setupCanvas(cv);
+  const half = +$('selZoom').value;
+  const c = nowMs(), lo = c - half, hi = c + half;
+  const barTop = 16, barH = h - 16 - 16;
+  ctx.fillStyle = '#0f1318'; ctx.fillRect(0, barTop, w, barH);
+  if (!durationMs) return;
+  const X = t => (t - lo) / (hi - lo) * w;
+
+  for (let i = 0; i < cuts.length; i++){
+    const a = cuts[i].t, b = segEnd(i);
+    if (b < lo || a > hi) continue;
+    const x0 = X(Math.max(a, lo)), x1 = X(Math.min(b, hi));
+    ctx.fillStyle = LABELS[cuts[i].label].color;
+    ctx.fillRect(x0, barTop, Math.max(0.6, x1 - x0), barH);
+    const lw = x1 - x0;
+    if (lw > 52){
+      ctx.fillStyle = 'rgba(255,255,255,.92)';
+      ctx.font = '11px sans-serif'; ctx.textBaseline = 'middle';
+      ctx.fillText(LABELS[cuts[i].label].zh, x0 + 5, barTop + barH / 2);
+    }
+  }
+  // 1s 网格
+  ctx.font = '10px ui-monospace,monospace'; ctx.textBaseline = 'top';
+  const gs = half <= 2000 ? 500 : (half <= 5000 ? 1000 : (half <= 10000 ? 2000 : 5000));
+  for (let t = Math.ceil(lo / gs) * gs; t <= hi; t += gs){
+    const x = X(t);
+    ctx.strokeStyle = 'rgba(255,255,255,.14)';
+    ctx.beginPath(); ctx.moveTo(x + .5, barTop); ctx.lineTo(x + .5, barTop + barH); ctx.stroke();
+    ctx.fillStyle = '#6f7d8d'; ctx.fillText(fmtShort(t), x + 2, 2);
+  }
+  // 边界 + 时间标签
+  for (let i = 1; i < cuts.length; i++){
+    const t = cuts[i].t;
+    if (t < lo || t > hi) continue;
+    const x = X(t), sel = t === selT;
+    ctx.strokeStyle = sel ? '#ffd166' : '#ffffff';
+    ctx.lineWidth = sel ? 3 : 1.5;
+    ctx.beginPath(); ctx.moveTo(x, barTop); ctx.lineTo(x, barTop + barH); ctx.stroke();
+    ctx.fillStyle = sel ? '#ffd166' : '#b9c4d0';
+    ctx.font = (sel ? 'bold ' : '') + '10px ui-monospace,monospace';
+    ctx.textBaseline = 'top';
+    ctx.fillText(fmt(t).slice(-9), clamp(x - 26, 0, w - 54), barTop + barH + 2);
+  }
+  ctx.lineWidth = 1;
+  // 播放头（居中）
+  const px = X(c);
+  ctx.strokeStyle = '#ff5c5c'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(px, barTop - 4); ctx.lineTo(px, barTop + barH + 4); ctx.stroke();
+  ctx.lineWidth = 1;
+}
+
+function renderStats(){
+  const st = computeStats();
+  const total = durationMs || 1;
+  let html = '';
+  for (const l of ORDER){
+    const ms = st.per[l], pct = ms / total * 100;
+    html += '<span><span class="swatch" style="display:inline-block;background:' + LABELS[l].color + '"></span> '
+          + l + '</span>'
+          + '<span class="bar"><i style="width:' + pct.toFixed(2) + '%;background:' + LABELS[l].color + '"></i></span>'
+          + '<span class="mono">' + pct.toFixed(1) + '% ' + fmtShort(ms) + '</span>';
+  }
+  html += '<span class="muted">段数</span><span class="mono">' + st.nseg + '</span><span></span>';
+  html += '<span class="muted">do↔noise 切换点</span><span class="mono">' + st.trans + '</span>'
+        + '<span class="muted">' + (st.trans >= 5 ? '足够' : '偏少') + '</span>';
+  html += '<span class="muted">片长</span><span class="mono">' + fmt(durationMs) + '</span><span></span>';
+  $('stats').innerHTML = html;
+
+  const W = [];
+  if (!hasVideo) W.push(['i', '先打开视频文件', null]);
+  for (const i of st.shortIdx)
+    W.push(['e', '第 ' + (i + 1) + ' 段 ' + (segEnd(i) - cuts[i].t) + 'ms < 1000ms，需合并或标 exclude', cuts[i].t]);
+  const exPct = st.per.exclude / total * 100;
+  if (exPct > 10) W.push(['w', 'exclude 占比 ' + exPct.toFixed(1) + '% > 10%，该片不适合进基准', null]);
+  const oaPct = st.per.other_adult / total * 100;
+  if (oaPct > 0) W.push(['i', 'other_adult 占比 ' + oaPct.toFixed(1) + '%（模型未覆盖类别，默认不计入准确率）', null]);
+  if (hasVideo && st.trans < 5)
+    W.push(['w', 'do↔noise 切换点仅 ' + st.trans + ' 个，对延迟指标贡献太小（规范要求 ≥5）', null]);
+  if (hasVideo && cuts.length === 1) W.push(['w', '全片只有 1 段，还没开始标注', null]);
+  if (!meta.annotator) W.push(['w', 'annotator 未填', null]);
+  if (!meta.video_id) W.push(['w', 'video_id 未填', null]);
+  if (!(meta.frame_rate > 0)) W.push(['e', '帧率无效', null]);
+  if (!W.length) W.push(['ok', '✓ 自检全部通过，可以导出', null]);
+
+  const ul = $('warns');
+  ul.innerHTML = '';
+  for (const [cls, msg, t] of W){
+    const li = document.createElement('li');
+    li.className = cls; li.textContent = msg;
+    if (t !== null && t !== undefined) li.onclick = () => { selT = t; seekTo(t); renderAll(); };
+    else li.style.cursor = 'default';
+    ul.appendChild(li);
+  }
+}
+
+function renderSegs(){
+  const tb = $('segsBody');
+  tb.innerHTML = '';
+  const cur = segIndexAt(nowMs());
+  for (let i = 0; i < cuts.length; i++){
+    const d = segEnd(i) - cuts[i].t;
+    const tr = document.createElement('tr');
+    tr.dataset.i = i;
+    if (i === cur) tr.className = 'cur';
+    if (d < MIN_SEG_MS) tr.className = (tr.className + ' bad').trim();
+
+    const opts = ORDER.map(l =>
+      '<option value="' + l + '"' + (l === cuts[i].label ? ' selected' : '') + '>' + l + ' ' + LABELS[l].zh + '</option>'
+    ).join('');
+    tr.innerHTML =
+      '<td class="muted">' + (i + 1) + '</td>' +
+      '<td class="mono" style="cursor:pointer;color:#4c9aff" data-go="' + cuts[i].t + '">' + fmt(cuts[i].t).slice(0, 9) + '</td>' +
+      '<td class="mono muted">' + fmt(segEnd(i)).slice(0, 9) + '</td>' +
+      '<td class="mono' + (d < MIN_SEG_MS ? '" style="color:#e5534b' : ' muted') + '">' + (d / 1000).toFixed(2) + 's</td>' +
+      '<td><select data-lab="' + i + '">' + opts + '</select></td>' +
+      '<td><input type="text" data-note="' + i + '" value="" placeholder="—"></td>' +
+      '<td>' + (i > 0 ? '<button class="x" data-del="' + i + '" title="删除此边界">×</button>' : '') + '</td>';
+    tb.appendChild(tr);
+    tr.querySelector('[data-note]').value = cuts[i].note || '';
+  }
+  $('segCount').textContent = '(' + cuts.length + ')';
+
+  tb.querySelectorAll('[data-go]').forEach(el => el.onclick = () => {
+    const t = +el.dataset.go; selT = t; seekTo(t); renderAll();
+  });
+  tb.querySelectorAll('[data-lab]').forEach(el => el.onchange = () => {
+    pushUndo(); cuts[+el.dataset.lab].label = el.value; afterChange();
+  });
+  tb.querySelectorAll('[data-note]').forEach(el => el.onchange = () => {
+    cuts[+el.dataset.note].note = el.value; saveLocal(); renderStats();
+  });
+  tb.querySelectorAll('[data-del]').forEach(el => el.onclick = () => {
+    selT = cuts[+el.dataset.del].t; deleteSelectedCut();
+  });
+
+  const row = tb.querySelector('tr.cur');
+  if (row) row.scrollIntoView({block:'nearest'});
+}
+
+function renderTransport(){
+  $('clock').textContent = fmt(nowMs());
+  $('dur').textContent = '/ ' + fmt(durationMs);
+  const i = segIndexAt(nowMs());
+  const L = LABELS[cuts[i].label];
+  $('curSwatch').style.background = L.color;
+  $('curInfo').textContent = cuts[i].label + ' · ' + L.motor + ' · '
+    + fmt(cuts[i].t).slice(0, 9) + ' → ' + fmt(segEnd(i)).slice(0, 9)
+    + ' (' + ((segEnd(i) - cuts[i].t) / 1000).toFixed(2) + 's)';
+}
+
+function renderAll(){
+  renderTransport(); drawStrip(); drawZoom(); renderStats(); renderSegs();
+  $('btnExport').disabled = !hasVideo;
+  $('btnClear').disabled = !hasVideo;
+}
+
+/* 播放中只重画便宜的部分 */
+let lastSegIdx = -1;
+function tick(){
+  if (hasVideo){
+    renderTransport(); drawStrip(); drawZoom();
+    const i = segIndexAt(nowMs());
+    if (i !== lastSegIdx){ lastSegIdx = i; renderSegs(); }
+  }
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+
+/* ---------------- 本地暂存 ---------------- */
+let saveTimer = null;
+function saveLocal(){
+  if (!saveKey) return;
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    try {
+      localStorage.setItem(saveKey, JSON.stringify({meta, durationMs, cuts, savedAt: Date.now()}));
+      $('saveState').textContent = '已暂存 ' + new Date().toLocaleTimeString();
+    } catch (e){ $('saveState').textContent = '暂存失败: ' + e.message; }
+  }, 250);
+}
+function loadLocal(){
+  if (!saveKey) return false;
+  let raw = null;
+  try { raw = localStorage.getItem(saveKey); } catch (e){ return false; }
+  if (!raw) return false;
+  let d;
+  try { d = JSON.parse(raw); } catch (e){ return false; }
+  if (!d || !Array.isArray(d.cuts) || d.cuts.length < 2) return false;
+  const when = d.savedAt ? new Date(d.savedAt).toLocaleString() : '未知时间';
+  if (!confirm('发现该视频在本浏览器的暂存标注（' + d.cuts.length + ' 段，' + when + '）。恢复吗？\n选取消则从空白开始。'))
+    return false;
+  cuts = d.cuts;
+  meta = Object.assign(meta, d.meta || {}, {file_name: meta.file_name, file_size: meta.file_size});
+  return true;
+}
+
+/* ---------------- CSV ---------------- */
+function csvCell(s){
+  s = String(s == null ? '' : s);
+  return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+function parseCsvLine(line){
+  const out = []; let cur = '', q = false;
+  for (let i = 0; i < line.length; i++){
+    const ch = line[i];
+    if (q){
+      if (ch === '"'){ if (line[i + 1] === '"'){ cur += '"'; i++; } else q = false; }
+      else cur += ch;
+    } else {
+      if (ch === ','){ out.push(cur); cur = ''; }
+      else if (ch === '"') q = true;
+      else cur += ch;
+    }
+  }
+  out.push(cur);
+  return out;
+}
+
+function exportCsv(){
+  const st = computeStats();
+  if (st.shortIdx.length && !confirm('还有 ' + st.shortIdx.length + ' 个短于 1000ms 的段（违反规范 §4）。仍要导出吗？'))
+    return;
+  const L = [];
+  L.push('# xcup-gt spec_version=' + SPEC_VERSION);
+  L.push('# video_id=' + meta.video_id);
+  L.push('# file_name=' + meta.file_name);
+  L.push('# file_size=' + meta.file_size);
+  L.push('# duration_ms=' + durationMs);
+  L.push('# frame_rate=' + meta.frame_rate);
+  L.push('# annotator=' + meta.annotator);
+  L.push('# split=' + meta.split);
+  L.push('# created_at=' + new Date().toISOString().slice(0, 10));
+  L.push('# segments=' + cuts.length + ' do_noise_transitions=' + st.trans);
+  L.push('start_ms,end_ms,label,note');
+  for (let i = 0; i < cuts.length; i++)
+    L.push([cuts[i].t, segEnd(i), cuts[i].label, csvCell(cuts[i].note)].join(','));
+
+  const blob = new Blob([L.join('\n') + '\n'], {type:'text/csv;charset=utf-8'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = (meta.video_id || 'gt') + '.csv';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  flash('已导出 ' + a.download);
+}
+
+function importCsv(text){
+  const lines = text.split(/\r?\n/);
+  const m = {};
+  const rows = [];
+  let seenHeader = false;
+  for (const raw of lines){
+    const line = raw.trim();
+    if (!line) continue;
+    if (line.startsWith('#')){
+      line.slice(1).trim().split(/\s+/).forEach(kv => {
+        const j = kv.indexOf('=');
+        if (j > 0) m[kv.slice(0, j)] = kv.slice(j + 1);
+      });
+      continue;
+    }
+    if (!seenHeader && /start_ms/.test(line)){ seenHeader = true; continue; }
+    const f = parseCsvLine(line);
+    if (f.length < 3) continue;
+    const s = parseInt(f[0], 10), e = parseInt(f[1], 10), lab = f[2].trim();
+    if (!isFinite(s) || !isFinite(e)) continue;
+    if (!LABELS[lab]){ alert('第 "' + line + '" 行标签 "' + lab + '" 不在规范内，导入中止'); return; }
+    rows.push({t:s, end:e, label:lab, note:(f[3] || '')});
+  }
+  if (!rows.length){ alert('没解析到任何数据行'); return; }
+  rows.sort((a, b) => a.t - b.t);
+  for (let i = 1; i < rows.length; i++)
+    if (rows[i].t !== rows[i - 1].end)
+      alert('警告：第 ' + i + ' 与 ' + (i + 1) + ' 段首尾不相接（' + rows[i - 1].end + ' vs ' + rows[i].t
+            + '），已按 start_ms 重建为无缝。');
+
+  pushUndo();
+  cuts = rows.map(r => ({t:r.t, label:r.label, note:r.note}));
+  const lastEnd = rows[rows.length - 1].end;
+  if (!hasVideo) durationMs = lastEnd;
+  else if (Math.abs(lastEnd - durationMs) > 1000)
+    alert('警告：CSV 的末段结束 ' + lastEnd + 'ms 与当前视频时长 ' + durationMs
+          + 'ms 相差 >1s，可能不是同一个文件。以视频时长为准。');
+  if (m.video_id) meta.video_id = m.video_id;
+  if (m.annotator) meta.annotator = m.annotator;
+  if (m.split) meta.split = m.split;
+  if (m.frame_rate && +m.frame_rate > 0) meta.frame_rate = +m.frame_rate;
+  syncMetaInputs();
+  afterChange();
+  flash('已导入 ' + cuts.length + ' 段');
+}
+
+/* ---------------- 打开视频 ---------------- */
+function openVideo(file){
+  if (!file) return;
+  if (vid.src) URL.revokeObjectURL(vid.src);
+  vid.src = URL.createObjectURL(file);
+  meta.file_name = file.name;
+  meta.file_size = file.size;
+  if (!meta.video_id) meta.video_id = file.name.replace(/\.[^.]+$/, '');
+  saveKey = 'xcup-gt::' + file.name + '::' + file.size;
+  cuts = [{t:0, label:'plot', note:''}];
+  undoStack = [];
+  selT = 0;
+
+  vid.onloadedmetadata = () => {
+    durationMs = Math.round(vid.duration * 1000);
+    hasVideo = true;
+    if (!isFinite(durationMs) || durationMs <= 0){
+      alert('读不到视频时长，浏览器可能不支持该编码（H.265/HEVC 常见）。\n'
+          + '先用 ffmpeg 转成 H.264：\nffmpeg -i in.mp4 -c:v libx264 -crf 20 -c:a aac out.mp4\n'
+          + '注意不要用 -ss/-t 裁剪，否则时间轴会偏移。');
+    }
+    loadLocal();
+    $('fileInfo').textContent = file.name + ' · ' + (file.size / 1048576).toFixed(1) + 'MB · ' + fmt(durationMs);
+    syncMetaInputs();
+    afterChange();
+    flash('已打开：' + file.name);
+  };
+  vid.onerror = () => {
+    alert('无法播放该视频。浏览器多半不支持其编码（H.265/HEVC、某些 MKV）。\n'
+        + '先转码：ffmpeg -i in.mp4 -c:v libx264 -crf 20 -c:a aac -movflags +faststart out.mp4\n'
+        + '（不要用 -ss/-t 裁剪，会让时间轴偏移导致真值失效）');
+  };
+}
+
+function syncMetaInputs(){
+  $('inVid').value = meta.video_id || '';
+  $('inAnnot').value = meta.annotator || '';
+  $('inSplit').value = meta.split || 'dev';
+  $('inFps').value = meta.frame_rate;
+}
+
+/* ---------------- 事件绑定 ---------------- */
+$('fVideo').onchange = e => openVideo(e.target.files[0]);
+$('fCsv').onchange = e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const r = new FileReader();
+  r.onload = () => importCsv(String(r.result));
+  r.readAsText(f, 'utf-8');
+  e.target.value = '';
+};
+$('btnExport').onclick = exportCsv;
+$('btnClear').onclick = () => {
+  if (!confirm('清空全部标注？（可用 Ctrl+Z 撤销一步）')) return;
+  pushUndo(); cuts = [{t:0, label:'plot', note:''}]; selT = 0; afterChange();
+};
+$('btnPlay').onclick = togglePlay;
+$('btnMute').onclick = () => { vid.muted = !vid.muted; $('btnMute').textContent = vid.muted ? '取消静音' : '静音'; };
+$('selRate').onchange = e => { vid.playbackRate = +e.target.value; };
+$('selZoom').onchange = () => drawZoom();
+$('inFps').onchange = e => { meta.frame_rate = +e.target.value || 30; saveLocal(); renderStats(); };
+$('inVid').onchange = e => { meta.video_id = e.target.value.trim(); saveLocal(); renderStats(); };
+$('inAnnot').onchange = e => { meta.annotator = e.target.value.trim(); saveLocal(); renderStats(); };
+$('inSplit').onchange = e => { meta.split = e.target.value; saveLocal(); };
+$('selRate').value = '1';
+
+/* 时间轴点击 / 拖动 */
+function bindScrub(cv, toTime){
+  let dragging = false;
+  const go = ev => {
+    const r = cv.getBoundingClientRect();
+    seekTo(toTime(clamp(ev.clientX - r.left, 0, r.width) / r.width));
+  };
+  cv.addEventListener('mousedown', ev => { dragging = true; go(ev); ev.preventDefault(); });
+  window.addEventListener('mousemove', ev => { if (dragging) go(ev); });
+  window.addEventListener('mouseup', () => { dragging = false; });
+}
+bindScrub($('cStrip'), f => f * durationMs);
+bindScrub($('cZoom'), f => {
+  const half = +$('selZoom').value;
+  return nowMs() - half + f * 2 * half;
+});
+
+/* 标签按钮 */
+(() => {
+  const bar = $('labelBar');
+  for (const l of ORDER){
+    const b = document.createElement('button');
+    b.className = 'lbtn';
+    b.innerHTML = '<kbd>' + LABELS[l].k + '</kbd><span class="swatch" style="background:' + LABELS[l].color
+                + '"></span>' + l + ' <span class="muted">' + LABELS[l].zh + ' / ' + LABELS[l].motor + '</span>';
+    b.onclick = () => setLabelAtPlayhead(l);
+    bar.appendChild(b);
+  }
+})();
+
+/* 键盘 */
+document.addEventListener('keydown', e => {
+  const tag = (e.target.tagName || '').toUpperCase();
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'){
+    if (e.key === 'Escape' || e.key === 'Enter') e.target.blur();
+    return;
+  }
+  const mod = e.ctrlKey || e.metaKey;
+
+  if (mod && e.key.toLowerCase() === 'z'){ e.preventDefault(); undo(); return; }
+  if (mod && e.key.toLowerCase() === 's'){ e.preventDefault(); exportCsv(); return; }
+  if (mod) return;
+
+  for (const l of ORDER){
+    if (e.key === LABELS[l].k){ e.preventDefault(); setLabelAtPlayhead(l); return; }
+  }
+  switch (e.key){
+    case ' ': case 'k': case 'K': e.preventDefault(); togglePlay(); break;
+    case ',': e.preventDefault(); step(-1); break;
+    case '.': e.preventDefault(); step(1); break;
+    case '<': e.preventDefault(); nudgeSelected(-frameMs()); break;
+    case '>': e.preventDefault(); nudgeSelected(frameMs()); break;
+    case 'ArrowLeft':  e.preventDefault(); nudgePlayhead(e.shiftKey ? -5000 : -500); break;
+    case 'ArrowRight': e.preventDefault(); nudgePlayhead(e.shiftKey ?  5000 :  500); break;
+    case '[': e.preventDefault(); gotoCut(-1); break;
+    case ']': e.preventDefault(); gotoCut(1); break;
+    case 'Backspace': case 'Delete': e.preventDefault(); deleteSelectedCut(); break;
+    case 'j': case 'J': e.preventDefault(); bumpRate(-1); break;
+    case 'l': case 'L': e.preventDefault(); bumpRate(1); break;
+    case 'm': case 'M': e.preventDefault(); $('btnMute').click(); break;
+    case 'Home': e.preventDefault(); seekTo(0); break;
+    case 'n': case 'N': {
+      e.preventDefault();
+      const el = document.querySelector('tr.cur [data-note]');
+      if (el){ el.focus(); el.select(); }
+      break;
+    }
+    case 'g': case 'G': {
+      e.preventDefault();
+      const v = prompt('跳到时间（mm:ss.mmm 或毫秒）', fmt(nowMs()));
+      if (v === null) break;
+      const t = parseTime(v);
+      if (t === null) flash('时间格式无法识别'); else seekTo(t);
+      break;
+    }
+  }
+});
+
+/* 拖拽打开 */
+const drop = $('drop');
+window.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('on'); });
+window.addEventListener('dragleave', e => { if (e.clientX === 0 && e.clientY === 0) drop.classList.remove('on'); });
+window.addEventListener('drop', e => {
+  e.preventDefault(); drop.classList.remove('on');
+  const f = e.dataTransfer.files[0];
+  if (!f) return;
+  if (/\.csv$/i.test(f.name)){
+    const r = new FileReader();
+    r.onload = () => importCsv(String(r.result));
+    r.readAsText(f, 'utf-8');
+  } else openVideo(f);
+});
+
+window.addEventListener('beforeunload', e => {
+  if (hasVideo && cuts.length > 1){ e.preventDefault(); e.returnValue = ''; }
+});
+new ResizeObserver(() => { drawStrip(); drawZoom(); }).observe(document.querySelector('.left'));
+
+syncMetaInputs();
+renderAll();
+</script>
+</body>
+</html>
