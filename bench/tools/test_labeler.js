@@ -23,20 +23,25 @@ function fakeCtx(){
           fillStyle:'', strokeStyle:'', lineWidth:1, font:'', textBaseline:''};
 }
 function makeEl(id){
+  const attrs = {height:'62', width:'300'};
   const el = {
     id, style:{}, dataset:{}, value:'', textContent:'', innerHTML:'', checked:false,
     classList:{add:noop, remove:noop, contains:()=>false, toggle:noop},
     className:'',
     addEventListener:noop, removeEventListener:noop, appendChild:noop, click:noop,
     focus:noop, select:noop, blur:noop, scrollIntoView:noop, setAttribute:noop,
-    getAttribute:n => n === 'height' ? '62' : null,
+    getAttribute:n => (n in attrs ? attrs[n] : null),
+    contains:()=>false,
     getContext:fakeCtx, getBoundingClientRect:()=>({left:0,top:0,width:800,height:62}),
-    clientWidth:800, clientHeight:62, width:800, height:62,
+    clientWidth:800, clientHeight:62,
     querySelector:()=>makeEl('q'), querySelectorAll:()=>[],
     // video bits
     currentTime:0, duration:0, paused:true, playbackRate:1, muted:false, src:'',
     play:noop, pause:noop
   };
+  // canvas.width / canvas.height 反射到同名内容属性（HTML 规范行为）
+  Object.defineProperty(el, 'width',  {get:()=>+attrs.width,  set:v=>{ attrs.width  = String(v); }});
+  Object.defineProperty(el, 'height', {get:()=>+attrs.height, set:v=>{ attrs.height = String(v); }});
   return el;
 }
 const els = {};
@@ -75,7 +80,7 @@ globalThis.__api = {
   get meta(){ return meta; },
   get hasVideo(){ return hasVideo; }, set hasVideo(v){ hasVideo = v; },
   get vid(){ return vid; },
-  normalize, segEnd, segIndexAt, nearestCutIdx, computeStats,
+  normalize, segEnd, segIndexAt, nearestCutIdx, computeStats, setupCanvas, drawStrip, drawZoom,
   csvCell, parseCsvLine, exportCsv, importCsv,
   setLabelAtPlayhead, deleteSelectedCut, nudgeSelected, undo, nowMs, fmt, parseTime,
   get selT(){ return selT; }, set selT(v){ selT = v; }
@@ -209,6 +214,30 @@ invariants('导入后');
 ctx.__alerts = [];
 A.importCsv('start_ms,end_ms,label,note\n0,1000,bogus_label,\n');
 ok('非法标签被拒绝并提示', ctx.__alerts.length === 1 && /bogus_label/.test(ctx.__alerts[0]), ctx.__alerts);
+
+console.log('\n== 画布尺寸稳定性（dpr≠1 回归）==');
+// 曾经的 bug：setupCanvas 把 dpr 放大后的位图高度写进 canvas.height（会反射到 height
+// 内容属性），下一帧又读回来当 CSS 高度，于是每帧再乘一次 dpr —— 高度指数级膨胀，挤压
+// 视频区、触发 ResizeObserver、超出画布上限被清空，表现就是「一闪一闪」。
+for (const dpr of [1, 1.25, 1.5, 2, 3]){
+  ctx.devicePixelRatio = dpr;
+  const cv = ctx.document.getElementById('cStrip');
+  A.drawStrip();
+  const h1 = cv.height, w1 = cv.width;
+  for (let i = 0; i < 30; i++) A.drawStrip();
+  ok('dpr=' + dpr + ' 连画 31 帧后位图高度不膨胀', cv.height === h1, {first:h1, after:cv.height});
+  ok('dpr=' + dpr + ' 位图高度 == 62*dpr', cv.height === Math.round(62 * dpr), cv.height);
+  ok('dpr=' + dpr + ' 位图宽度稳定 == 800*dpr', cv.width === w1 && w1 === Math.round(800 * dpr), {w1, now:cv.width});
+  ok('dpr=' + dpr + ' JS 不写 style.height（显示高度交给 CSS）', cv.style.height === undefined, cv.style.height);
+}
+{
+  ctx.devicePixelRatio = 2;
+  const cz = ctx.document.getElementById('cZoom');
+  A.drawZoom(); const h1 = cz.height;
+  for (let i = 0; i < 30; i++) A.drawZoom();
+  ok('cZoom 位图高度稳定且 == 76*2', cz.height === h1 && cz.height === 152, cz.height);
+}
+ctx.devicePixelRatio = 1;
 
 console.log('\n== 时间格式 ==');
 eq('fmt', A.fmt(61234), '01:01.234');

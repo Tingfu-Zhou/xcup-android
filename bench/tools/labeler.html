@@ -50,6 +50,21 @@
   }
   .swatch{width:12px; height:12px; border-radius:2px; flex:0 0 auto}
   canvas{display:block; width:100%; border:1px solid var(--line); border-radius:4px; cursor:crosshair}
+  /* 画布的显示高度必须由 CSS 固定。绝不能靠 height 属性决定：canvas.height 是位图
+     高度且会反射到 height 内容属性，若再读回来当 CSS 高度用，就会每帧被 dpr 放大一次。 */
+  #cStrip{height:62px}
+  #cZoom{height:76px}
+  #banner{
+    display:none; align-items:flex-start; gap:10px; padding:8px 12px; font-size:12px;
+    border-bottom:1px solid var(--line); background:#2b2218; color:#f0cfa8; flex:0 0 auto;
+  }
+  #banner.on{display:flex}
+  #banner.err{background:#2e1b1b; color:#f3b7b3}
+  #banner pre{
+    margin:4px 0 0; padding:6px 8px; background:#0d1117; border-radius:3px; overflow-x:auto;
+    font-size:11px; color:#c8d3de; user-select:all;
+  }
+  #banner .close{background:none; border:none; color:inherit; cursor:pointer; font-size:16px; line-height:1}
   .stripLabel{font-size:11px; color:var(--muted); margin-bottom:2px}
   .labelBar{display:flex; gap:6px; flex-wrap:wrap}
   .lbtn{
@@ -123,6 +138,8 @@
   <span class="muted" id="saveState"></span>
   <span class="muted" id="fileInfo">未打开视频</span>
 </header>
+
+<div id="banner"><div id="bannerBody" style="flex:1"></div><button class="close" id="bannerClose" title="关闭">×</button></div>
 
 <main>
   <section class="left">
@@ -244,6 +261,13 @@ let selT = 0;                                 // 选中的边界时间
 let undoStack = [];
 let saveKey = null;
 let hasVideo = false;
+let currentFile = null;      // 保留 File 引用，播放器瞬时故障时用于重建 blob URL 恢复
+let currentUrl = null;
+let metaLoaded = false;      // 已成功读到 metadata（据此区分「真打不开」和「播放中瞬时故障」）
+let recovering = false;
+let lastGoodMs = 0;          // 最近一次确认正常的播放位置，用于恢复后回跳
+let mediaErrCount = 0;
+let segsDirty = false;
 
 /* ---------------- 小工具 ---------------- */
 const $ = id => document.getElementById(id);
@@ -277,6 +301,19 @@ function flash(msg){
   clearTimeout(flashTimer);
   flashTimer = setTimeout(() => el.classList.remove('on'), 1600);
 }
+
+/* 常驻横幅：用于「需要你处理」的信息。标注过程中不再用 alert 打断。 */
+function showBanner(kind, html){
+  const b = $('banner');
+  $('bannerBody').innerHTML = html;
+  b.className = 'on' + (kind === 'err' ? ' err' : '');
+}
+function hideBanner(){ $('banner').className = ''; }
+
+const FFMPEG_HINT =
+  '<pre>ffmpeg -i in.mp4 -c:v libx264 -crf 20 -c:a aac -movflags +faststart out.mp4</pre>'
+  + '<div style="margin-top:4px">务必不要加 <code>-ss</code> / <code>-t</code> 裁剪：时间轴一偏移，真值全部失效。'
+  + '转码后请用转码文件重新标注，感知 dump 也要用同一份。</div>';
 
 function segEnd(i){ return i + 1 < cuts.length ? cuts[i + 1].t : durationMs; }
 function segIndexAt(t){
@@ -370,7 +407,22 @@ function nudgeSelected(delta){
 }
 
 /* ---------------- 播放控制 ---------------- */
-function seekTo(ms){ if (hasVideo) vid.currentTime = clamp(ms, 0, durationMs) / 1000; }
+/* 拖动时间轴会每个 mousemove 发一次 seek。对 blob 源的长视频连续猛 seek 容易把
+   Chrome 的解码管线打出 MEDIA_ERR_DECODE，所以这里合并：正在 seek 就只记最新目标，
+   等 seeked 再补发。 */
+let seekPending = null;
+function seekTo(ms){
+  if (!hasVideo) return;
+  const t = clamp(ms, 0, Math.max(0, durationMs)) / 1000;
+  if (vid.seeking){ seekPending = t; return; }
+  seekPending = null;
+  try { vid.currentTime = t; } catch (e){ /* 忽略：下一次 seek 会纠正 */ }
+}
+vid.addEventListener('seeked', () => {
+  if (seekPending === null) return;
+  const t = seekPending; seekPending = null;
+  try { vid.currentTime = t; } catch (e){}
+});
 function step(nFrames){ vid.pause(); seekTo(nowMs() + nFrames * frameMs()); }
 function nudgePlayhead(ms){ seekTo(nowMs() + ms); }
 function togglePlay(){ if (!hasVideo) return; vid.paused ? vid.play() : vid.pause(); }
@@ -412,13 +464,16 @@ function computeStats(){
 }
 
 /* ---------------- 渲染 ---------------- */
+/* CSS 里写死的显示高度，必须与 #cStrip / #cZoom 的 height 规则一致。 */
+const CSS_H = {cStrip:62, cZoom:76};
+
 function setupCanvas(cv){
   const dpr = window.devicePixelRatio || 1;
-  const w = cv.clientWidth, h = parseInt(cv.getAttribute('height'), 10);
-  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)){
-    cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
-  }
-  cv.style.height = h + 'px';
+  const w = Math.max(1, Math.round(cv.clientWidth));
+  const h = CSS_H[cv.id] || 62;
+  const bw = Math.round(w * dpr), bh = Math.round(h * dpr);
+  if (cv.width !== bw) cv.width = bw;
+  if (cv.height !== bh) cv.height = bh;
   const ctx = cv.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, w, h);
@@ -568,6 +623,10 @@ function renderStats(){
 
 function renderSegs(){
   const tb = $('segsBody');
+  // 正在编辑备注/标签时不要重建表格，否则光标和未提交的输入会被吞掉。
+  const ae = document.activeElement;
+  if (ae && tb.contains && tb.contains(ae)){ segsDirty = true; return; }
+  segsDirty = false;
   tb.innerHTML = '';
   const cur = segIndexAt(nowMs());
   for (let i = 0; i < cuts.length; i++){
@@ -622,18 +681,26 @@ function renderTransport(){
 }
 
 function renderAll(){
+  lastDrawKey = '';   // 让下一帧一定重绘（标签/颜色可能变了）
   renderTransport(); drawStrip(); drawZoom(); renderStats(); renderSegs();
   $('btnExport').disabled = !hasVideo;
   $('btnClear').disabled = !hasVideo;
 }
 
-/* 播放中只重画便宜的部分 */
-let lastSegIdx = -1;
+/* 播放中只重画便宜的部分；画面没变化就整帧跳过 */
+let lastSegIdx = -1, lastDrawKey = '';
+const zoomHalf = () => +$('selZoom').value || 5000;
 function tick(){
   if (hasVideo){
-    renderTransport(); drawStrip(); drawZoom();
+    if (!vid.seeking && !vid.error) lastGoodMs = nowMs();
+    const key = nowMs() + '|' + selT + '|' + zoomHalf() + '|' + Math.round($('cStrip').clientWidth);
+    if (key !== lastDrawKey){
+      lastDrawKey = key;
+      renderTransport(); drawStrip(); drawZoom();
+    }
     const i = segIndexAt(nowMs());
     if (i !== lastSegIdx){ lastSegIdx = i; renderSegs(); }
+    else if (segsDirty) renderSegs();
   }
   requestAnimationFrame(tick);
 }
@@ -742,10 +809,14 @@ function importCsv(text){
   }
   if (!rows.length){ alert('没解析到任何数据行'); return; }
   rows.sort((a, b) => a.t - b.t);
+  const gaps = [];
   for (let i = 1; i < rows.length; i++)
     if (rows[i].t !== rows[i - 1].end)
-      alert('警告：第 ' + i + ' 与 ' + (i + 1) + ' 段首尾不相接（' + rows[i - 1].end + ' vs ' + rows[i].t
-            + '），已按 start_ms 重建为无缝。');
+      gaps.push('第 ' + i + '/' + (i + 1) + ' 段：' + rows[i - 1].end + ' vs ' + rows[i].t);
+  if (gaps.length)
+    showBanner('warn', '导入的 CSV 有 <b>' + gaps.length + '</b> 处首尾不相接（违反规范 §1），'
+      + '已按 start_ms 重建为无缝：<pre>' + gaps.slice(0, 12).join('\n')
+      + (gaps.length > 12 ? '\n… 其余 ' + (gaps.length - 12) + ' 处省略' : '') + '</pre>');
 
   pushUndo();
   cuts = rows.map(r => ({t:r.t, label:r.label, note:r.note}));
@@ -766,8 +837,13 @@ function importCsv(text){
 /* ---------------- 打开视频 ---------------- */
 function openVideo(file){
   if (!file) return;
-  if (vid.src) URL.revokeObjectURL(vid.src);
-  vid.src = URL.createObjectURL(file);
+  hideBanner();
+  currentFile = file;
+  metaLoaded = false; recovering = false; hasVideo = false;
+  lastGoodMs = 0; mediaErrCount = 0; seekPending = null;
+  if (currentUrl) URL.revokeObjectURL(currentUrl);
+  currentUrl = URL.createObjectURL(file);
+  vid.src = currentUrl;
   meta.file_name = file.name;
   meta.file_size = file.size;
   if (!meta.video_id) meta.video_id = file.name.replace(/\.[^.]+$/, '');
@@ -775,27 +851,70 @@ function openVideo(file){
   cuts = [{t:0, label:'plot', note:''}];
   undoStack = [];
   selT = 0;
-
-  vid.onloadedmetadata = () => {
-    durationMs = Math.round(vid.duration * 1000);
-    hasVideo = true;
-    if (!isFinite(durationMs) || durationMs <= 0){
-      alert('读不到视频时长，浏览器可能不支持该编码（H.265/HEVC 常见）。\n'
-          + '先用 ffmpeg 转成 H.264：\nffmpeg -i in.mp4 -c:v libx264 -crf 20 -c:a aac out.mp4\n'
-          + '注意不要用 -ss/-t 裁剪，否则时间轴会偏移。');
-    }
-    loadLocal();
-    $('fileInfo').textContent = file.name + ' · ' + (file.size / 1048576).toFixed(1) + 'MB · ' + fmt(durationMs);
-    syncMetaInputs();
-    afterChange();
-    flash('已打开：' + file.name);
-  };
-  vid.onerror = () => {
-    alert('无法播放该视频。浏览器多半不支持其编码（H.265/HEVC、某些 MKV）。\n'
-        + '先转码：ffmpeg -i in.mp4 -c:v libx264 -crf 20 -c:a aac -movflags +faststart out.mp4\n'
-        + '（不要用 -ss/-t 裁剪，会让时间轴偏移导致真值失效）');
-  };
 }
+
+vid.addEventListener('loadedmetadata', () => {
+  durationMs = Math.round(vid.duration * 1000);
+  hasVideo = true;
+  const firstLoad = !metaLoaded;
+  metaLoaded = true;
+
+  if (recovering){                      // 故障恢复后的重新加载：回跳，不要重跑打开流程
+    recovering = false;
+    seekTo(lastGoodMs);
+    flash('已恢复到 ' + fmt(lastGoodMs));
+    renderAll();
+    return;
+  }
+  if (!isFinite(durationMs) || durationMs <= 0){
+    showBanner('err', '<b>读不到视频时长</b>，浏览器可能不支持该编码（H.265/HEVC 常见）。先转码成 H.264：'
+      + FFMPEG_HINT);
+  }
+  if (firstLoad) loadLocal();
+  $('fileInfo').textContent = (currentFile ? currentFile.name : '') + ' · '
+    + ((currentFile ? currentFile.size : 0) / 1048576).toFixed(1) + 'MB · ' + fmt(durationMs);
+  syncMetaInputs();
+  afterChange();
+  flash('已打开：' + (currentFile ? currentFile.name : ''));
+});
+
+/* 媒体错误分两种情况处理：
+   - metadata 都没读到 -> 这个文件浏览器确实打不开（编码不支持），给出转码提示
+   - 已经能播了之后才报错 -> 播放中的瞬时故障（连续 seek 把解码管线打崩最常见）。
+     此时绝不能弹 alert 打断标注，而是就地重建 blob URL 并回跳到出错前的位置。 */
+vid.addEventListener('error', () => {
+  const err = vid.error;
+  const code = err ? err.code : 0;
+  const NAME = {1:'ABORTED', 2:'NETWORK', 3:'DECODE', 4:'SRC_NOT_SUPPORTED'};
+  if (code === 1) return;               // 切换文件时的 abort，忽略
+  if (!metaLoaded){
+    showBanner('err', '<b>无法打开该视频</b>（' + (NAME[code] || code)
+      + '）。浏览器多半不支持其编码（H.265/HEVC、某些 MKV）。先转码：' + FFMPEG_HINT);
+    return;
+  }
+  mediaErrCount++;
+  if (mediaErrCount > 5){          // 别陷入 报错->重载->报错 的死循环
+    showBanner('err', '播放已连续出错 <b>' + mediaErrCount + '</b> 次，停止自动恢复。'
+      + '请先<b>导出 CSV</b> 保住当前标注，然后把视频转码后重新标：' + FFMPEG_HINT);
+    return;
+  }
+  if (!currentFile){
+    showBanner('err', '播放器出错且无法自动恢复，请重新打开视频文件。'
+      + '<b>标注不会丢</b>（已存在本地暂存，重新打开同一文件会提示恢复），也可以先导出 CSV。');
+    return;
+  }
+  flash('播放器瞬时故障（' + (NAME[code] || code) + '），正在恢复…');
+  recovering = true;
+  metaLoaded = false;
+  URL.revokeObjectURL(currentUrl);
+  currentUrl = URL.createObjectURL(currentFile);
+  vid.src = currentUrl;
+  vid.load();
+  if (mediaErrCount >= 3){
+    showBanner('warn', '本次已发生 <b>' + mediaErrCount + '</b> 次播放故障并自动恢复。'
+      + '若总在同一位置复现，说明该文件的编码/封装对浏览器不友好，建议先转码再标：' + FFMPEG_HINT);
+  }
+});
 
 function syncMetaInputs(){
   $('inVid').value = meta.video_id || '';
@@ -819,10 +938,11 @@ $('btnClear').onclick = () => {
   if (!confirm('清空全部标注？（可用 Ctrl+Z 撤销一步）')) return;
   pushUndo(); cuts = [{t:0, label:'plot', note:''}]; selT = 0; afterChange();
 };
+$('bannerClose').onclick = hideBanner;
 $('btnPlay').onclick = togglePlay;
 $('btnMute').onclick = () => { vid.muted = !vid.muted; $('btnMute').textContent = vid.muted ? '取消静音' : '静音'; };
 $('selRate').onchange = e => { vid.playbackRate = +e.target.value; };
-$('selZoom').onchange = () => drawZoom();
+$('selZoom').onchange = () => { lastDrawKey = ''; };
 $('inFps').onchange = e => { meta.frame_rate = +e.target.value || 30; saveLocal(); renderStats(); };
 $('inVid').onchange = e => { meta.video_id = e.target.value.trim(); saveLocal(); renderStats(); };
 $('inAnnot').onchange = e => { meta.annotator = e.target.value.trim(); saveLocal(); renderStats(); };
@@ -925,7 +1045,8 @@ window.addEventListener('drop', e => {
 window.addEventListener('beforeunload', e => {
   if (hasVideo && cuts.length > 1){ e.preventDefault(); e.returnValue = ''; }
 });
-new ResizeObserver(() => { drawStrip(); drawZoom(); }).observe(document.querySelector('.left'));
+/* 只把画布标脏，真正的重绘统一交给 tick，避免在 observer 回调里改布局造成反馈循环。 */
+new ResizeObserver(() => { lastDrawKey = ''; }).observe(document.querySelector('.left'));
 
 syncMetaInputs();
 renderAll();
