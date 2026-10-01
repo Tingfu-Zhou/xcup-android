@@ -20,6 +20,7 @@ import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedList;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -288,6 +289,10 @@ public class VideoProcessActivity extends AppCompatActivity {
             return;
         }
 
+        // [评测] 把每个融合 tick dump 成 CSV，供 bench/tools/metrics.py 算指标。
+        // debug 包自动开启；只读取不干预，关闭时全是空操作。
+        BenchLogger.get().init(this, videoUri, benchParamsLine());
+
         // 通用：音频推理 + PCM 缓冲。两种模式都需要。
         Log.d(TAG, "onCreate: 初始化 AudioInferenceHelper + PcmCircularBuffer...");
         audioHelper = new AudioInferenceHelper(this);
@@ -554,6 +559,9 @@ public class VideoProcessActivity extends AppCompatActivity {
             }
         }
 
+        // [评测] 记原始概率，便于事后重扫阈值
+        BenchLogger.get().setVideoProbs(result == null ? null : result.probs);
+
         // 原子更新结果
         latestVideoAction.set(actionClass);
         latestVideoConfidence.set(confidence);
@@ -657,6 +665,9 @@ public class VideoProcessActivity extends AppCompatActivity {
                                                 pDo, pNoise));
                                     }
                                 }
+
+                                // [评测] 记原始概率
+                                BenchLogger.get().setAudioProbs(result.probs);
 
                                 // 原子更新结果
                                 latestAudioAction.set(action);
@@ -773,6 +784,8 @@ public class VideoProcessActivity extends AppCompatActivity {
 
                 // 7.19 修改：使用平滑融合替代原有的简单融合逻辑
                 String finalAction = smoothedFusion(videoAction, audioAction, videoConf, audioConf);
+                // [评测] 留存平滑级输出，dump 时才能把融合延迟和仲裁延迟分开看
+                final String smoothedAction = finalAction;
 
                 // [启动仲裁] 音视频强冲突时短暂延迟启动（有上限）；音频足够自信则直接启动
                 finalAction = applyDoStartGate(finalAction, videoAction, videoConf, audioAction, audioConf);
@@ -789,6 +802,19 @@ public class VideoProcessActivity extends AppCompatActivity {
                     } else {
                         Log.d(TAG, "[融合] BLE暂停中，跳过动作: " + finalAction);
                     }
+                }
+
+                // [评测] dump 本 tick。必须放在 updateBluetoothState 之后，才能带上本轮
+                // 是否真的发了蓝牙指令——切换延迟就是靠这一列定位的。
+                if (BenchLogger.get().isEnabled()) {
+                    BenchLogger.get().tick(
+                            getCurrentPlaybackPosMs(), currentTime,
+                            videoAction, videoConf, videoAge,
+                            audioAction, audioConf, audioAge,
+                            Float.isNaN(audioFreq) ? -1 : Math.round(audioFreq),
+                            audioFreqConf, audioFreqValid, audioFreqAge,
+                            smoothedAction, finalAction, finalFreq,
+                            currentBluetoothState, currentLevel);
                 }
 
                 // 更新UI, 显示蓝牙实际发送的动作
@@ -1233,6 +1259,7 @@ public class VideoProcessActivity extends AppCompatActivity {
             ));
 
             latestBluetoothAction.set(pendingBluetoothState);
+            BenchLogger.get().noteSend(pendingBluetoothState, levelToSend);
 
             if (BLEManager.globalManager != null && BLEManager.globalManager.isConnected()) {
                 BLEManager.globalManager.sendAction(pendingBluetoothState, levelToSend);
@@ -1286,6 +1313,8 @@ public class VideoProcessActivity extends AppCompatActivity {
                     levelToSend
             ));
 
+            BenchLogger.get().noteSend(currentBluetoothState, levelToSend);
+
             if (BLEManager.globalManager != null && BLEManager.globalManager.isConnected()) {
                 BLEManager.globalManager.sendAction(currentBluetoothState, levelToSend);
                 Log.i(TAG, "[蓝牙] [同步分析] ✅ 已通过BLE发送指令(同动作/更新档位)");
@@ -1318,6 +1347,31 @@ public class VideoProcessActivity extends AppCompatActivity {
     // 迟滞门限辅助
     private int upThreshold(int cur)   { return Math.min(10, cur + 1); }
     private int downThreshold(int cur) { return Math.max(0,  cur - 1); }
+
+    /**
+     * [评测] 把当前这组可调参数拼成一行，写进 run CSV 的文件头。
+     *
+     * <p>没有这一行，事后就分不清某份 dump 是哪组参数跑出来的，“每改一个参数都能量化
+     * 对比”也就无从谈起。加了新参数记得同步加到这里。
+     */
+    private String benchParamsLine() {
+        return String.format(Locale.US,
+                "VIDEO_DO=%.2f VIDEO_PLOT=%.2f AUDIO_DO=%.2f AUDIO_NOISE=%.2f "
+                        + "SMOOTH_WIN=%d SMOOTH_MIN=%d FASTPATH_V=%.2f FASTPATH_A=%.2f "
+                        + "PLOT_CONFLICT=%.2f CONFLICT_MARGIN=%.2f CONFLICT_HOLD=%d "
+                        + "AUDIO_STRONG=%.2f AUDIO_ONLY_TICKS=%d "
+                        + "BLE_MIN_DUR=%d BLE_GAP=%d LEVEL_STABLE=%d LEVEL_MIN_DUR=%d "
+                        + "FUSION_TICK=%d VIDEO_INFER=%d AUDIO_INFER=%d",
+                VIDEO_DO_PROB_THRESHOLD, VIDEO_PLOT_PROB_THRESHOLD,
+                AUDIO_DO_PROB_THRESHOLD, AUDIO_NOISE_PROB_THRESHOLD,
+                SMOOTH_WINDOW_SIZE, SMOOTH_MIN_COUNT,
+                FUSION_FASTPATH_VIDEO_CONF, FUSION_FASTPATH_AUDIO_CONF,
+                VIDEO_PLOT_CONFLICT_CONF, FUSION_CONFLICT_MARGIN, CONFLICT_MAX_HOLD_TICKS,
+                AUDIO_STRONG_START_CONF, AUDIO_ONLY_START_TICKS,
+                BLUETOOTH_MIN_DURATION, BLUETOOTH_SEND_INTERVAL,
+                LEVEL_STABLE_MS, LEVEL_MIN_DUR_MS,
+                MAIN_FUSION_INTERVAL, VIDEO_INFERENCE_INTERVAL, AUDIO_INFERENCE_INTERVAL);
+    }
 
 
 
@@ -1792,6 +1846,9 @@ public class VideoProcessActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() {
         Log.d(TAG, "onDestroy: 准备释放资源...");
+
+        // [评测] 收尾并落盘
+        BenchLogger.get().stop();
 
         // 设置停止标志
         shouldStop.set(true);
