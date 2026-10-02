@@ -80,6 +80,16 @@ public final class BenchLogger {
     public void init(Context ctx, Uri videoUri, String paramsLine) {
         this.enabled = FORCE_ENABLE || isDebuggable(ctx);
         if (!enabled) return;
+        // 本类是单例，二次进入视频页时必须清掉上一轮的残留，否则上一轮最后的 probs
+        // 会被写进新文件的头几行（那几行的 v_age/a_age 是 -1，和概率自相矛盾）。
+        this.videoProbs = null;
+        this.audioProbs = null;
+        this.sent = false;
+        this.sentAction = "";
+        this.sentLevel = -1;
+        this.rowCount = 0;
+        this.dropped = 0;
+        this.failed = false;
         this.appCtx = ctx.getApplicationContext();
         this.paramsLine = paramsLine == null ? "" : paramsLine;
         this.videoName = sanitize(guessName(videoUri));

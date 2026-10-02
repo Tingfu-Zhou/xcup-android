@@ -108,6 +108,9 @@ def read_run(path):
             'pos': i('pos_ms'), 'wall': i('wall_ms'),
             'v': _norm(d.get('v_action')), 'v_conf': f('v_conf'), 'v_age': i('v_age', -1),
             'a': _norm(d.get('a_action')), 'a_conf': f('a_conf'), 'a_age': i('a_age', -1),
+            'vp': [f('v_p_plot', -1), f('v_p_oral', -1), f('v_p_sex', -1)],
+            'ap': [f('a_p_sex', -1), f('a_p_oral', -1), f('a_p_noise', -1)],
+            'loud_lv': i('loud_lv', -1), 'loud_conf': f('loud_conf'),
             'smoothed': _norm(d.get('smoothed')), 'gated': _norm(d.get('gated')),
             'ble_state': _norm(d.get('ble_state')), 'ble_level': i('ble_level'),
             'sent': i('sent') == 1, 'sent_action': _norm(d.get('sent_action')),
@@ -226,6 +229,171 @@ def evaluate(segs, dur, rows, policy):
     return dict(cm=cm, tot=tot, acc=acc, gt_noise=gt_noise, gt_do=gt_do,
                 false_stop=false_stop, lat=lat, dec=dec, miss=miss,
                 lo=lo, hi=hi, strans=strans, eval_ms=tot * GRID_MS)
+
+
+# ----------------------------------------------------------------- 定位与归因
+def gt_label_at(segs, pos):
+    for a, b, lab in segs:
+        if a <= pos < b:
+            return lab
+    return 'exclude'
+
+
+def error_intervals(segs, rows, policy, strans):
+    """把逐 tick 的错判合并成区间：[(起, 止, '误转'|'漏转', 该区间的 rows)]"""
+    out, cur = [], None
+    for r in rows:
+        if r['pos'] < WARMUP_MS:
+            continue
+        g = bin_of(gt_label_at(segs, r['pos']), policy)
+        if g is None:
+            kind = None
+        else:
+            sysst = state_at(strans, r['pos'])
+            kind = None if sysst == g else ('误转' if g == 'noise' else '漏转')
+        if kind and cur and cur[2] == kind:
+            cur[1] = r['pos']; cur[3].append(r)
+        elif kind:
+            if cur: out.append(cur)
+            cur = [r['pos'], r['pos'], kind, [r]]
+        elif cur:
+            out.append(cur); cur = None
+    if cur:
+        out.append(cur)
+    return out
+
+
+def _dist(rs, key):
+    c = {}
+    for r in rs:
+        k = r[key] or 'unclear'
+        c[k] = c.get(k, 0) + 1
+    n = max(1, len(rs))
+    return ' '.join('%s%d%%' % (k, round(100.0 * v / n))
+                    for k, v in sorted(c.items(), key=lambda x: -x[1]))
+
+
+def report_errors(segs, rows, policy, strans, top):
+    ivl = error_intervals(segs, rows, policy, strans)
+    ivl = [x for x in ivl if x[1] - x[0] >= 1000]
+    ivl.sort(key=lambda x: -(x[1] - x[0]))
+    print('══ 误判区间（≥1s，按时长排序，共 %d 段）══' % len(ivl))
+    print('  %-20s %7s %-5s %-8s %-26s %-26s %s'
+          % ('时间段', '时长', '类型', '真值', '视频判定', '音频判定', '仲裁后'))
+    for a, b, kind, rs in ivl[:top]:
+        labs = sorted({gt_label_at(segs, r['pos']) for r in rs})
+        print('  %7.1fs ~ %7.1fs %6.1fs %-5s %-8s %-26s %-26s %s'
+              % (a / 1000.0, b / 1000.0, (b - a) / 1000.0, kind, '/'.join(labs),
+                 _dist(rs, 'v'), _dist(rs, 'a'), _dist(rs, 'gated')))
+    if len(ivl) > top:
+        print('  … 其余 %d 段省略（--top N 可调）' % (len(ivl) - top))
+    print('\n  用 --at <时间> 看某一段的逐 tick 原始数据，例如 --at %.0f'
+          % (ivl[0][0] / 1000.0 if ivl else 0))
+    print()
+
+
+def report_at(rows, t, half=5000):
+    print('══ pos %s 附近的逐 tick 原始数据 ══' % sec(t))
+    print('  %-9s %-22s %-7s %-24s %-7s %-6s %-6s %-6s %s'
+          % ('pos', '视频 probs[plot,oral,sex]', 'V判定', '音频 probs[sex,oral,noise]',
+             'A判定', '平滑', '仲裁', '蓝牙', '发送'))
+    for r in rows:
+        if not (t - half <= r['pos'] <= t + half):
+            continue
+        vp = '[%s]' % ','.join('%.2f' % x if x >= 0 else ' -- ' for x in r['vp'])
+        ap = '[%s]' % ','.join('%.2f' % x if x >= 0 else ' -- ' for x in r['ap'])
+        print('  %-9s %-22s %-7s %-24s %-7s %-6s %-6s %-6s %s'
+              % (sec(r['pos']), vp, (r['v'] or 'unclear') + ('%.2f' % r['v_conf'] if r['v'] else ''),
+                 ap, (r['a'] or 'unclear') + ('%.2f' % r['a_conf'] if r['a'] else ''),
+                 r['smoothed'] or '-', r['gated'] or '-',
+                 '%s/%d' % (r['ble_state'] or '-', r['ble_level']),
+                 ('→ %s lv%d' % (r['sent_action'], r['sent_level'])) if r['sent'] else ''))
+    print()
+
+
+def _auc(pos, neg):
+    """Mann-Whitney AUC：0.5 = 与随机猜测无异，1.0 = 完美可分。"""
+    if not pos or not neg:
+        return float('nan')
+    allv = sorted([(v, 1) for v in pos] + [(v, 0) for v in neg])
+    ranks = {}
+    i = 0
+    while i < len(allv):
+        j = i
+        while j + 1 < len(allv) and allv[j + 1][0] == allv[i][0]:
+            j += 1
+        for k in range(i, j + 1):
+            ranks[k] = (i + j) / 2.0 + 1
+        i = j + 1
+    n1, n0 = len(pos), len(neg)
+    ssum = sum(ranks[k] for k, (v, y) in enumerate(allv) if y == 1)
+    return (ssum - n1 * (n1 + 1) / 2.0) / (n1 * n0)
+
+
+def _split(segs, rows, policy, fn):
+    pos, neg = [], []
+    for r in rows:
+        if r['pos'] < WARMUP_MS:
+            continue
+        g = bin_of(gt_label_at(segs, r['pos']), policy)
+        v = fn(r)
+        if g and v is not None and v >= 0:
+            (pos if g == 'do' else neg).append(v)
+    return pos, neg
+
+
+def report_diag(segs, rows, policy):
+    print('══ 模态诊断 ══')
+    print('  单模态准确率（只统计该模态给出了明确判定的 tick）')
+    for k, name in (('v', '视频 MobileNetV3'), ('a', '音频 YAMNet')):
+        dec = []
+        for r in rows:
+            if r['pos'] < WARMUP_MS:
+                continue
+            g = bin_of(gt_label_at(segs, r['pos']), policy)
+            if g and r[k]:
+                dec.append((r, g))
+        if not dec:
+            continue
+        nz = sum(1 for _, g in dec if g == 'noise') or 1
+        dz = sum(1 for _, g in dec if g == 'do') or 1
+        print('    %-18s 准确率 %5.1f%%   剧情误判为转 %5.1f%%   动作误判为不转 %5.1f%%'
+              % (name, 100.0 * sum(1 for r, g in dec if r[k] == g) / len(dec),
+                 100.0 * sum(1 for r, g in dec if g == 'noise' and r[k] == 'do') / nz,
+                 100.0 * sum(1 for r, g in dec if g == 'do' and r[k] == 'noise') / dz))
+
+    print('\n  各路"该转"证据的判别力 AUC（0.5 = 等于掷硬币）')
+    feats = [
+        ('视频 p_oral+p_sex  [现用]', lambda r: r['vp'][1] + r['vp'][2] if r['vp'][1] >= 0 else None),
+        ('音频 p_sex+p_oral  [现用]', lambda r: r['ap'][0] + r['ap'][1] if r['ap'][0] >= 0 else None),
+        ('音频 p_sex 单独', lambda r: r['ap'][0] if r['ap'][0] >= 0 else None),
+        ('音频 p_oral 单独', lambda r: r['ap'][1] if r['ap'][1] >= 0 else None),
+        ('音频 1-p_noise', lambda r: 1 - r['ap'][2] if r['ap'][2] >= 0 else None),
+    ]
+    for name, fn in feats:
+        pos, neg = _split(segs, rows, policy, fn)
+        print('    %-26s AUC = %.3f   (n=%d/%d)' % (name, _auc(pos, neg), len(pos), len(neg)))
+
+    for name, fn, ths in (
+            ('视频 pDo = p_oral+p_sex（现用阈值 0.65）',
+             lambda r: r['vp'][1] + r['vp'][2] if r['vp'][1] >= 0 else None,
+             (0.65, 0.50, 0.40, 0.30, 0.25, 0.20, 0.15, 0.10)),
+            ('音频 pDo = p_sex+p_oral（现用阈值 0.55）',
+             lambda r: r['ap'][0] + r['ap'][1] if r['ap'][0] >= 0 else None,
+             (0.55, 0.70, 0.80, 0.90, 0.95, 0.98)),
+            ('音频 p_sex 单独',
+             lambda r: r['ap'][0] if r['ap'][0] >= 0 else None,
+             (0.60, 0.50, 0.40, 0.30, 0.20, 0.10))):
+        pos, neg = _split(segs, rows, policy, fn)
+        if not pos or not neg:
+            continue
+        print('\n  阈值扫描：%s' % name)
+        print('    阈值    剧情段判"转"(误转)   动作段判"转"(召回)')
+        for th in ths:
+            print('    %.2f        %5.1f%%               %5.1f%%'
+                  % (th, 100.0 * sum(1 for x in neg if x >= th) / len(neg),
+                     100.0 * sum(1 for x in pos if x >= th) / len(pos)))
+    print('\n  注意：这些数字只来自当前这一个视频，不要据此直接改线上参数。\n')
 
 
 # ----------------------------------------------------------------- 输出
@@ -497,6 +665,10 @@ def main():
     ap.add_argument('--policy', default='exclude', choices=('exclude', 'do', 'noise'),
                     help='other_adult 怎么算（默认 exclude：不计入）')
     ap.add_argument('--append', metavar='summary.csv', help='把本次结果追加一行，便于跨参数对比')
+    ap.add_argument('--errors', action='store_true', help='列出误判区间及各层当时的判定')
+    ap.add_argument('--top', type=int, default=10, help='--errors 显示前几段（默认 10）')
+    ap.add_argument('--at', help='打印某时刻附近的逐 tick 原始数据。127.8 / 127.8s = 秒，127800 = 毫秒，2:07.8 也可')
+    ap.add_argument('--diag', action='store_true', help='模态诊断：单模态准确率、AUC、阈值扫描')
     ap.add_argument('--selftest', action='store_true')
     a = ap.parse_args()
 
@@ -517,6 +689,14 @@ def main():
     m = evaluate(segs, dur, rows, a.policy)
     m['params'] = run_meta.get('params', '')
     report_run(a.run, run_meta, rows, m)
+    if a.errors:
+        report_errors(segs, rows, a.policy, m['strans'], a.top)
+    if a.at:
+        t = a.at.strip().rstrip('s')
+        tms = parse_time(t) if ':' in t else int(round(float(t) * (1000 if '.' in t or a.at.strip().endswith('s') else 1)))
+        report_at(rows, tms)
+    if a.diag:
+        report_diag(segs, rows, a.policy)
     if a.append:
         append_summary(a.append, gt_meta, a.run, m, a.policy)
 

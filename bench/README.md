@@ -72,6 +72,22 @@ python3 bench/tools/metrics.py bench/gt/v01.csv
 | `--append bench/summary.csv` | 追加一行，便于跨参数/跨视频对比 |
 | `--selftest` | 自检脚本本身（含与 BenchLogger 的 CSV 列名契约检查） |
 
+### 定位错误
+
+```bash
+# 列出误判区间（按时长排序），每段显示当时各层的判定分布
+python3 bench/tools/metrics.py gt.csv run.csv --errors --top 15
+
+# 看某个时刻附近的逐 tick 原始数据：两个模型的概率、各决策层输出、蓝牙动作
+python3 bench/tools/metrics.py gt.csv run.csv --at 127.8
+
+# 模态诊断：单模态准确率、各路证据的判别力 AUC、阈值扫描
+python3 bench/tools/metrics.py gt.csv run.csv --diag
+```
+
+`--diag` 的 AUC 是关键：**AUC ≈ 0.5 说明该证据等于掷硬币，调阈值救不了**，必须动模型或
+换判据；AUC 高但阈值不合适，才是调参能解决的。
+
 run CSV 的文件头记录了当次的全部可调参数（`benchParamsLine()`），所以任何一份 dump
 都能追溯到是哪组参数跑出来的。
 
