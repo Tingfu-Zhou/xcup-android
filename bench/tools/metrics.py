@@ -677,6 +677,14 @@ def main():
     if not a.gt:
         ap.error('需要真值 CSV（或用 --selftest）')
 
+    for label, path in (('真值 CSV', a.gt), ('run CSV', a.run)):
+        if path and not os.path.exists(path):
+            sys.exit('找不到%s: %s\n'
+                     '  · 路径是相对当前目录的，用 "dir" / "ls" 确认文件名\n'
+                     '  · 文件名含空格或中文时整个路径要加英文双引号\n'
+                     '  · 建议把 run CSV 放到 bench/runs/ 下，命令会短很多'
+                     % (label, path))
+
     gt_meta, segs, dur, errs = read_gt(a.gt)
     report_gt(a.gt, gt_meta, segs, dur, errs, a.policy)
     if not a.run:
