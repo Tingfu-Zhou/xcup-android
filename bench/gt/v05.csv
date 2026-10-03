@@ -1,0 +1,16 @@
+# xcup-gt spec_version=1
+# video_id=视频5
+# file_name=视频5.mp4
+# file_size=679028994
+# duration_ms=899532
+# frame_rate=30
+# annotator=
+# split=dev
+# created_at=2026-10-02
+# segments=5 do_noise_transitions=1
+start_ms,end_ms,label,note
+0,12014,exclude,
+12014,371214,plot,
+371214,439511,other_adult,
+439511,460098,plot,
+460098,899532,sex,

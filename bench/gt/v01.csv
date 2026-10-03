@@ -6,12 +6,12 @@
 # frame_rate=30
 # annotator=tingfu
 # split=dev
-# created_at=2026-10-01
+# created_at=2026-10-02
 # segments=9 do_noise_transitions=1
 start_ms,end_ms,label,note
 0,6900,exclude,
-6900,214503,plot,
-214503,318624,other_adult,
+6900,146881,plot,
+146881,318624,other_adult,
 318624,393926,oral,
 393926,407292,other_adult,
 407292,643782,sex,
