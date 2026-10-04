@@ -15,7 +15,10 @@ import androidx.appcompat.app.AppCompatActivity;
 
 import android.widget.Toast;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -82,6 +85,17 @@ public class VideoProcessActivity extends AppCompatActivity {
     // 添加时间戳记录
     private final AtomicReference<Long> latestVideoTimestamp = new AtomicReference<>(0L);
     private final AtomicReference<Long> latestAudioTimestamp = new AtomicReference<>(0L);
+
+    // [证据融合] 见 EvidenceFusion。assets/fusion_config.json 的 mode 决定它是否驱动蓝牙：
+    // legacy=不运行；shadow=每 tick 计算并写进评测 CSV，蓝牙仍由原融合驱动；live=由它驱动蓝牙。
+    // 配置缺失或解析失败时回退到原融合。
+    private static final String FUSION_CONFIG_ASSET = "fusion_config.json";
+    private EvidenceFusion evidenceFusion;          // null = 不运行
+    private boolean evidenceLive = false;           // true = 证据融合驱动蓝牙
+    private String fusionModeTag = "legacy";        // 写进评测参数行，例如 shadow/provisional-20261004
+    // 模型结果快照（概率 + 产出时刻）作为一个对象原子发布，证据融合不会读到"新概率配旧时间戳"
+    private final AtomicReference<EvidenceFusion.Snapshot> latestVideoSnap = new AtomicReference<>(null);
+    private final AtomicReference<EvidenceFusion.Snapshot> latestAudioSnap = new AtomicReference<>(null);
 
     // 7.19 新增：时间窗口平滑相关变量
     // [延迟优化] 窗口从 10 收缩到 6：融合循环现为 500ms 一次，6 条记录约覆盖 3 秒。
@@ -288,6 +302,9 @@ public class VideoProcessActivity extends AppCompatActivity {
             finish();
             return;
         }
+
+        // [证据融合] 读配置；必须在 BenchLogger.init 之前，参数行里要记下融合模式
+        initEvidenceFusion();
 
         // [评测] 把每个融合 tick dump 成 CSV，供 bench/tools/metrics.py 算指标。
         // debug 包自动开启；只读取不干预，关闭时全是空操作。
@@ -559,13 +576,17 @@ public class VideoProcessActivity extends AppCompatActivity {
             }
         }
 
-        // [评测] 记原始概率，便于事后重扫阈值
-        BenchLogger.get().setVideoProbs(result == null ? null : result.probs);
+        // [证据融合] 原始概率 + 产出时刻打包成快照原子发布（评测 CSV 的 v_p_* 也取自它）；
+        // 推理失败时 probs 为 null，不给证据
+        long resultTs = System.currentTimeMillis();
+        boolean probsOk = result != null && result.index >= 0
+                && result.probs != null && result.probs.length >= 3;
+        latestVideoSnap.set(new EvidenceFusion.Snapshot(probsOk ? result.probs.clone() : null, resultTs));
 
         // 原子更新结果
         latestVideoAction.set(actionClass);
         latestVideoConfidence.set(confidence);
-        latestVideoTimestamp.set(System.currentTimeMillis());
+        latestVideoTimestamp.set(resultTs);
 
         final String displayText = actionClass.isEmpty()
                 ? "V: unclear"
@@ -666,13 +687,16 @@ public class VideoProcessActivity extends AppCompatActivity {
                                     }
                                 }
 
-                                // [评测] 记原始概率
-                                BenchLogger.get().setAudioProbs(result.probs);
+                                // [证据融合] 原始概率 + 产出时刻打包成快照原子发布（评测 CSV 的 a_p_* 也取自它）
+                                long resultTs = System.currentTimeMillis();
+                                boolean probsOk = result.index >= 0 && result.probs.length >= 3;
+                                latestAudioSnap.set(new EvidenceFusion.Snapshot(
+                                        probsOk ? result.probs.clone() : null, resultTs));
 
                                 // 原子更新结果
                                 latestAudioAction.set(action);
                                 latestAudioConfidence.set(confidence);
-                                latestAudioTimestamp.set(System.currentTimeMillis());
+                                latestAudioTimestamp.set(resultTs);
 
                                 // UI更新
                                 final String displayText = action.isEmpty()
@@ -738,6 +762,9 @@ public class VideoProcessActivity extends AppCompatActivity {
                 float audioConf = latestAudioConfidence.get();
                 long videoTime = latestVideoTimestamp.get();
                 long audioTime = latestAudioTimestamp.get();
+                // [证据融合] 模型结果快照（与上面的动作串最多差一个推理周期，各自内部一致）
+                EvidenceFusion.Snapshot vSnap = latestVideoSnap.get();
+                EvidenceFusion.Snapshot aSnap = latestAudioSnap.get();
 
                 // 音频节奏
                 boolean audioFreqValid = latestAudioLoudValid.get();
@@ -782,13 +809,25 @@ public class VideoProcessActivity extends AppCompatActivity {
                 // 注：oral/sex 的归并已在各分析线程内完成（applyVideoResult / 音频循环
                 // 的分组概率决策只输出 "do"/"Noise"/""），此处无需再做 oral->do 归一化。
 
-                // 7.19 修改：使用平滑融合替代原有的简单融合逻辑
-                String finalAction = smoothedFusion(videoAction, audioAction, videoConf, audioConf);
-                // [评测] 留存平滑级输出，dump 时才能把融合延迟和仲裁延迟分开看
-                final String smoothedAction = finalAction;
+                // [证据融合] 每 tick 都算：shadow 模式只写进评测 CSV；live 模式由它驱动蓝牙，
+                // 原来的投票窗与启动仲裁不再参与决策（蓝牙状态机照旧）
+                EvidenceFusion.Output ev = evidenceFusion == null ? null
+                        : evidenceFusion.update(vSnap, aSnap, currentTime);
 
-                // [启动仲裁] 音视频强冲突时短暂延迟启动（有上限）；音频足够自信则直接启动
-                finalAction = applyDoStartGate(finalAction, videoAction, videoConf, audioAction, audioConf);
+                String finalAction;
+                final String smoothedAction;
+                if (evidenceLive && ev != null) {
+                    finalAction = ev.action;
+                    smoothedAction = ev.action;
+                } else {
+                    // 7.19 修改：使用平滑融合替代原有的简单融合逻辑
+                    finalAction = smoothedFusion(videoAction, audioAction, videoConf, audioConf);
+                    // [评测] 留存平滑级输出，dump 时才能把融合延迟和仲裁延迟分开看
+                    smoothedAction = finalAction;
+
+                    // [启动仲裁] 音视频强冲突时短暂延迟启动（有上限）；音频足够自信则直接启动
+                    finalAction = applyDoStartGate(finalAction, videoAction, videoConf, audioAction, audioConf);
+                }
                 // 临时采用音频节律作为最终节律
                 // 将“最终节律计算”封装为独立方法，便于后续替换为音视频融合节律
                 int finalFreq = computeFinalFreq(audioFreq, audioFreqConf);
@@ -807,14 +846,20 @@ public class VideoProcessActivity extends AppCompatActivity {
                 // [评测] dump 本 tick。必须放在 updateBluetoothState 之后，才能带上本轮
                 // 是否真的发了蓝牙指令——切换延迟就是靠这一列定位的。
                 if (BenchLogger.get().isEnabled()) {
+                    // v_age/a_age 取快照的年龄：概率和"它是哪一刻出的"必须来自同一个结果，
+                    // 离线回放（fusion_lab.py）靠 wall_ms - age 还原结果时刻做去重
                     BenchLogger.get().tick(
                             getCurrentPlaybackPosMs(), currentTime,
-                            videoAction, videoConf, videoAge,
-                            audioAction, audioConf, audioAge,
+                            videoAction, videoConf,
+                            vSnap == null ? Long.MAX_VALUE : currentTime - vSnap.tsMs,
+                            vSnap == null ? null : vSnap.probs,
+                            audioAction, audioConf,
+                            aSnap == null ? Long.MAX_VALUE : currentTime - aSnap.tsMs,
+                            aSnap == null ? null : aSnap.probs,
                             Float.isNaN(audioFreq) ? -1 : Math.round(audioFreq),
                             audioFreqConf, audioFreqValid, audioFreqAge,
                             smoothedAction, finalAction, finalFreq,
-                            currentBluetoothState, currentLevel);
+                            currentBluetoothState, currentLevel, ev);
                 }
 
                 // 更新UI, 显示蓝牙实际发送的动作
@@ -1349,6 +1394,45 @@ public class VideoProcessActivity extends AppCompatActivity {
     private int downThreshold(int cur) { return Math.max(0,  cur - 1); }
 
     /**
+     * [证据融合] 读 assets/fusion_config.json。缺文件、格式错、参数非法都回退到原融合，绝不影响正常使用。
+     * 配置由 bench/tools/fusion_lab.py fit 生成。
+     */
+    private void initEvidenceFusion() {
+        evidenceFusion = null;
+        evidenceLive = false;
+        fusionModeTag = "legacy";
+        try (InputStream in = getAssets().open(FUSION_CONFIG_ASSET)) {
+            ByteArrayOutputStream buf = new ByteArrayOutputStream();
+            byte[] b = new byte[4096];
+            int n;
+            while ((n = in.read(b)) > 0) buf.write(b, 0, n);
+            EvidenceFusion.Config cfg = EvidenceFusion.Config.fromJson(
+                    new String(buf.toByteArray(), StandardCharsets.UTF_8));
+            fusionModeTag = (cfg.mode + "/" + cfg.id).replaceAll("\\s+", "_");
+            if (EvidenceFusion.MODE_LEGACY.equals(cfg.mode)) {
+                Log.i(TAG, "[证据融合] 配置 mode=legacy，不运行");
+                return;
+            }
+            evidenceFusion = new EvidenceFusion(cfg);
+            evidenceLive = EvidenceFusion.MODE_LIVE.equals(cfg.mode);
+            Log.i(TAG, "[证据融合] 已加载 " + cfg.id + "，mode=" + cfg.mode
+                    + (cfg.provisional ? "（临时配置，未经回放验证）" : ""));
+        } catch (Exception e) {
+            fusionModeTag = "legacy(配置无效)";
+            Log.e(TAG, "[证据融合] 读取 " + FUSION_CONFIG_ASSET + " 失败，回退到原融合", e);
+        }
+    }
+
+    /** [证据融合] seek 时调用（只在主线程）：清空累积证据和 seek 前的模型结果快照。 */
+    private void resetEvidenceFusion() {
+        latestVideoSnap.set(null);
+        latestAudioSnap.set(null);
+        if (evidenceFusion != null) {
+            evidenceFusion.reset();
+        }
+    }
+
+    /**
      * [评测] 把当前这组可调参数拼成一行，写进 run CSV 的文件头。
      *
      * <p>没有这一行，事后就分不清某份 dump 是哪组参数跑出来的，“每改一个参数都能量化
@@ -1361,7 +1445,7 @@ public class VideoProcessActivity extends AppCompatActivity {
                         + "PLOT_CONFLICT=%.2f CONFLICT_MARGIN=%.2f CONFLICT_HOLD=%d "
                         + "AUDIO_STRONG=%.2f AUDIO_ONLY_TICKS=%d "
                         + "BLE_MIN_DUR=%d BLE_GAP=%d LEVEL_STABLE=%d LEVEL_MIN_DUR=%d "
-                        + "FUSION_TICK=%d VIDEO_INFER=%d AUDIO_INFER=%d",
+                        + "FUSION_TICK=%d VIDEO_INFER=%d AUDIO_INFER=%d FUSION=%s",
                 VIDEO_DO_PROB_THRESHOLD, VIDEO_PLOT_PROB_THRESHOLD,
                 AUDIO_DO_PROB_THRESHOLD, AUDIO_NOISE_PROB_THRESHOLD,
                 SMOOTH_WINDOW_SIZE, SMOOTH_MIN_COUNT,
@@ -1370,7 +1454,8 @@ public class VideoProcessActivity extends AppCompatActivity {
                 AUDIO_STRONG_START_CONF, AUDIO_ONLY_START_TICKS,
                 BLUETOOTH_MIN_DURATION, BLUETOOTH_SEND_INTERVAL,
                 LEVEL_STABLE_MS, LEVEL_MIN_DUR_MS,
-                MAIN_FUSION_INTERVAL, VIDEO_INFERENCE_INTERVAL, AUDIO_INFERENCE_INTERVAL);
+                MAIN_FUSION_INTERVAL, VIDEO_INFERENCE_INTERVAL, AUDIO_INFERENCE_INTERVAL,
+                fusionModeTag);
     }
 
 
@@ -1408,6 +1493,8 @@ public class VideoProcessActivity extends AppCompatActivity {
             // [启动仲裁] seek 后重置启动计数
             audioOnlyDoStreak = 0;
             conflictHoldTicks = 0;
+            // [证据融合] seek 前的证据和结果快照都不能算进新位置
+            resetEvidenceFusion();
 
             // 重置提取器, 通知视频帧抽取器：从当前时间开始解码
             videoFrameExtractor.seekTo(currentMs * 1000);
@@ -1578,6 +1665,8 @@ public class VideoProcessActivity extends AppCompatActivity {
         // [启动仲裁] 重置启动计数
         audioOnlyDoStreak = 0;
         conflictHoldTicks = 0;
+        // [证据融合] seek 前的证据和结果快照都不能算进新位置
+        resetEvidenceFusion();
 
         audioStartTime = newPositionMs;
 

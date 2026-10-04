@@ -1,0 +1,25 @@
+{
+  "format": "xcup-fusion-v1",
+  "mode": "shadow",
+  "id": "provisional-20261004",
+  "video": {
+    "feature": "p_oral+p_sex",
+    "weights": [0.0, 1.0, 1.0],
+    "edges": [0.0, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.65, 1.0],
+    "llr": [-1.6003, -0.6825, -0.3308, -0.1028, 0.5194, 0.8433, 1.079, 1.079, 1.4037]
+  },
+  "audio": {
+    "feature": "p_sex+p_oral",
+    "weights": [1.0, 1.0, 0.0],
+    "edges": [0.0, 0.55, 0.7, 0.8, 0.9, 0.95, 0.98, 1.0],
+    "llr": [-1.1195, -0.0955, -0.0955, -0.0955, 0.1104, 0.3608, 0.4736]
+  },
+  "w_v": 1.0,
+  "w_a": 0.5,
+  "clamp": 4.0,
+  "theta_on": 1.5,
+  "theta_off": -1.5,
+  "max_age_ms": 2000,
+  "provisional": true,
+  "note": "临时配置，只用于 shadow（影子）模式记日志，不驱动蓝牙。证据表由 10.2 报告里 --diag 的阈值扫描表（v01/v04/v05/v06/v07 合并）粗算，动态参数未经回放验证。把 run CSV 放进 bench/runs/ 后，用 python3 bench/tools/fusion_lab.py fit 重新生成本文件。mode: legacy=不运行 / shadow=只记日志 / live=驱动蓝牙"
+}

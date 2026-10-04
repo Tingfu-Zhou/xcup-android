@@ -1,0 +1,23 @@
+{
+  "format": "xcup-fusion-v1",
+  "mode": "shadow",
+  "id": "golden",
+  "video": {
+    "feature": "p_oral+p_sex",
+    "weights": [0.0, 1.0, 1.0],
+    "edges": [0.0, 0.1, 0.5, 0.9, 1.0],
+    "llr": [-1.5, -0.25, 0.75, 2.5]
+  },
+  "audio": {
+    "feature": "p_sex+p_oral",
+    "weights": [1.0, 1.0, 0.0],
+    "edges": [0.0, 0.3, 0.6, 1.0],
+    "llr": [-0.75, 0.125, 0.5]
+  },
+  "w_v": 1.0,
+  "w_a": 0.5,
+  "clamp": 3.0,
+  "theta_on": 1.25,
+  "theta_off": -0.75,
+  "max_age_ms": 2000
+}

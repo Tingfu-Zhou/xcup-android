@@ -66,10 +66,6 @@ public final class BenchLogger {
     private static final String POISON = "\u0000EOF";
     private Thread writerThread;
 
-    // 由分析线程写、融合线程读。只是日志，用 volatile 足够，不加锁以免影响时序。
-    private volatile float[] videoProbs;
-    private volatile float[] audioProbs;
-
     // 本 tick 内蓝牙是否发了指令（updateBluetoothState 里置位，tick() 写完后清零）。
     // noteSend 与 tick 都只在融合线程（主线程）调用，无需同步。
     private boolean sent = false;
@@ -80,10 +76,7 @@ public final class BenchLogger {
     public void init(Context ctx, Uri videoUri, String paramsLine) {
         this.enabled = FORCE_ENABLE || isDebuggable(ctx);
         if (!enabled) return;
-        // 本类是单例，二次进入视频页时必须清掉上一轮的残留，否则上一轮最后的 probs
-        // 会被写进新文件的头几行（那几行的 v_age/a_age 是 -1，和概率自相矛盾）。
-        this.videoProbs = null;
-        this.audioProbs = null;
+        // 本类是单例，二次进入视频页时必须清掉上一轮的残留。
         this.sent = false;
         this.sentAction = "";
         this.sentLevel = -1;
@@ -103,14 +96,6 @@ public final class BenchLogger {
         return enabled;
     }
 
-    public void setVideoProbs(float[] probs) {
-        if (enabled) videoProbs = probs;
-    }
-
-    public void setAudioProbs(float[] probs) {
-        if (enabled) audioProbs = probs;
-    }
-
     /** 在实际决定下发指令处调用（不要放在「BLE 已连接」分支里，否则不插杯子就采不到数据）。 */
     public void noteSend(String action, int level) {
         if (!enabled) return;
@@ -119,18 +104,26 @@ public final class BenchLogger {
         sentLevel = level;
     }
 
-    /** 每个融合 tick 末尾调一次，一行一个 tick。 */
+    /**
+     * 每个融合 tick 末尾调一次，一行一个 tick。
+     *
+     * <p>vProbs/vAgeMs（及音频的）必须来自同一个模型结果快照：离线回放靠 wall_ms - age 还原
+     * "这组概率是哪一刻出的"来去重，概率和年龄错配会让回放与真机对不上。</p>
+     *
+     * @param ev 证据融合本 tick 的输出；未启用时传 null（ev_* 列留空）
+     */
     public void tick(long posMs, long wallMs,
-                     String vAction, float vConf, long vAgeMs,
-                     String aAction, float aConf, long aAgeMs,
+                     String vAction, float vConf, long vAgeMs, float[] vProbs,
+                     String aAction, float aConf, long aAgeMs, float[] aProbs,
                      int loudLevel, float loudConf, boolean loudValid, long loudAgeMs,
                      String smoothed, String gated, int finalFreq,
-                     String bleState, int bleLevel) {
+                     String bleState, int bleLevel,
+                     EvidenceFusion.Output ev) {
         if (!enabled || failed) return;
         if (out == null && !open()) return;
 
-        float[] vp = videoProbs, ap = audioProbs;
-        StringBuilder sb = new StringBuilder(220);
+        float[] vp = vProbs, ap = aProbs;
+        StringBuilder sb = new StringBuilder(260);
         sb.append(posMs).append(',').append(wallMs).append(',');
         sb.append(csv(vAction)).append(',').append(f(vConf)).append(',').append(age(vAgeMs)).append(',');
         sb.append(p(vp, 0)).append(',').append(p(vp, 1)).append(',').append(p(vp, 2)).append(',');
@@ -141,6 +134,12 @@ public final class BenchLogger {
         sb.append(csv(smoothed)).append(',').append(csv(gated)).append(',').append(finalFreq).append(',');
         sb.append(csv(bleState)).append(',').append(bleLevel).append(',')
           .append(sent ? 1 : 0).append(',').append(csv(sentAction)).append(',').append(sentLevel);
+        if (ev != null) {
+            sb.append(',').append(csv(ev.action)).append(',').append(d(ev.l)).append(',')
+              .append(d(ev.llrV)).append(',').append(d(ev.llrA));
+        } else {
+            sb.append(",,,,");
+        }
 
         if (queue.offer(sb.toString())) {
             rowCount++;
@@ -224,7 +223,8 @@ public final class BenchLogger {
                     + "a_action,a_conf,a_age,a_p_sex,a_p_oral,a_p_noise,"
                     + "loud_lv,loud_conf,loud_valid,loud_age,"
                     + "smoothed,gated,final_freq,"
-                    + "ble_state,ble_level,sent,sent_action,sent_level\n");
+                    + "ble_state,ble_level,sent,sent_action,sent_level,"
+                    + "ev_action,ev_l,ev_llr_v,ev_llr_a\n");
             out.flush();
             writerThread = new Thread(this::drain, "BenchLoggerWriter");
             writerThread.setDaemon(true);
@@ -304,6 +304,10 @@ public final class BenchLogger {
 
     private static String f(float v) {
         return Float.isNaN(v) ? "" : String.format(Locale.US, "%.4f", v);
+    }
+
+    private static String d(double v) {
+        return Double.isNaN(v) ? "" : String.format(Locale.US, "%.4f", v);
     }
 
     /** 过期时长可能是 Long.MAX_VALUE（从未出结果），统一写 -1。 */

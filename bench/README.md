@@ -8,9 +8,12 @@
 bench/
   ANNOTATION_SPEC.md      人工真值标注规范（改动需递增 spec_version）
   gt/<video_id>.csv       人工真值（提交进 git）
+  runs/<video_id>_*.csv   真机 dump（提交进 git：融合配置是从它们拟合出来的，要能复现）
   tools/
     labeler.html          真值标注器，双击即用，纯本地无上传
     test_labeler.js       标注器核心逻辑测试：node bench/tools/test_labeler.js
+    metrics.py            单部片的指标 / 误判定位 / 模态诊断
+    fusion_lab.py         融合层离线实验台：回放、交叉验证、模态上限、拟合配置
 ```
 
 ## 标注
@@ -96,8 +99,72 @@ run CSV 的文件头记录了当次的全部可调参数（`benchParamsLine()`�
 `v_p_*` / `a_p_*` 存的是模型原始 softmax，不是判定结果。这样以后想做「秒级回放 + 参数
 扫描」时，这些 CSV 就是现成的输入，不用重新跑模型——第一步不是弯路。
 
-## 尚未实现（等真有需要再做）
+## 融合层实验台 fusion_lab.py
 
-- `DecisionCore.java` — 把融合/仲裁/蓝牙状态机抽成纯 Java（注入时钟、参数化），
-  配一个 JVM 回放器。做完才能秒级重放 + 批量扫参，代价是一次重构。
-  现在每改一个参数要重跑一遍视频（实时），片子不多时可以接受。
+run CSV 里存着两个模型每个 tick 的原始概率，融合层的输入全在。`fusion_lab.py` 把融合层整个
+搬到 Python 里重放：改融合/扫参数不用再实时重跑视频，一部片几秒。
+
+先把每部片的 run CSV 拷进 `bench/runs/`，文件名以真值 id 开头（`v01_base.csv` 配 `gt/v01.csv`）。
+
+```bash
+# 1. 回放器可信吗：复刻线上 Java 融合（投票窗 + 启动仲裁 + 蓝牙状态机），与 dump 逐 tick 比对
+python3 bench/tools/fusion_lab.py check
+
+# 2. 留一视频交叉验证：证据融合 vs 现有融合 vs 一直转 / 只用视频 / 只用音频
+python3 bench/tools/fusion_lab.py eval
+
+# 3. 模态上限：假设视频（或音频）完美，端到端最多能到多少 —— 决定先改哪个模型
+python3 bench/tools/fusion_lab.py oracle
+
+# 4. 用全部片子拟合，写出 app/src/main/assets/fusion_config.json（默认 mode=shadow）
+python3 bench/tools/fusion_lab.py fit
+python3 bench/tools/fusion_lab.py fit --mode live      # 确认 eval 结果后，让证据融合驱动蓝牙
+```
+
+`check` 一致率要 ≥99% 才说明回放器可信，后面的对比才有意义。少量不一致来自 CSV 把置信度
+存成 4 位小数、以及蓝牙状态机内部取时间比 `wall_ms` 晚几毫秒，正好卡在阈值边界上时会翻转。
+
+### 证据融合是什么
+
+原融合把"音频更准、音频权重 1.2、音频可直通启动"写死在代码里；bench 显示这个前提不成立。
+证据融合（`EvidenceFusion.java`，Python 端同名类逐 tick 对拍）不写死谁更可信：
+
+```
+证据：模型每出一个新结果，取特征 s（视频 p_oral+p_sex；音频 p_sex+p_oral 或 p_sex），
+      查表 LLR = log P(s 落在该区间 | 动作) / P(s 落在该区间 | 剧情)       ← 从 bench 统计
+累积：L = clamp(L + w_v·LLR_v + w_a·LLR_a, -C, +C)                     ← 每个结果只计一次
+决策：不转→转：L ≥ theta_on；转→不转：L ≤ theta_off；之后照旧走蓝牙状态机
+```
+
+- 证据表用真实片子统计：模型窗口跨真值边界的结果不用；分 12 格，保序回归后裁到 ±3。
+- `w_a`、`C`、`theta_on`、`theta_off`（和音频用哪个特征）按代价扫出来：
+  `代价 = 误转秒数×fp + 漏转秒数×fn + 动作中误停次数×stop`，默认 `--cost fp=1,fn=1,stop=3`。
+  这是产品取舍，不随模型变；换了模型只需重新 `fit`。
+- **拼接停转样本**：现有片子全是"剧情→动作"，一个停转切换点都没有，不补的话扫参会挑出
+  "永远不停"的参数。所以把同一部片的一段动作和一段剧情首尾拼起来造出停转点，一起算进代价。
+  拼接处感知是瞬间切换的，测出的停转延迟比真实片子乐观约 1~2 秒。
+
+### 配置的三种模式（`fusion_config.json` 的 `mode`）
+
+| mode | 行为 |
+|---|---|
+| `legacy` | 不运行证据融合 |
+| `shadow` | 每 tick 计算并写进 run CSV 的 `ev_*` 列，**蓝牙仍由原融合驱动**（默认） |
+| `live` | 证据融合驱动蓝牙，原投票窗与启动仲裁不再参与；蓝牙状态机照旧 |
+
+配置缺失或解析失败时 app 自动回退到原融合。仓库里现在的配置是**临时配置**
+（`provisional: true`）：证据表由 10.2 报告的阈值扫描表粗算，动态参数没经过回放验证，
+所以只用 shadow。拿到 run CSV 后跑 `fit` 生成正式配置。
+
+改了证据融合算法时：Python 和 Java 两边一起改，然后 `fusion_lab.py golden` 重新生成
+`app/src/test/resources/fusion/` 下的对拍数据，`EvidenceFusionTest` 会逐 tick 校验两边一致。
+
+在线模式（`OnlineAnalysisActivity`，抓屏）仍是原融合：抓屏画面和离线解码的输入分布不同，
+等有了在线模式的 bench 数据再接。
+
+### 自检
+
+```bash
+python3 bench/tools/fusion_lab.py --selftest
+python3 bench/tools/metrics.py --selftest
+```
