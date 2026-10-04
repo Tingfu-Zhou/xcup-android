@@ -287,7 +287,8 @@ def report_errors(segs, rows, policy, strans, top):
                  _dist(rs, 'v'), _dist(rs, 'a'), _dist(rs, 'gated')))
     if len(ivl) > top:
         print('  … 其余 %d 段省略（--top N 可调）' % (len(ivl) - top))
-    print('\n  用 --at <时间> 看某一段的逐 tick 原始数据，例如 --at %.0f'
+    # 带小数点才按秒解析（整数按毫秒），所以示例里必须带 .1f
+    print('\n  用 --at <时间> 看某一段的逐 tick 原始数据，例如 --at %.1f'
           % (ivl[0][0] / 1000.0 if ivl else 0))
     print()
 
@@ -397,6 +398,14 @@ def report_diag(segs, rows, policy):
 
 
 # ----------------------------------------------------------------- 输出
+def parse_time(t):
+    """'2:07.8' / '1:02:07' -> 毫秒"""
+    sec_ = 0.0
+    for part in t.split(':'):
+        sec_ = sec_ * 60 + float(part)
+    return int(round(sec_ * 1000))
+
+
 def pct(x):  return '%5.1f%%' % (100.0 * x)
 def sec(ms): return '%.1fs' % (ms / 1000.0)
 
