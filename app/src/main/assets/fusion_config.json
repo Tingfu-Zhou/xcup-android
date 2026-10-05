@@ -1,25 +1,41 @@
 {
   "format": "xcup-fusion-v1",
-  "mode": "shadow",
-  "id": "provisional-20261004",
+  "mode": "live",
+  "id": "fit-20261005-060733",
   "video": {
     "feature": "p_oral+p_sex",
     "weights": [0.0, 1.0, 1.0],
-    "edges": [0.0, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.65, 1.0],
-    "llr": [-1.6003, -0.6825, -0.3308, -0.1028, 0.5194, 0.8433, 1.079, 1.079, 1.4037]
+    "edges": [0.0, 0.02, 0.05, 0.1, 0.2, 0.35, 0.5, 0.65, 0.8, 0.9, 0.95, 0.98, 1.0],
+    "llr": [-0.6913, -0.2649, -0.1063, -0.1063, 0.3012, 1.1594, 1.1594, 1.1594, 1.5054, 1.5054, 1.5054, 1.5054]
   },
   "audio": {
-    "feature": "p_sex+p_oral",
-    "weights": [1.0, 1.0, 0.0],
-    "edges": [0.0, 0.55, 0.7, 0.8, 0.9, 0.95, 0.98, 1.0],
-    "llr": [-1.1195, -0.0955, -0.0955, -0.0955, 0.1104, 0.3608, 0.4736]
+    "feature": "p_sex",
+    "weights": [1.0, 0.0, 0.0],
+    "edges": [0.0, 0.02, 0.05, 0.1, 0.2, 0.35, 0.5, 0.65, 0.8, 0.9, 0.95, 0.98, 1.0],
+    "llr": [-1.5088, -0.6825, -0.2958, -0.0088, 0.3458, 0.4764, 0.4764, 0.5965, 0.8231, 0.8231, 0.8231, 1.8531]
   },
   "w_v": 1.0,
-  "w_a": 0.5,
-  "clamp": 4.0,
+  "w_a": 1.0,
+  "clamp_lo": 2.0,
+  "clamp_hi": 8.0,
   "theta_on": 1.5,
-  "theta_off": -1.5,
+  "theta_off": 0.0,
   "max_age_ms": 2000,
-  "provisional": true,
-  "note": "临时配置，只用于 shadow（影子）模式记日志，不驱动蓝牙。证据表由 10.2 报告里 --diag 的阈值扫描表（v01/v04/v05/v06/v07 合并）粗算，动态参数未经回放验证。把 run CSV 放进 bench/runs/ 后，用 python3 bench/tools/fusion_lab.py fit 重新生成本文件。mode: legacy=不运行 / shadow=只记日志 / live=驱动蓝牙"
+  "fitted_at": "2026-10-05T06:07:33Z",
+  "provisional": false,
+  "note": "由 bench/tools/fusion_lab.py fit 生成。mode: legacy=不运行 / shadow=只记日志 / live=驱动蓝牙",
+  "fit": {
+    "videos": ["v01=v01_base.csv", "v02=v02_base.csv", "v04=v04_base.csv", "v05=v05_base.csv", "v06=v06_base.csv", "v07=v07_base.csv"],
+    "policy": "exclude",
+    "cost": "fp=1,fn=1,stop=3",
+    "train_cost": 1234.0,
+    "audio_feature": "p_sex",
+    "video_neg_scale": 0.35,
+    "samples": {
+      "video_do_by_bin": [453, 136, 136, 150, 207, 210, 230, 362, 443, 396, 476, 1942],
+      "video_plot_by_bin": [1117, 99, 60, 72, 52, 19, 24, 42, 24, 13, 18, 214],
+      "audio_do_by_bin": [204, 170, 194, 360, 435, 495, 393, 331, 234, 142, 86, 102],
+      "audio_plot_by_bin": [316, 115, 89, 124, 105, 104, 84, 62, 29, 24, 16, 5]
+    }
+  }
 }
