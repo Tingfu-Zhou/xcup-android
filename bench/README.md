@@ -18,7 +18,6 @@ bench/
     fusion_lab.py         融合层离线实验台：回放、交叉验证、模态上限、拟合配置
     audio_rescore.py      音频离线重打分：从原视频还原真机送进模型的 2 秒音频，换模型/换解码方式重算
     yamnet_class_map.csv  YAMNet 的 AudioSet 521 类名（来自 tensorflow/models，Apache-2.0）
-    train_check.py        音频分类器训练数据体检（按视频切分/泄漏、格式、静音与响度）与导出一致性检查
 ```
 
 ## 标注
@@ -334,19 +333,6 @@ python bench/tools/metrics.py bench/gt/v01.csv bench/rescored/fixed/v01_base.csv
 AUC 好看不等于端到端有用：要不要把 Speech 加进融合，以 `fusion_lab.py eval --speech` 的留一结果为准。
 `--speech` 在音频特征候选里加上 `p_sex+p_oral-speech/2`、`p_sex-speech/2`（app 送进证据融合的音频向量是
 `[sex, oral, noise] + a_ys_*`，Java 端不用改），由拟合按代价挑。
-
-### 训练数据与导出体检：train_check.py
-
-```bash
-python bench/tools/train_check.py split D:/yunpan/训练/音频          # 000train/000val/000test… 所在目录
-python bench/tools/train_check.py export --saved-model <YAMNet SavedModel 目录> --h5 yamnet_finetuned.h5 \
-       --wavs D:/yunpan/训练/音频/000test                          # 需要训练用的 TensorFlow 环境
-```
-
-`split` 按文件名 `<源视频>_part<序号>.wav` 还原源视频，检查同一视频的片段有没有同时进 train/val/test（数据泄漏，
-测试准确率虚高）、片段是不是都是 16kHz 单声道 2 秒（`test.py` 中断会残留 `*_full.wav`）、各类静音片段比例和
-响度分布。`export` 检查训练用的 YAMNet 与 app 里的 `yamnet.tflite` embedding 是否一致、`.h5` 与 app 里的
-`yamnet_finetuned.tflite` 是否一致。
 
 ### run CSV 新增的列
 
