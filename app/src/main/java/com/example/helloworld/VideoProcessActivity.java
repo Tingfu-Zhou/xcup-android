@@ -93,9 +93,19 @@ public class VideoProcessActivity extends AppCompatActivity {
     private EvidenceFusion evidenceFusion;          // null = 不运行
     private boolean evidenceLive = false;           // true = 证据融合驱动蓝牙
     private String fusionModeTag = "legacy";        // 写进评测参数行，例如 shadow/provisional-20261004
+    // [音频修复] 离线模式音频解码用哪条管线：fusion_config.json 的 audio_pipeline。证据表是在哪种音频上
+    // 拟合的，就必须喂哪种；配置里没有这一项（旧配置）或读不到配置，就保持原来的 legacy 管线。
+    private boolean audioPipelineFixed = false;
     // 模型结果快照（概率 + 产出时刻）作为一个对象原子发布，证据融合不会读到"新概率配旧时间戳"
     private final AtomicReference<EvidenceFusion.Snapshot> latestVideoSnap = new AtomicReference<>(null);
     private final AtomicReference<AudioSnap> latestAudioSnap = new AtomicReference<>(null);
+
+    private static float[] concat(float[] a, float[] b) {
+        float[] r = new float[a.length + b.length];
+        System.arraycopy(a, 0, r, 0, a.length);
+        System.arraycopy(b, 0, r, a.length, b.length);
+        return r;
+    }
 
     /**
      * 音频结果快照：snap 给证据融合；winEndPosMs / audioSet 是同一次推理的附带信息，只写评测 CSV
@@ -392,7 +402,7 @@ public class VideoProcessActivity extends AppCompatActivity {
             });
 
             audioDecoder = new AudioDecoder(this, videoUri, null, pcmBuffer,
-                    () -> videoView.getCurrentPosition());
+                    () -> videoView.getCurrentPosition(), audioPipelineFixed);
             audioDecoder.setOnCompleteListener(() -> {
                 isAudioCompleted = true;
                 Log.d(TAG, "音频解码完成");
@@ -706,8 +716,11 @@ public class VideoProcessActivity extends AppCompatActivity {
                                 // [证据融合] 原始概率 + 产出时刻打包成快照原子发布（评测 CSV 的 a_p_* 也取自它）
                                 long resultTs = System.currentTimeMillis();
                                 boolean probsOk = result.index >= 0 && result.probs.length >= 3;
+                                // 融合用的向量 = [sex, oral, noise] + AudioSet 类别分数：配置的音频特征可以带上
+                                // Speech 等类（fusion_lab.py --speech）；只用前 3 项的配置不受影响
                                 latestAudioSnap.set(new AudioSnap(
-                                        new EvidenceFusion.Snapshot(probsOk ? result.probs.clone() : null, resultTs),
+                                        new EvidenceFusion.Snapshot(probsOk ? concat(result.probs, result.audioSet) : null,
+                                                resultTs),
                                         currentMs, probsOk ? result.audioSet : null));
 
                                 // 原子更新结果
@@ -1421,13 +1434,16 @@ public class VideoProcessActivity extends AppCompatActivity {
         evidenceFusion = null;
         evidenceLive = false;
         fusionModeTag = "legacy";
+        audioPipelineFixed = false;
         try (InputStream in = getAssets().open(FUSION_CONFIG_ASSET)) {
             ByteArrayOutputStream buf = new ByteArrayOutputStream();
             byte[] b = new byte[4096];
             int n;
             while ((n = in.read(b)) > 0) buf.write(b, 0, n);
-            EvidenceFusion.Config cfg = EvidenceFusion.Config.fromJson(
-                    new String(buf.toByteArray(), StandardCharsets.UTF_8));
+            String text = new String(buf.toByteArray(), StandardCharsets.UTF_8);
+            audioPipelineFixed = "fixed".equals(new org.json.JSONObject(text).optString("audio_pipeline"));
+            Log.i(TAG, "[音频修复] 音频管线 = " + (audioPipelineFixed ? "fixed" : "legacy"));
+            EvidenceFusion.Config cfg = EvidenceFusion.Config.fromJson(text);
             fusionModeTag = (cfg.mode + "/" + cfg.id).replaceAll("\\s+", "_");
             if (EvidenceFusion.MODE_LEGACY.equals(cfg.mode)) {
                 Log.i(TAG, "[证据融合] 配置 mode=legacy，不运行");
@@ -1465,7 +1481,7 @@ public class VideoProcessActivity extends AppCompatActivity {
                         + "PLOT_CONFLICT=%.2f CONFLICT_MARGIN=%.2f CONFLICT_HOLD=%d "
                         + "AUDIO_STRONG=%.2f AUDIO_ONLY_TICKS=%d "
                         + "BLE_MIN_DUR=%d BLE_GAP=%d LEVEL_STABLE=%d LEVEL_MIN_DUR=%d "
-                        + "FUSION_TICK=%d VIDEO_INFER=%d AUDIO_INFER=%d FUSION=%s",
+                        + "FUSION_TICK=%d VIDEO_INFER=%d AUDIO_INFER=%d FUSION=%s AUDIO_PIPE=%s",
                 VIDEO_DO_PROB_THRESHOLD, VIDEO_PLOT_PROB_THRESHOLD,
                 AUDIO_DO_PROB_THRESHOLD, AUDIO_NOISE_PROB_THRESHOLD,
                 SMOOTH_WINDOW_SIZE, SMOOTH_MIN_COUNT,
@@ -1475,7 +1491,7 @@ public class VideoProcessActivity extends AppCompatActivity {
                 BLUETOOTH_MIN_DURATION, BLUETOOTH_SEND_INTERVAL,
                 LEVEL_STABLE_MS, LEVEL_MIN_DUR_MS,
                 MAIN_FUSION_INTERVAL, VIDEO_INFERENCE_INTERVAL, AUDIO_INFERENCE_INTERVAL,
-                fusionModeTag);
+                fusionModeTag, isWebVideoMode ? "web" : (audioPipelineFixed ? "fixed" : "legacy"));
     }
 
 

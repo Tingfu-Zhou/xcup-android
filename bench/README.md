@@ -170,6 +170,10 @@ live 模式采集的 run（参数行里 `FUSION=live/<配置 id>`）会自动改
 配置缺失或解析失败时 app 自动回退到原融合。想退回原融合，把 `fusion_config.json` 的
 `"mode"` 改成 `"shadow"`（照样记证据融合的影子列）或 `"legacy"`，重新编译即可。
 
+配置里的 `"audio_pipeline"` 决定离线模式怎么解码音频（见下文"音频解码修复"）：`"fixed"` = 修复后的
+`PcmResampler`，没有这一项或其他值 = 原来的（半速）处理。证据表只对拟合时那种音频有效，所以由 `fit`
+按训练数据自动写入，不要手改。
+
 ### 当前结果（2026-10-05，6 部片，留一视频交叉验证）
 
 | 策略 | 准确率 | 误转 | 漏转 | 误停/分 | 启动后没转 | 停止后还转 |
@@ -220,14 +224,17 @@ pip install numpy ai-edge-litert     # TFLite 解释器，Python 3.10+；已经�
 python bench/tools/audio_rescore.py check --videos D:/xcup/videos
 ```
 
-用 app 里的旧模型在每个音频结果时刻重算 `a_p_*`，和真机记下的比。同时试两种"喂给模型的音频"：
+用 app 里的旧模型在每个音频结果时刻重算 `a_p_*`，和真机记下的比，看哪种"喂给模型的音频"能把真机
+概率复现出来：
 
 | 管线 | 是什么 |
 |---|---|
-| `phone` | 逐行复刻离线模式现在的 `AudioDecoder` + `PcmCircularBuffer`（`--selftest` 与照抄的 Java 循环逐点对拍） |
-| `clean` | 正确的做法：下混单声道、ffmpeg 重采样到 16kHz、取 `[T-2s, T]` |
+| `phone` | 逐行复刻旧版 `AudioDecoder` + `PcmCircularBuffer`（与真正的 Java 代码逐点一致） |
+| `fixed` | 修复后的 app：下混 + `PcmResampler` 重采样到 16kHz，取 `[T-2s, T]`（与 Java 逐点一致，`PcmResamplerTest` 对拍） |
+| `clean` | 理想参考：ffmpeg 下混、重采样到 16kHz，取 `[T-2s, T]` |
 
-哪种能把真机概率复现出来，真机喂给模型的就是哪种。每部片约 2 分钟。看输出的最后一行：
+默认：旧版 app 录的 run 比 `phone`/`clean`；修复后的 app 录的 run（参数行 `AUDIO_PIPE=fixed`）比
+`fixed`/`phone`。`--pipeline phone,fixed,clean` 可以自己指定。每部片每种管线约 1 分多钟。看输出的最后一行：
 
 - `✓ 对齐验证通过`：逐个结果都对上了（MAE < 0.04），后面的重算可以直接信。
 - `✓ 真机喂给模型的是 X 管线的音频……但逐个结果还有出入`：管线认对了，只是旧版 run 没记读窗位置，
@@ -239,7 +246,7 @@ python bench/tools/audio_rescore.py check --videos D:/xcup/videos
 都是扫出来的，写进 `bench/rescored/alignment.json`，`rescore` 直接用。`--dump` 把逐个结果的对比写成
 `bench/rescored/check_<id>.csv`。
 
-### ⚠ 读代码发现：离线模式喂给模型的音频是半速的
+### 音频解码修复：旧版离线模式喂给模型的是半速音频（已证实）
 
 `AudioDecoder` 没看声道数，把 MediaCodec 输出的交错 PCM（L R L R …）直接当单声道用：
 `windowSize = sampleRate*4` 个 short 凑一块，重采样时按 `i/sampleRate` 算时间轴、只取前 2 秒。对双声道
@@ -252,15 +259,48 @@ python bench/tools/audio_rescore.py check --videos D:/xcup/videos
 这可能是音频在剧情段大量判"转"、`p_oral` AUC < 0.5 的原因之一。网页模式（`PcmCaptureAudioProcessor`）
 有正确下混，不受影响。
 
-`check` 能拿真实数据证实或否定这一点：若 `phone` 管线复现得明显比 `clean` 好，真机喂的就是半速音频。
-证实之后再改 `AudioDecoder` —— 改了之后音频概率的分布会变，`fusion_config.json` 必须重新拟合。
+**2026-10-05 用 6 部 bench 片证实**（全是 48kHz 双声道 AAC）：
+
+| | v01 | v02 | v04 | v05 | v06 | v07 |
+|---|---|---|---|---|---|---|
+| `phone` 复现误差 MAE | 0.070 | 0.040 | **0.027** | 0.043 | **0.021** | 0.049 |
+| `clean` 复现误差 MAE | 0.284 | 0.275 | 0.253 | 0.237 | 0.248 | 0.300 |
+
+偏移都在 +25~27ms，v04/v06 逐个结果对上（✓）。同样的旧分类器，喂正确的音频（`clean` 重算）后结果级 AUC：
+
+| 特征 | 旧版 app（真机） | 正确的音频 |
+|---|---|---|
+| `p_sex`（合并 / 最差片） | 0.693 / 0.618 | **0.833** / 0.638 |
+| `p_sex+p_oral`（合并 / 最差片） | 0.641 / 0.479 | **0.901** / 0.829 |
+| AudioSet Speech（判别力，↑剧情） | — | 0.707 / 0.622 |
+
+**修复**：`PcmResampler`（纯 Java）先按声道平均下混，再用 Blackman 窗 sinc 低通插值重采样到 16kHz
+（截止 7.6kHz：7kHz 内 −0.1dB，8.5kHz 以上衰减 >76dB），流式处理、跨 buffer 连续，不丢样本；`AudioDecoder`
+在 `fixed` 模式下把每个解码 buffer 交给它，按"起头 pts + 样本序号/16000"连续写入 `PcmCircularBuffer`。
+`audio_rescore.py` 的 `fixed` 管线是它的逐行移植（`PcmResamplerTest` 用 `audio_rescore.py golden` 的
+对拍数据校验），所以离线重算出的就是手机会喂给模型的音频。
+
+修复由 `fusion_config.json` 的 `audio_pipeline` 打开：现有配置是在半速音频上拟合的，没有这一项，app 行为
+不变。上线步骤：
+
+```bash
+python bench/tools/audio_rescore.py rescore --videos D:/xcup/videos            # 默认 --pipeline fixed
+python bench/tools/fusion_lab.py eval bench/gt bench/rescored/fixed             # 与 bench/runs 的 eval 对比
+python bench/tools/fusion_lab.py eval bench/gt bench/rescored/fixed --speech    # 加上 Speech 证据是否更好
+python bench/tools/fusion_lab.py fit  bench/gt bench/rescored/fixed --mode live [--speech]
+```
+
+`fit` 会检查所有 run 是同一种音频（重算头部的 `pipeline=` / app 参数行的 `AUDIO_PIPE=`），把它写进配置的
+`audio_pipeline`；`clean` 是 app 产生不了的音频，拒绝拟合。新配置装上后 app 的离线模式就按 `fixed` 解码，
+bench 参数行记 `AUDIO_PIPE=fixed`；之后用新包重录 bench，`check` 就是 `fixed` 对 `phone`，并且有 `a_pos`，
+能逐个精确对上。
 
 ### 2. 重算：rescore
 
 ```bash
-python bench/tools/audio_rescore.py rescore --videos D:/xcup/videos --pipeline phone   # 真机现状
-python bench/tools/audio_rescore.py rescore --videos D:/xcup/videos --pipeline clean   # 修好解码之后
-python bench/tools/audio_rescore.py rescore --videos D:/xcup/videos --pipeline clean --classifier new.tflite
+python bench/tools/audio_rescore.py rescore --videos D:/xcup/videos                    # fixed：修复后的 app
+python bench/tools/audio_rescore.py rescore --videos D:/xcup/videos --pipeline phone   # 旧版 app 的现状
+python bench/tools/audio_rescore.py rescore --videos D:/xcup/videos --classifier new.tflite   # 换分类器
 ```
 
 写到 `bench/rescored/<管线>[_<分类器>]/`，**文件名与 `bench/runs/` 里的一样**，所以 metrics.py /
@@ -273,14 +313,14 @@ fusion_lab.py 指向这个目录就能用：
   重放，`fusion_lab.py check` 对重算目录没有意义。
 
 自洽检查：`fusion_lab.py eval bench/gt bench/rescored/phone` 应该和 `bench/runs` 的结果基本一样
-（同一管线、同一模型）。`clean` 和 `phone` 的 eval 一比，就是"修好解码"在端到端上值多少。
+（同一管线、同一模型）。`fixed` 和 `phone` 的 eval 一比，就是"修好解码"在端到端上值多少。
 
 ### 3. 看判别力：auc
 
 ```bash
-python bench/tools/audio_rescore.py auc bench/gt bench/rescored/clean
-python bench/tools/audio_rescore.py auc bench/gt bench/rescored/clean --all-classes   # 521 类排行
-python bench/tools/metrics.py bench/gt/v01.csv bench/rescored/clean/v01_base.csv --diag
+python bench/tools/audio_rescore.py auc bench/gt bench/rescored/fixed
+python bench/tools/audio_rescore.py auc bench/gt bench/rescored/fixed --all-classes   # 521 类排行
+python bench/tools/metrics.py bench/gt/v01.csv bench/rescored/fixed/v01_base.csv --diag
 ```
 
 `auc` 按结果算（每个音频结果一次，只用整个 2 秒窗口都落在同一真值段里的结果，与拟合证据表时用的样本
@@ -289,6 +329,10 @@ python bench/tools/metrics.py bench/gt/v01.csv bench/rescored/clean/v01_base.csv
 1. 全部结果：某个类（如 Speech）是不是在**每部片**上都明显偏离 0.5（"最差片"那一列）；
 2. 只看分类器已经判"转"（`p_sex ≥ 0.5`）的结果：它还能不能把剧情挑出来 —— 这才是"拿它当不转证据、
    压剧情误转"真正需要的。`--scan speech,music` 打印阈值扫描（剧情里命中多少、动作里误伤多少）。
+
+AUC 好看不等于端到端有用：要不要把 Speech 加进融合，以 `fusion_lab.py eval --speech` 的留一结果为准。
+`--speech` 在音频特征候选里加上 `p_sex+p_oral-speech/2`、`p_sex-speech/2`（app 送进证据融合的音频向量是
+`[sex, oral, noise] + a_ys_*`，Java 端不用改），由拟合按代价挑。
 
 ### run CSV 新增的列
 

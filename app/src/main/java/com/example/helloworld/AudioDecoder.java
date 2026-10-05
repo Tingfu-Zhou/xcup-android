@@ -9,6 +9,8 @@ import android.util.Log;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.ShortBuffer;
 import java.util.Map;
 import java.util.function.Supplier;
 
@@ -39,6 +41,17 @@ public class AudioDecoder {
     private Runnable onCompleteListener = null;
 
     private PcmCircularBuffer pcmBuffer;
+
+    /**
+     * [音频修复] true：每个解码 buffer 交给 {@link PcmResampler}（按声道下混 + 抗混叠重采样到 16kHz），
+     * 连续写入、不丢样本，模型窗口就是真正的 [T-2s, T]。
+     * false：原来的处理——交错 PCM 当单声道、每 4 秒块只用前一半，双声道片源送进模型的是 0.5 倍速音频
+     * （bench/tools/audio_rescore.py check 在 6 部片上证实）。保留它是因为现有 fusion_config.json 的证据表
+     * 是在这种音频上拟合的：用哪种，由配置的 audio_pipeline 决定（VideoProcessActivity 读）。
+     */
+    private final boolean fixedPipeline;
+    /** 两个相邻解码 buffer 的 pts 与按样本数推算的时间差超过这个，就当作不连续，重采样器重新起头。 */
+    private static final long DISCONTINUITY_US = 100_000;
 
     private volatile boolean isDecodingFinished = false; // 新增：标志位，表示解码是否完成
 
@@ -80,11 +93,18 @@ public class AudioDecoder {
 
     public AudioDecoder(Context context, Uri videoUri, Map<String, String> httpHeaders,
                         PcmCircularBuffer buffer, Supplier<Integer> videoPositionProvider) {
+        this(context, videoUri, httpHeaders, buffer, videoPositionProvider, false);
+    }
+
+    public AudioDecoder(Context context, Uri videoUri, Map<String, String> httpHeaders,
+                        PcmCircularBuffer buffer, Supplier<Integer> videoPositionProvider,
+                        boolean fixedPipeline) {
         this.context = context;
         this.videoUri = videoUri;
         this.httpHeaders = httpHeaders;
         this.pcmBuffer = buffer;
         this.videoPositionProvider = videoPositionProvider;
+        this.fixedPipeline = fixedPipeline;
     }
 
 
@@ -155,7 +175,15 @@ public class AudioDecoder {
 
                 final int sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE);
                 final int windowSize = sampleRate * 4;
-                Log.d(TAG, "startDecoding: sampleRate=" + sampleRate + ", windowSize=" + windowSize);
+                Log.d(TAG, "startDecoding: sampleRate=" + sampleRate + ", windowSize=" + windowSize
+                        + ", pipeline=" + (fixedPipeline ? "fixed" : "legacy"));
+
+                // [音频修复] 解码器实际输出的采样率/声道数（INFO_OUTPUT_FORMAT_CHANGED 时更新）
+                int[] outFmt = {sampleRate, format.containsKey(MediaFormat.KEY_CHANNEL_COUNT)
+                        ? format.getInteger(MediaFormat.KEY_CHANNEL_COUNT) : 2};
+                PcmResampler resampler = null;
+                long resamplerBaseUs = 0;
+                short[] shorts = new short[0];
 
                 ByteBuffer[] inputBuffers = decoder.getInputBuffers();
                 ByteBuffer[] outputBuffers = decoder.getOutputBuffers();
@@ -187,7 +215,7 @@ public class AudioDecoder {
                         }
                     }
 
-                    int outputIndex = decoder.dequeueOutputBuffer(bufferInfo, 10000);
+                    int outputIndex = dequeueOutput(decoder, bufferInfo, 10000, outFmt);
 
                     while (outputIndex >= 0) {
                         long currentPtsMs = bufferInfo.presentationTimeUs / 1000;
@@ -255,7 +283,44 @@ public class AudioDecoder {
                             Log.d(TAG, "📌 [FIX] 记录窗口起始时间戳: " + windowStartPtsMs + "ms");
                         }
 
-                        // ✅ 正常处理帧数据
+                        if (fixedPipeline) {
+                            // [音频修复] 整个 buffer 下混 + 重采样，产出的 16kHz 样本连续写入；
+                            // 时间戳 = 起头 buffer 的 pts + 样本序号/16000（产出总是 16 的整数倍，正好整毫秒）
+                            ByteBuffer ob = decoder.getOutputBuffer(outputIndex);
+                            if (ob != null && bufferInfo.size > 0) {
+                                ob.position(bufferInfo.offset);
+                                ob.limit(bufferInfo.offset + bufferInfo.size);
+                                ShortBuffer sb = ob.order(ByteOrder.nativeOrder()).asShortBuffer();
+                                int n = sb.remaining();
+                                if (shorts.length < n) shorts = new short[n];
+                                sb.get(shorts, 0, n);
+                                int rate = outFmt[0], ch = Math.max(1, outFmt[1]);
+                                long expectUs = resampler == null ? 0
+                                        : resamplerBaseUs + resampler.inputFrames() * 1_000_000L / rate;
+                                if (resampler == null || resampler.inputRate() != rate
+                                        || resampler.channelCount() != ch
+                                        || Math.abs(bufferInfo.presentationTimeUs - expectUs) > DISCONTINUITY_US) {
+                                    resampler = new PcmResampler(rate, ch);
+                                    resamplerBaseUs = bufferInfo.presentationTimeUs;
+                                    Log.d(TAG, "[音频修复] 重采样器起头: " + rate + "Hz " + ch + "ch, pts="
+                                            + resamplerBaseUs / 1000 + "ms");
+                                }
+                                long first = resampler.outputCount();
+                                float[] out = resampler.process(shorts, 0, n / ch);
+                                if (out.length > 0) {
+                                    pcmBuffer.write(out, resamplerBaseUs / 1000 + first / 16,
+                                            PcmResampler.OUT_RATE);
+                                }
+                            }
+                            if (isEosFrame) {
+                                outputDone = true;
+                            }
+                            decoder.releaseOutputBuffer(outputIndex, false);
+                            outputIndex = dequeueOutput(decoder, bufferInfo, 0, outFmt);
+                            continue;
+                        }
+
+                        // ✅ 正常处理帧数据（原管线）
                         ByteBuffer outputBuffer = outputBuffers[outputIndex];
                         outputBuffer.position(bufferInfo.offset);
                         outputBuffer.limit(bufferInfo.offset + bufferInfo.size);
@@ -323,7 +388,7 @@ public class AudioDecoder {
                         }
 
                         decoder.releaseOutputBuffer(outputIndex, false);
-                        outputIndex = decoder.dequeueOutputBuffer(bufferInfo, 0);
+                        outputIndex = dequeueOutput(decoder, bufferInfo, 0, outFmt);
                     }
 
                 }
@@ -343,6 +408,23 @@ public class AudioDecoder {
                 Log.e(TAG, "音频解码失败: " + e.getMessage());
             }
         }).start();
+    }
+
+    /**
+     * dequeueOutputBuffer，顺带处理 INFO_OUTPUT_FORMAT_CHANGED：记下解码器实际输出的采样率与声道数
+     * （outFmt[0]、outFmt[1]），再取下一个。只在解码线程里调用。
+     */
+    private static int dequeueOutput(MediaCodec decoder, MediaCodec.BufferInfo info, long timeoutUs,
+                                     int[] outFmt) {
+        int idx = decoder.dequeueOutputBuffer(info, timeoutUs);
+        while (idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+            MediaFormat f = decoder.getOutputFormat();
+            if (f.containsKey(MediaFormat.KEY_SAMPLE_RATE)) outFmt[0] = f.getInteger(MediaFormat.KEY_SAMPLE_RATE);
+            if (f.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) outFmt[1] = f.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
+            Log.d(TAG, "解码输出格式: " + outFmt[0] + "Hz " + outFmt[1] + "ch");
+            idx = decoder.dequeueOutputBuffer(info, 0);
+        }
+        return idx;
     }
 
     /**

@@ -10,11 +10,13 @@ run CSV 记下了真机每个音频结果"是哪一刻出的"（wall_ms - a_age�
 子命令:
   check    验证对齐：用 app 里的旧模型，在 run CSV 记录的每个音频结果时刻重算 a_p_*，和真机记下的比。
            同时试两种"喂给模型的音频"，看哪种能把真机概率复现出来：
-             phone  逐行复刻离线模式的 AudioDecoder + PcmCircularBuffer（真机现在实际喂的）
-             clean  正确的做法：下混单声道、重采样到 16kHz、取 [T-2s, T]
+             phone  逐行复刻旧版 AudioDecoder + PcmCircularBuffer（双声道送进去的是半速音频）
+             fixed  修复后的 app：下混 + PcmResampler 重采样到 16kHz，与手机逐样本一致
+             clean  理想参考：ffmpeg 下混、重采样到 16kHz，取 [T-2s, T]
+           默认：旧版 app 录的 run 比 phone/clean，修复后 app 录的 run 比 fixed/phone。
            旧版 run 没记读窗位置，要扫时间偏移；真机解码流开头是否带 AAC priming（--lead）也自动试。
            结果（时间偏移、lead、复现误差）写进 bench/rescored/alignment.json，rescore 直接用。
-  rescore  按指定管线和模型重算每个音频结果，写出新的 run CSV：a_p_* 换成新概率，a_action/a_conf
+  rescore  按指定管线（默认 fixed）和模型重算每个音频结果，写出新的 run CSV：a_p_* 换成新概率，a_action/a_conf
            按原阈值重判，追加 YAMNet AudioSet 类别分数列 a_ys_*。写到 bench/rescored/<tag>/，文件名
            不变，metrics.py / fusion_lab.py 直接能读（fusion_lab 的 check 除外：决策列还是原 run 的）。
   auc      跨片子的音频判别力：每部片和合并后的 AUC。结果级，只用整个 2 秒窗口都落在同一个真值段里的
@@ -22,9 +24,10 @@ run CSV 记下了真机每个音频结果"是哪一刻出的"（wall_ms - a_age�
 
 用法（Windows 把 python3 换成 python）:
   python3 bench/tools/audio_rescore.py check   --videos D:/xcup/videos
+  python3 bench/tools/audio_rescore.py rescore --videos D:/xcup/videos               # fixed
   python3 bench/tools/audio_rescore.py rescore --videos D:/xcup/videos --pipeline phone
-  python3 bench/tools/audio_rescore.py rescore --videos D:/xcup/videos --pipeline clean
-  python3 bench/tools/audio_rescore.py auc bench/gt bench/rescored/clean
+  python3 bench/tools/audio_rescore.py auc bench/gt bench/rescored/fixed
+  python3 bench/tools/audio_rescore.py golden       # 改了 PcmResampler 后重新生成 Java 对拍数据
   python3 bench/tools/audio_rescore.py --selftest
 
 视频的查找：--videos 目录下按 真值文件头的 file_name（如 视频1.mp4）→ 真值 id（v01.*）→ run 文件头
@@ -39,6 +42,7 @@ import datetime
 import glob
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -229,6 +233,97 @@ class PhonePipeline(object):
         return 'AudioDecoder：单声道源每 4 秒只用前 2 秒，速度正确，但中间 2 秒没有数据'
 
 
+class Resampler(object):
+    """app/.../PcmResampler.java 的逐行移植（批量版；Java 是流式的，只在整段末尾可能比这里少几个样本）。
+    Blackman 窗 sinc 低通插值到 16kHz，截止 7600Hz，每侧 24 个过零点，每个相位的系数归一化到和为 1；
+    输入本来就是 16kHz 时直接透传。加法顺序与 Java 相同（逐项累加，double），结果与 Java 逐样本一致到
+    float 最后一两位（sin/cos 的库实现可能差 1ulp）。改算法两边一起改，再跑 golden 重新生成对拍数据。"""
+    CUTOFF_HZ = 7600.0
+    ZERO_CROSSINGS = 24
+    MAX_TABLE_PHASES = 2048
+
+    def __init__(self, in_rate):
+        self.in_rate = in_rate
+        self.passthrough = in_rate == SR
+        g = math.gcd(in_rate, SR)
+        self.num, self.den = in_rate // g, SR // g
+        cutoff = min(self.CUTOFF_HZ, 0.475 * min(in_rate, SR))
+        self.fc = cutoff / in_rate
+        self.width = self.ZERO_CROSSINGS / (2.0 * self.fc)
+        self.half = int(math.ceil(self.width))
+
+    def weights(self, k):
+        """相位 k（数组）的系数 [len(k), 2*half]。"""
+        f = np.asarray(k, np.int64).astype(np.float64)[:, None] / self.den
+        j = np.arange(2 * self.half, dtype=np.float64)[None, :]
+        t = f + self.half - 1 - j
+        x = 2.0 * self.fc * t
+        with np.errstate(divide='ignore', invalid='ignore'):
+            sinc = np.where(x == 0, 1.0, np.sin(np.pi * x) / (np.pi * x))
+        u = t / self.width
+        win = 0.42 + 0.5 * np.cos(np.pi * u) + 0.08 * np.cos(2.0 * np.pi * u)
+        v = np.where(np.abs(t) < self.width, 2.0 * self.fc * sinc * win, 0.0)
+        return v / np.cumsum(v, axis=1)[:, -1:]          # cumsum = 与 Java 相同的逐项累加
+
+    def run(self, mono, chunk=8192):
+        mono = np.asarray(mono, np.float32)
+        if self.passthrough:
+            return mono[:len(mono) - len(mono) % 16].copy()
+        H = self.half
+        lim = len(mono) - 1 - H
+        avail = 0 if lim < 0 else ((lim + 1) * self.den - 1) // self.num + 1
+        N = avail - avail % 16
+        x = np.concatenate([np.zeros(H - 1, np.float32), mono])     # x[i0 + j] = 输入下标 i0-H+1+j
+        table = self.weights(np.arange(self.den)) if self.den <= self.MAX_TABLE_PHASES else None
+        out = np.empty(N, np.float32)
+        taps = np.arange(2 * H)
+        for a in range(0, N, chunk):
+            n = np.arange(a, min(N, a + chunk), dtype=np.int64)
+            p = n * self.num
+            i0, k = p // self.den, p % self.den
+            w = table[k] if table is not None else self.weights(k)
+            prod = x[i0[:, None] + taps].astype(np.float64) * w
+            out[a:a + len(n)] = np.cumsum(prod, axis=1)[:, -1]
+        return out
+
+
+def downmix(pcm, ch):
+    """PcmResampler.process 的下混：各声道整数相加，再除以 channels*32768（float）。"""
+    pcm = np.asarray(pcm, np.int16)
+    pcm = pcm[:len(pcm) - len(pcm) % ch].reshape(-1, ch).astype(np.int32).sum(axis=1)
+    return pcm.astype(np.float32) / np.float32(ch * 32768)
+
+
+class FixedPipeline(object):
+    """修好之后的离线模式（app 里 audio_pipeline=fixed）：AudioDecoder 把每个解码 buffer 交给
+    PcmResampler，产出的 16kHz 样本连续写进 PcmCircularBuffer，时间戳 = 首个 buffer 的 pts + n/16000；
+    readWindowRelaxed(T) 取到的就是 [T-2s, T]。与 app 逐样本一致，所以拿它重算出来的 run 拟合的
+    融合配置，装到手机上就是那个效果。"""
+
+    def __init__(self, pcm, sr, ch, lead=0, base_us=0):
+        _need_numpy()
+        pcm = _apply_lead(np.asarray(pcm, dtype=np.int16), ch, lead)
+        self.sr, self.ch, self.lead = sr, ch, lead
+        self.y = Resampler(sr).run(downmix(pcm, ch))
+        self.base_ms = jdiv(base_us, 1000)
+
+    def window(self, T):
+        T = int(T)
+        # 第 n 个样本的时间戳 = base_ms + n // 16（PcmCircularBuffer.write：块起点 + i*1000/16000）
+        hi = min(len(self.y), max(0, (T - self.base_ms) * 16 + 16))          # ts <= T
+        first = max(0, (1 - self.base_ms) * 16)                               # ts > 0
+        lo = max(first, hi - WIN)
+        cnt = hi - lo
+        if cnt < WIN * 0.9:
+            return None
+        out = np.zeros(WIN, np.float32)
+        out[WIN - cnt:] = self.y[lo:hi]
+        return out
+
+    def describe(self):
+        return '修复后的 app：%d 声道下混 + PcmResampler 抗混叠重采样到 16kHz，窗口 [T-2s, T]' % self.ch
+
+
 class CleanPipeline(object):
     """修好 AudioDecoder 后应有的输入：下混单声道 + 重采样到 16kHz（ffmpeg），取 [T-2s, T]。"""
 
@@ -335,6 +430,10 @@ def build_pipeline(kind, path, info, ffmpeg, frame=None, lead=0):
         pipe = PhonePipeline(pcm, info['sample_rate'], info['channels'], frame or info['frame'],
                              lead, base_us)
         pipe.raw, pipe.base_us = pcm, base_us          # 换 lead 重建时不用再解码
+    elif kind == 'fixed':
+        pcm = decode(path, ffmpeg, ['-f', 's16le', '-acodec', 'pcm_s16le'], np.int16)
+        base_us = int(round(max(0.0, info['start_time']) * 1e6))
+        pipe = FixedPipeline(pcm, info['sample_rate'], info['channels'], lead, base_us)
     else:
         x = decode(path, ffmpeg, ['-ac', '1', '-ar', str(SR), '-f', 'f32le', '-acodec', 'pcm_f32le'],
                    np.float32)
@@ -717,6 +816,20 @@ def _fmt_audio(info):
         info['sample_rate'], info['channels'], info['frame'], info['start_time'])
 
 
+PIPELINES = ('phone', 'fixed', 'clean')
+
+
+def pipelines_to_check(arg, meta):
+    if arg and arg != 'auto':
+        kinds = [k.strip() for k in arg.split(',') if k.strip()]
+        bad = [k for k in kinds if k not in PIPELINES]
+        if bad:
+            sys.exit('--pipeline 只能是 %s 或用逗号组合: %s' % ('/'.join(PIPELINES), bad))
+        return kinds
+    # 旧版 app 录的 run：现状(phone) vs 理想(clean)；修好后的 app 录的：fixed vs phone
+    return ['fixed', 'phone'] if F.audio_pipe_of(meta) == 'fixed' else ['phone', 'clean']
+
+
 def cmd_check(a):
     _need_numpy()
     ffmpeg, ffprobe = find_ffmpeg(a.ffmpeg)
@@ -724,7 +837,6 @@ def cmd_check(a):
     model = AudioModel(a.yamnet, a.classifier, a.threads)
     align = load_alignment(a.alignment)
     rng = tuple(int(x) for x in a.scan.split(':')) if a.scan else None
-    kinds = ('phone', 'clean') if a.pipeline == 'both' else (a.pipeline,)
     summary = []
     for vid, g, r, vpath in pairs:
         t0 = time.time()
@@ -733,6 +845,7 @@ def cmd_check(a):
         meta, data, res = load_results(r)
         usable = _usable(res)
         scan = rng or default_scan(res)
+        kinds = pipelines_to_check(a.pipeline, meta)
         print('══ %s  %s ══' % (vid, os.path.basename(vpath)))
         print('  音轨   %s' % _fmt_audio(info))
         print('  run    %s：%d 个音频结果，可比对 %d 个；%s，偏移在 %d~%dms 里扫'
@@ -804,6 +917,8 @@ def cmd_check(a):
                           % (bk, '（比另一种接近得多）' if others else '', bst['mae'], why))
                 if bk == 'phone' and info['channels'] >= 2:
                     print('    也就是说，真机送进模型的是 0.5 倍速、L/R 交错的音频（AudioDecoder 没按声道数处理）')
+                elif bk == 'fixed':
+                    print('    真机用的是修复后的管线（PcmResampler），与离线 fixed 重算一致')
             else:
                 print('  → ✗ 没能确认：%s' % ('两种管线差不多' if not clear else '最好的 MAE 也有 %.3f'
                                           % bst['mae']))
@@ -985,7 +1100,9 @@ def cmd_rescore(a):
                             scores=np.asarray(Y, np.float16).reshape(-1, N_AUDIOSET))
         line = '  %-5s %s 管线，偏移 %+dms（%s）：%d/%d 个结果' % (
             vid, a.pipeline, delta, src, len(computed), len(res))
-        if a.pipeline == 'phone':           # 复刻真机的管线 + 旧模型：应与真机记录一致
+        same = {'phone': 'legacy', 'fixed': 'fixed'}.get(a.pipeline) == F.audio_pipe_of(meta) \
+            and os.path.abspath(a.classifier) == os.path.abspath(DEFAULT_CLASSIFIER)
+        if same:                            # 与录这份 run 的 app 同一管线、同一模型：应与真机记录一致
             pairs_ = [(computed[x.ts][0], x.logged) for x in _usable(res) if x.ts in computed]
             if pairs_:
                 st = match_stats(np.asarray([p for p, _ in pairs_], np.float64),
@@ -1172,6 +1289,47 @@ def cmd_auc(a):
                   + '   %.3f  %s' % (pooled, '↑转' if pooled >= 0.5 else '↑剧情'))
 
 
+# ======================================================================== Java 对拍数据
+GOLDEN_PATH = os.path.join(ROOT, 'app', 'src', 'test', 'resources', 'audio', 'resampler_golden.txt')
+# (输入采样率, 声道数)：常见的 48k/44.1k 双声道，加上单声道、整数比、透传、升采样、多声道
+GOLDEN_CASES = [(48000, 2), (44100, 2), (44100, 1), (22050, 2), (32000, 1), (16000, 2), (8000, 1),
+                (96000, 6)]
+GOLDEN_SECONDS = 0.06
+_M64 = (1 << 64) - 1
+
+
+def golden_pcm(sr, ch, seconds=GOLDEN_SECONDS):
+    """对拍输入：64 位 LCG 白噪声（满幅 int16）。Java 端（PcmResamplerTest）用同样的整数运算生成，
+    所以输入不用存进文件。"""
+    n = int(sr * seconds) * ch
+    st = sr * 31 + ch
+    out = np.empty(n, np.int16)
+    for i in range(n):
+        st = (st * 6364136223846793005 + 1442695040888963407) & _M64
+        out[i] = (st >> 48) - 32768
+    return out
+
+
+def golden(path=GOLDEN_PATH, write=True):
+    lines = ['# PcmResampler 对拍数据：python3 bench/tools/audio_rescore.py golden 生成，PcmResamplerTest 校验。',
+             '# 输入是 golden_pcm() 的 LCG 白噪声（Java 端同样生成）；每个 case 后面是期望的 16kHz 输出。',
+             '# case <输入采样率> <声道数> <帧数> <输出个数>']
+    for sr, ch in GOLDEN_CASES:
+        pcm = golden_pcm(sr, ch)
+        y = Resampler(sr).run(downmix(pcm, ch))
+        lines.append('case %d %d %d %d' % (sr, ch, len(pcm) // ch, len(y)))
+        for a in range(0, len(y), 8):
+            lines.append(' '.join('%.9g' % v for v in y[a:a + 8]))          # float 9 位有效数字可无损往返
+    text = '\n'.join(lines) + '\n'
+    if write:
+        d = os.path.dirname(path)
+        if not os.path.isdir(d):
+            os.makedirs(d)
+        with io.open(path, 'w', encoding='utf-8', newline='\n') as fh:
+            fh.write(text)
+    return text
+
+
 # ======================================================================== selftest
 def _java_reference(pcm, sr, ch, frame, Ts, lead=0, base_us=0):
     """把 AudioDecoder.startDecoding() 的循环和 PcmCircularBuffer 一行一行照抄成 Python（慢），
@@ -1316,6 +1474,22 @@ def selftest():
     check(np.abs(approx - blk).max() < 0.01 and np.corrcoef(approx, blk)[0, 1] > 0.9999,
           '双声道块内容不是"前 1 秒交错样本拉成 2 秒"')
 
+    # 2b. 修复后的管线：重采样器与 Java 对拍数据一致；16kHz 透传时窗口逐点就是原样本；滤波器通带/阻带
+    if os.path.exists(GOLDEN_PATH):
+        check(golden(write=False) == io.open(GOLDEN_PATH, encoding='utf-8').read(),
+              'Resampler 与已提交的对拍数据不一致：改了算法要同步 PcmResampler.java 并跑 golden')
+    x16 = (np.arange(SR * 6) % 2000 - 1000).astype(np.int16)
+    fp = FixedPipeline(x16, SR, 1)
+    w = fp.window(4000)
+    check(w is not None and np.array_equal(w, x16[16 * 4001 - WIN:16 * 4001].astype(np.float32) / 32768),
+          'FixedPipeline 16kHz 透传时窗口应正好是 [T-2s, T] 的原样本')
+    tt = np.arange(48000) / 48000.0
+    for hz, lo, hi in ((1000, 0.99, 1.01), (10000, 0.0, 1e-3)):
+        tone = np.round(16384 * np.sin(2 * np.pi * hz * tt)).astype(np.int16)
+        y = Resampler(48000).run(downmix(np.repeat(tone, 2), 2))[800:-800]
+        gain = np.sqrt(np.mean(y ** 2)) / (0.5 / np.sqrt(2))
+        check(lo <= gain <= hi, 'Resampler 48k→16k 在 %dHz 的增益 %.4f 不在 [%g, %g]' % (hz, gain, lo, hi))
+
     # 3. clean 管线取窗
     x = np.arange(SR * 10, dtype=np.float32)
     c = CleanPipeline(x)
@@ -1449,7 +1623,9 @@ def main():
 
     p = sub.add_parser('check', help='用旧模型复现真机的 a_p_*，验证对齐，判断真机喂的是哪种音频')
     common(p)
-    p.add_argument('--pipeline', default='both', choices=('both', 'phone', 'clean'))
+    p.add_argument('--pipeline', default='auto',
+                   help='比哪几种管线，逗号分隔：phone / fixed / clean。默认 auto：旧版 run 比 phone,clean，'
+                        '修复后 app 录的 run（参数行 AUDIO_PIPE=fixed）比 fixed,phone')
     p.add_argument('--scan', help='偏移扫描范围 起:止:步长（ms）。默认旧版 run %d:%d:%d，有 a_pos 的 run %d:%d:%d'
                    % (SCAN_RANGE + SCAN_RANGE_POS))
     p.add_argument('--dump', action='store_true', help='把逐结果的对比写成 bench/rescored/check_<id>.csv')
@@ -1457,8 +1633,9 @@ def main():
 
     p = sub.add_parser('rescore', help='重算 a_p_* 和 a_ys_*，写出新的 run CSV')
     common(p)
-    p.add_argument('--pipeline', default='clean', choices=('phone', 'clean'),
-                   help='phone=复刻真机现在的解码；clean=正确的单声道 16kHz（默认）')
+    p.add_argument('--pipeline', default='fixed', choices=PIPELINES,
+                   help='fixed=修复后的 app（PcmResampler，与手机逐样本一致，拟合要用它，默认）；'
+                        'phone=复刻旧版 app 的半速音频；clean=ffmpeg 重采样的理想参考')
     p.add_argument('--offset', type=int, default=None,
                    help='时间偏移 ms（默认取 alignment.json 里 check 找到的）')
     p.add_argument('--tag', help='输出子目录名（默认按管线/模型自动起，如 clean）')
@@ -1472,9 +1649,16 @@ def main():
     p.add_argument('--all-classes', action='store_true', help='AudioSet 521 类排行（需要 .yamnet.npz）')
     p.add_argument('--top', type=int, default=20)
 
+    sub.add_parser('golden', help='重新生成 Java 端 PcmResamplerTest 的对拍数据（改了重采样算法才需要）')
+
     a = ap.parse_args()
     if a.selftest:
         sys.exit(selftest())
+    if a.cmd == 'golden':
+        _need_numpy()
+        golden()
+        print('已写出 %s' % _rel(GOLDEN_PATH))
+        return
     if a.cmd == 'check':
         a.pair = a.pair or []
         cmd_check(a)
