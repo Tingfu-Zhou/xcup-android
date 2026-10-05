@@ -231,7 +231,7 @@ python bench/tools/audio_rescore.py check --videos D:/xcup/videos
 |---|---|
 | `phone` | 逐行复刻旧版 `AudioDecoder` + `PcmCircularBuffer`（与真正的 Java 代码逐点一致） |
 | `fixed` | 修复后的 app：下混 + `PcmResampler` 重采样到 16kHz，取 `[T-2s, T]`（与 Java 逐点一致，`PcmResamplerTest` 对拍） |
-| `clean` | 理想参考：ffmpeg 下混、重采样到 16kHz，取 `[T-2s, T]` |
+| `clean` | 与训练数据相同：`ffmpeg -ac 1 -ar 16000` 转 16-bit（下混 = (L+R)/2），取 `[T-2s, T]` |
 
 默认：旧版 app 录的 run 比 `phone`/`clean`；修复后的 app 录的 run（参数行 `AUDIO_PIPE=fixed`）比
 `fixed`/`phone`。`--pipeline phone,fixed,clean` 可以自己指定。每部片每种管线约 1 分多钟。看输出的最后一行：

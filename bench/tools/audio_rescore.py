@@ -12,7 +12,7 @@ run CSV 记下了真机每个音频结果"是哪一刻出的"（wall_ms - a_age�
            同时试两种"喂给模型的音频"，看哪种能把真机概率复现出来：
              phone  逐行复刻旧版 AudioDecoder + PcmCircularBuffer（双声道送进去的是半速音频）
              fixed  修复后的 app：下混 + PcmResampler 重采样到 16kHz，与手机逐样本一致
-             clean  理想参考：ffmpeg 下混、重采样到 16kHz，取 [T-2s, T]
+             clean  与训练数据相同的处理：ffmpeg -ac 1 -ar 16000（16-bit），取 [T-2s, T]
            默认：旧版 app 录的 run 比 phone/clean，修复后 app 录的 run 比 fixed/phone。
            旧版 run 没记读窗位置，要扫时间偏移；真机解码流开头是否带 AAC priming（--lead）也自动试。
            结果（时间偏移、lead、复现误差）写进 bench/rescored/alignment.json，rescore 直接用。
@@ -325,7 +325,7 @@ class FixedPipeline(object):
 
 
 class CleanPipeline(object):
-    """修好 AudioDecoder 后应有的输入：下混单声道 + 重采样到 16kHz（ffmpeg），取 [T-2s, T]。"""
+    """训练数据的做法：ffmpeg -ac 1 -ar 16000 转 16-bit 单声道（下混 = (L+R)/2），取 [T-2s, T]。"""
 
     def __init__(self, mono16k, base_ms=0.0):
         _need_numpy()
@@ -343,7 +343,7 @@ class CleanPipeline(object):
         return out
 
     def describe(self):
-        return '下混单声道 + ffmpeg 重采样到 16kHz，窗口 [T-2s, T]'
+        return '与训练数据相同：ffmpeg -ac 1 -ar 16000（16-bit），窗口 [T-2s, T]'
 
 
 # ======================================================================== ffmpeg
@@ -435,8 +435,10 @@ def build_pipeline(kind, path, info, ffmpeg, frame=None, lead=0):
         base_us = int(round(max(0.0, info['start_time']) * 1e6))
         pipe = FixedPipeline(pcm, info['sample_rate'], info['channels'], lead, base_us)
     else:
-        x = decode(path, ffmpeg, ['-ac', '1', '-ar', str(SR), '-f', 'f32le', '-acodec', 'pcm_f32le'],
-                   np.float32)
+        # 与训练脚本完全相同：ffmpeg -ac 1 -ar 16000 输出 16-bit。注意不能直接要 f32 输出——ffmpeg 只在
+        # 整数输出格式下把下混系数归一化成 (L+R)/2，f32 输出是 0.707*(L+R)，比训练数据响 3dB。
+        x = decode(path, ffmpeg, ['-ac', '1', '-ar', str(SR), '-f', 's16le', '-acodec', 'pcm_s16le'],
+                   np.int16).astype(np.float32) / np.float32(32768)
         pipe = CleanPipeline(x, max(0.0, info['start_time']) * 1000.0)
     pipe.build_s = time.time() - t0
     return pipe
@@ -1635,7 +1637,7 @@ def main():
     common(p)
     p.add_argument('--pipeline', default='fixed', choices=PIPELINES,
                    help='fixed=修复后的 app（PcmResampler，与手机逐样本一致，拟合要用它，默认）；'
-                        'phone=复刻旧版 app 的半速音频；clean=ffmpeg 重采样的理想参考')
+                        'phone=复刻旧版 app 的半速音频；clean=与训练数据相同的 ffmpeg 处理（参考）')
     p.add_argument('--offset', type=int, default=None,
                    help='时间偏移 ms（默认取 alignment.json 里 check 找到的）')
     p.add_argument('--tag', help='输出子目录名（默认按管线/模型自动起，如 clean）')
