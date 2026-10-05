@@ -95,7 +95,23 @@ public class VideoProcessActivity extends AppCompatActivity {
     private String fusionModeTag = "legacy";        // 写进评测参数行，例如 shadow/provisional-20261004
     // 模型结果快照（概率 + 产出时刻）作为一个对象原子发布，证据融合不会读到"新概率配旧时间戳"
     private final AtomicReference<EvidenceFusion.Snapshot> latestVideoSnap = new AtomicReference<>(null);
-    private final AtomicReference<EvidenceFusion.Snapshot> latestAudioSnap = new AtomicReference<>(null);
+    private final AtomicReference<AudioSnap> latestAudioSnap = new AtomicReference<>(null);
+
+    /**
+     * 音频结果快照：snap 给证据融合；winEndPosMs / audioSet 是同一次推理的附带信息，只写评测 CSV
+     * （a_pos / a_ys_* 列）。有了 a_pos，bench/tools/audio_rescore.py 离线重算时能精确还原模型窗口。
+     */
+    private static final class AudioSnap {
+        final EvidenceFusion.Snapshot snap;
+        final long winEndPosMs;     // 读 PCM 时的播放位置：模型窗口 = [winEndPosMs-2s, winEndPosMs]
+        final float[] audioSet;     // AudioInferenceHelper.AUDIOSET_LOG_CLASSES 的分数，推理失败时为 null
+
+        AudioSnap(EvidenceFusion.Snapshot snap, long winEndPosMs, float[] audioSet) {
+            this.snap = snap;
+            this.winEndPosMs = winEndPosMs;
+            this.audioSet = audioSet;
+        }
+    }
 
     // 7.19 新增：时间窗口平滑相关变量
     // [延迟优化] 窗口从 10 收缩到 6：融合循环现为 500ms 一次，6 条记录约覆盖 3 秒。
@@ -690,8 +706,9 @@ public class VideoProcessActivity extends AppCompatActivity {
                                 // [证据融合] 原始概率 + 产出时刻打包成快照原子发布（评测 CSV 的 a_p_* 也取自它）
                                 long resultTs = System.currentTimeMillis();
                                 boolean probsOk = result.index >= 0 && result.probs.length >= 3;
-                                latestAudioSnap.set(new EvidenceFusion.Snapshot(
-                                        probsOk ? result.probs.clone() : null, resultTs));
+                                latestAudioSnap.set(new AudioSnap(
+                                        new EvidenceFusion.Snapshot(probsOk ? result.probs.clone() : null, resultTs),
+                                        currentMs, probsOk ? result.audioSet : null));
 
                                 // 原子更新结果
                                 latestAudioAction.set(action);
@@ -764,7 +781,8 @@ public class VideoProcessActivity extends AppCompatActivity {
                 long audioTime = latestAudioTimestamp.get();
                 // [证据融合] 模型结果快照（与上面的动作串最多差一个推理周期，各自内部一致）
                 EvidenceFusion.Snapshot vSnap = latestVideoSnap.get();
-                EvidenceFusion.Snapshot aSnap = latestAudioSnap.get();
+                AudioSnap aRes = latestAudioSnap.get();
+                EvidenceFusion.Snapshot aSnap = aRes == null ? null : aRes.snap;
 
                 // 音频节奏
                 boolean audioFreqValid = latestAudioLoudValid.get();
@@ -856,6 +874,8 @@ public class VideoProcessActivity extends AppCompatActivity {
                             audioAction, audioConf,
                             aSnap == null ? Long.MAX_VALUE : currentTime - aSnap.tsMs,
                             aSnap == null ? null : aSnap.probs,
+                            aRes == null ? -1 : aRes.winEndPosMs,
+                            aRes == null ? null : aRes.audioSet,
                             Float.isNaN(audioFreq) ? -1 : Math.round(audioFreq),
                             audioFreqConf, audioFreqValid, audioFreqAge,
                             smoothedAction, finalAction, finalFreq,

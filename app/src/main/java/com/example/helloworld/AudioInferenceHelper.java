@@ -11,6 +11,8 @@ import java.io.IOException;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Map;
 
 
 public class AudioInferenceHelper {
@@ -23,6 +25,18 @@ public class AudioInferenceHelper {
     private static final int SAMPLE_RATE = 16000;
     private static final int INPUT_LENGTH = 32000; // 2秒音频数据
     private static final int EMBEDDING_SIZE = 1024;
+    private static final int AUDIOSET_CLASSES = 521;
+    // 32000 点输入 → 4 帧（每帧 0.96 秒、步长 0.48 秒，末帧补零）
+    private static final int YAMNET_FRAMES = 4;
+
+    /**
+     * 写进评测 CSV（a_ys_* 列）的 AudioSet 类别：YAMNet output 0 的列号，按帧取平均。
+     * 前 4 类是"剧情"候选证据（对白、旁白、配乐），其余是"动作"候选。
+     * 与 BenchLogger 表头、bench/tools/metrics.py 的 YS_CLASSES 一一对应（metrics.py --selftest 核对）。
+     */
+    public static final int[] AUDIOSET_LOG_CLASSES = {0, 2, 3, 132, 494, 22, 33, 36, 40, 461};
+    public static final String[] AUDIOSET_LOG_NAMES = {"speech", "conversation", "narration", "music",
+            "silence", "moan", "groan", "breathing", "pant", "slap"};
 
     private NnApiDelegate nnApiDelegate;
 
@@ -59,10 +73,16 @@ public class AudioInferenceHelper {
         public final float confidence;
         // 三分类完整概率 [sex, oral, noise]，供分组概率决策使用；无效结果时为空数组
         public final float[] probs;
+        // AUDIOSET_LOG_CLASSES 各类的 AudioSet 分数（各帧平均），只写评测 CSV；无效结果时为空数组
+        public final float[] audioSet;
         public AudioInferenceResult(int index, float confidence, float[] probs) {
+            this(index, confidence, probs, null);
+        }
+        public AudioInferenceResult(int index, float confidence, float[] probs, float[] audioSet) {
             this.index = index;
             this.confidence = confidence;
             this.probs = probs != null ? probs : new float[0];
+            this.audioSet = audioSet != null ? audioSet : new float[0];
         }
     }
 
@@ -82,10 +102,15 @@ public class AudioInferenceHelper {
         // 1. 输入 YAMNet 模型
         Object[] inputArray = { audioBuffer };
 
+        // YAMNet 有 3 个输出：0 = AudioSet 521 类分数 [帧, 521]，1 = embedding [帧, 1024]，2 = log-mel。
+        // 整张图每次都会算完，多取 output 0 只是多拷 4x521 个 float。
         // ⚠️ YAMNet 输出 shape 为 [num_frames, 1024]，不是 [1, 96, 1024]
-        float[][] yamnetEmbeddingOutput = new float[4][EMBEDDING_SIZE]; // 实际推理出来是 [4, 1024]
-        yamnetInterpreter.runForMultipleInputsOutputs(inputArray,
-                java.util.Collections.singletonMap(1, yamnetEmbeddingOutput));
+        float[][] yamnetScores = new float[YAMNET_FRAMES][AUDIOSET_CLASSES];
+        float[][] yamnetEmbeddingOutput = new float[YAMNET_FRAMES][EMBEDDING_SIZE]; // 实际推理出来是 [4, 1024]
+        Map<Integer, Object> outputs = new HashMap<>();
+        outputs.put(0, yamnetScores);
+        outputs.put(1, yamnetEmbeddingOutput);
+        yamnetInterpreter.runForMultipleInputsOutputs(inputArray, outputs);
 
         // 2. 对 embedding 做平均
         int frameCount = yamnetEmbeddingOutput.length;
@@ -118,7 +143,17 @@ public class AudioInferenceHelper {
                 bestIndex = i;
             }
         }
-        return new AudioInferenceResult(bestIndex, maxScore, scores.clone());
+
+        // 5. 挑出的 AudioSet 类别分数，各帧平均（bench/tools/audio_rescore.py 离线重算时同样按帧平均）
+        float[] audioSet = new float[AUDIOSET_LOG_CLASSES.length];
+        for (int k = 0; k < AUDIOSET_LOG_CLASSES.length; k++) {
+            float s = 0f;
+            for (int i = 0; i < frameCount; i++) {
+                s += yamnetScores[i][AUDIOSET_LOG_CLASSES[k]];
+            }
+            audioSet[k] = s / frameCount;
+        }
+        return new AudioInferenceResult(bestIndex, maxScore, scores.clone(), audioSet);
 
     }
 

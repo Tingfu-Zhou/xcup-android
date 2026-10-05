@@ -1648,12 +1648,13 @@ def _write_synth(video, gt_path, run_path, fusion=''):
             def pr(ps, i):
                 return '' if ps is None else '%.4f' % ps[i]
             lg = t.log
-            fh.write(','.join(str(x) for x in [
-                t.pos, t.wall, t.v, '%.4f' % t.vc, t.v_age, pr(t.vp, 0), pr(t.vp, 1), pr(t.vp, 2),
-                t.a, '%.4f' % t.ac, t.a_age, pr(t.ap, 0), pr(t.ap, 1), pr(t.ap, 2),
-                t.loud_lv, '%.4f' % t.loud_conf, 1, 100,
-                lg['smoothed'], lg['gated'], lg['final_freq'], lg['ble_state'], lg['ble_level'],
-                lg['sent'], lg['sent_action'], lg['sent_level'], '', '', '', '']) + '\n')
+            row = [t.pos, t.wall, t.v, '%.4f' % t.vc, t.v_age, pr(t.vp, 0), pr(t.vp, 1), pr(t.vp, 2),
+                   t.a, '%.4f' % t.ac, t.a_age, pr(t.ap, 0), pr(t.ap, 1), pr(t.ap, 2),
+                   t.loud_lv, '%.4f' % t.loud_conf, 1, 100,
+                   lg['smoothed'], lg['gated'], lg['final_freq'], lg['ble_state'], lg['ble_level'],
+                   lg['sent'], lg['sent_action'], lg['sent_level'], '', '', '', '']
+            row += [''] * (len(M.RUN_COLS_NEEDED) - len(row))      # 后加的列（a_ys_* 等）留空
+            fh.write(','.join(str(x) for x in row) + '\n')
 
 
 def selftest():

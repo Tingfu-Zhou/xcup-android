@@ -27,6 +27,15 @@ LAT_PRE   = 5000    # 允许提前多久（抢跑记为负延迟）
 LABELS = ('plot', 'oral', 'sex', 'other_adult', 'exclude')
 BIN    = {'plot': 'noise', 'oral': 'do', 'sex': 'do'}
 
+# YAMNet output 0 是 AudioSet 521 类分数 [帧, 521]。按帧取平均后，挑这几类写进 run CSV 的 a_ys_* 列：
+# (列名后缀, AudioSet 类别号, 英文类名)。与 AudioInferenceHelper.AUDIOSET_LOG_CLASSES 一一对应，
+# --selftest 会核对两边。前 4 类是"剧情"候选证据（对白、旁白、配乐），其余是"动作"候选。
+YS_CLASSES = [('speech', 0, 'Speech'), ('conversation', 2, 'Conversation'),
+              ('narration', 3, 'Narration, monologue'), ('music', 132, 'Music'),
+              ('silence', 494, 'Silence'), ('moan', 22, 'Wail, moan'), ('groan', 33, 'Groan'),
+              ('breathing', 36, 'Breathing'), ('pant', 40, 'Pant'), ('slap', 461, 'Slap, smack')]
+YS_COLS = ['a_ys_' + n for n, _, _ in YS_CLASSES]
+
 
 # ----------------------------------------------------------------- 读文件
 def _rows(path):
@@ -110,6 +119,7 @@ def read_run(path):
             'a': _norm(d.get('a_action')), 'a_conf': f('a_conf'), 'a_age': i('a_age', -1),
             'vp': [f('v_p_plot', -1), f('v_p_oral', -1), f('v_p_sex', -1)],
             'ap': [f('a_p_sex', -1), f('a_p_oral', -1), f('a_p_noise', -1)],
+            'ys': [f(c, -1) for c in YS_COLS],          # 旧版 dump 没有这些列：全是 -1
             'loud_lv': i('loud_lv', -1), 'loud_conf': f('loud_conf'),
             'smoothed': _norm(d.get('smoothed')), 'gated': _norm(d.get('gated')),
             'ble_state': _norm(d.get('ble_state')), 'ble_level': i('ble_level'),
@@ -375,6 +385,18 @@ def report_diag(segs, rows, policy):
         pos, neg = _split(segs, rows, policy, fn)
         print('    %-26s AUC = %.3f   (n=%d/%d)' % (name, _auc(pos, neg), len(pos), len(neg)))
 
+    if any(r['ys'][0] >= 0 for r in rows):
+        print('\n  YAMNet AudioSet 类别分数（a_ys_*）的 AUC：>0.5 越高越像动作，<0.5 越高越像剧情；'
+              '判别力 = 离 0.5 多远')
+        for k, (short, idx, en) in enumerate(YS_CLASSES):
+            pos, neg = _split(segs, rows, policy, lambda r, k=k: r['ys'][k] if r['ys'][k] >= 0 else None)
+            auc = _auc(pos, neg)
+            if auc != auc:
+                continue
+            print('    %-26s AUC = %.3f   判别力 %.3f %s  (n=%d/%d)'
+                  % ('%s #%d' % (en, idx), auc, max(auc, 1 - auc),
+                     '↑转  ' if auc >= 0.5 else '↑剧情', len(pos), len(neg)))
+
     for name, fn, ths in (
             ('视频 pDo = p_oral+p_sex（现用阈值 0.65）',
              lambda r: r['vp'][1] + r['vp'][2] if r['vp'][1] >= 0 else None,
@@ -522,7 +544,9 @@ RUN_COLS_NEEDED = ['pos_ms', 'wall_ms',
                    'smoothed', 'gated', 'final_freq',
                    'ble_state', 'ble_level', 'sent', 'sent_action', 'sent_level',
                    # 证据融合的影子列（mode=shadow/live 时有值），由 fusion_lab.py check --config 对拍
-                   'ev_action', 'ev_l', 'ev_llr_v', 'ev_llr_a']
+                   'ev_action', 'ev_l', 'ev_llr_v', 'ev_llr_a',
+                   # 音频窗口结尾的播放位置 + AudioSet 类别分数，给 audio_rescore.py / --diag 用
+                   'a_pos'] + YS_COLS
 
 
 def _java_header():
@@ -556,6 +580,29 @@ def check_contract():
     return out
 
 
+def check_audioset_contract():
+    """a_ys_* 每列对应哪个 AudioSet 类别号，Java（AudioInferenceHelper）和这里必须一致。"""
+    j = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                     '..', '..', 'app', 'src', 'main', 'java', 'com', 'example',
+                     'helloworld', 'AudioInferenceHelper.java')
+    if not os.path.exists(j):
+        print('  skip AudioInferenceHelper.java 不在当前路径，跳过 AudioSet 类别契约检查')
+        return []
+    txt = io.open(j, encoding='utf-8').read()
+    mi = re.search(r'AUDIOSET_LOG_CLASSES\s*=\s*\{([^}]*)\}', txt)
+    mn = re.search(r'AUDIOSET_LOG_NAMES\s*=\s*\{([^}]*)\}', txt)
+    if not mi or not mn:
+        return ['AudioInferenceHelper.java 里找不到 AUDIOSET_LOG_CLASSES / AUDIOSET_LOG_NAMES']
+    idx = [int(x) for x in re.findall(r'\d+', mi.group(1))]
+    names = re.findall(r'"([^"]*)"', mn.group(1))
+    want = [(n, i) for n, i, _ in YS_CLASSES]
+    if list(zip(names, idx)) != want or len(names) != len(idx):
+        return ['AudioSet 类别与 Java 不一致: Java %s vs metrics.YS_CLASSES %s'
+                % (list(zip(names, idx)), want)]
+    print('  ok   AudioSet 类别契约一致（%d 类）' % len(idx))
+    return []
+
+
 def _write_run_csv(path, rows):
     """按 BenchLogger 的真实格式落盘，用来验证 read_run 的解析路径。"""
     with io.open(path, 'w', encoding='utf-8', newline='') as fh:
@@ -571,7 +618,7 @@ def _write_run_csv(path, rows):
                         r['smoothed'], r['gated'], r['ble_level'],
                         r['ble_state'], r['ble_level'],
                         1 if r['sent'] else 0, r['sent_action'], r['sent_level'],
-                        '', '', '', ''])
+                        '', '', '', '', -1] + ['0.1000'] * len(YS_COLS))
 def selftest():
     """用真值合成一份"延迟固定 2000ms 的完美系统"的 run CSV，验证指标算得对。"""
     segs = [(0, 6900, 'exclude'), (6900, 214503, 'plot'), (214503, 318624, 'other_adult'),
@@ -644,6 +691,7 @@ def selftest():
 
     # CSV 落盘 -> 解析 的往返，确保 Java 写出来的东西 Python 读得对
     fails += check_contract()
+    fails += check_audioset_contract()
     import tempfile
     tmp = os.path.join(tempfile.gettempdir(), 'xcup_selftest_run.csv')
     base = synth(LAG)
@@ -657,6 +705,8 @@ def selftest():
         for k in ('pos', 'v', 'a', 'smoothed', 'gated', 'sent', 'sent_action'):
             if [x[k] for x in rr] != [x[k] for x in base]:
                 fails.append('CSV 往返列 %s 不一致' % k)
+        if any(x['ys'] != [0.1] * len(YS_COLS) for x in rr):
+            fails.append('CSV 往返 a_ys_* 列没读对')
     m6 = evaluate(segs, dur, rr, 'exclude')
     if abs(m6['acc'] - m['acc']) > 1e-9 or m6['lat'] != m['lat']:
         fails.append('从 CSV 读回来算出的指标与内存版不一致')

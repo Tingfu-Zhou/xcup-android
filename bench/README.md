@@ -9,11 +9,15 @@ bench/
   ANNOTATION_SPEC.md      人工真值标注规范（改动需递增 spec_version）
   gt/<video_id>.csv       人工真值（提交进 git）
   runs/<video_id>_*.csv   真机 dump（提交进 git：融合配置是从它们拟合出来的，要能复现）
+  rescored/               audio_rescore.py 的输出：对齐结果 alignment.json + 离线重算的 run CSV
+  videos/                 原始视频（不进 git，放这里命令最短；也可以放别处用 --videos 指定）
   tools/
     labeler.html          真值标注器，双击即用，纯本地无上传
     test_labeler.js       标注器核心逻辑测试：node bench/tools/test_labeler.js
     metrics.py            单部片的指标 / 误判定位 / 模态诊断
     fusion_lab.py         融合层离线实验台：回放、交叉验证、模态上限、拟合配置
+    audio_rescore.py      音频离线重打分：从原视频还原真机送进模型的 2 秒音频，换模型/换解码方式重算
+    yamnet_class_map.csv  YAMNet 的 AudioSet 521 类名（来自 tensorflow/models，Apache-2.0）
 ```
 
 ## 标注
@@ -190,4 +194,112 @@ v06 85.2→100，v07 62.6→69.1）。剩下的误转主要在 v04/v07：剧情�
 ```bash
 python3 bench/tools/fusion_lab.py --selftest
 python3 bench/tools/metrics.py --selftest
+python3 bench/tools/audio_rescore.py --selftest   # 需要 numpy；有 TFLite 解释器时多跑一个端到端对齐测试
 ```
+
+## 音频离线重打分 audio_rescore.py
+
+run CSV 记下了真机每个音频结果"是哪一刻出的"（`wall_ms - a_age`）和当时的播放位置。有原视频，就能在
+电脑上把那一刻送进模型的 2 秒音频还原出来、重新推理：换分类器、换解码方式、看 YAMNet 自带的 AudioSet
+类别分数，都不用再上真机从头播一遍。
+
+依赖（Windows 也一样）：
+
+```bash
+pip install numpy ai-edge-litert     # TFLite 解释器，Python 3.10+；已经装了 tensorflow 也行
+# ffmpeg / ffprobe 放进 PATH，或者每条命令加 --ffmpeg C:/ffmpeg/bin/ffmpeg.exe
+```
+
+视频按真值文件头的 `file_name`（如 `视频1.mp4`）在 `--videos` 目录里找（默认 `bench/videos/`），
+找不到再按真值 id（`v01.mp4`）和 run 文件头的 `video_name` 找；也可以 `--pair v01=D:/xcup/视频1.mp4`。
+文件大小和真值里记的 `file_size` 对不上会提示。`--only v01,v04` 只跑其中几部。
+
+### 1. 先验证对齐：check
+
+```bash
+python bench/tools/audio_rescore.py check --videos D:/xcup/videos
+```
+
+用 app 里的旧模型在每个音频结果时刻重算 `a_p_*`，和真机记下的比。同时试两种"喂给模型的音频"：
+
+| 管线 | 是什么 |
+|---|---|
+| `phone` | 逐行复刻离线模式现在的 `AudioDecoder` + `PcmCircularBuffer`（`--selftest` 与照抄的 Java 循环逐点对拍） |
+| `clean` | 正确的做法：下混单声道、ffmpeg 重采样到 16kHz、取 `[T-2s, T]` |
+
+哪种能把真机概率复现出来，真机喂给模型的就是哪种。每部片约 2 分钟。看输出的最后一行：
+
+- `✓ 对齐验证通过`：逐个结果都对上了（MAE < 0.04），后面的重算可以直接信。
+- `✓ 真机喂给模型的是 X 管线的音频……但逐个结果还有出入`：管线认对了，只是旧版 run 没记读窗位置，
+  只能从出结果时刻反推，几毫秒的抖动就会让概率有出入（模型对窗口位置非常敏感：平移 1~5ms，三类概率的
+  平均差就有 0.03~0.06）。不影响用重算结果做 AUC / 融合评估。
+- `✗ 没能确认`：先确认视频文件对不对，再用 `--verbose` 看候选偏移，试 `--frame-size 2048`。
+
+时间偏移（旧版 run 约等于推理耗时 65ms）、真机解码流开头有没有 AAC priming（`--lead`，自动试 1024/2048/2112）
+都是扫出来的，写进 `bench/rescored/alignment.json`，`rescore` 直接用。`--dump` 把逐个结果的对比写成
+`bench/rescored/check_<id>.csv`。
+
+### ⚠ 读代码发现：离线模式喂给模型的音频是半速的
+
+`AudioDecoder` 没看声道数，把 MediaCodec 输出的交错 PCM（L R L R …）直接当单声道用：
+`windowSize = sampleRate*4` 个 short 凑一块，重采样时按 `i/sampleRate` 算时间轴、只取前 2 秒。对双声道
+片源（绝大多数 MP4）这意味着：
+
+- 每 2 秒的块只用到**前 1 秒**真实音频，L/R 交错着拉长成 2 秒送进模型 —— **0.5 倍速、低八度**；后 1 秒丢弃；
+- 模型窗口 `[T-2s, T]` 由前后两块的半截拼成，听到的内容比播放位置晚 0.5~2.5 秒。
+
+单声道片源速度是对的，但每 4 秒只留前 2 秒。分类器是用正常 16kHz 音频训练的，线上输入和训练分布对不上，
+这可能是音频在剧情段大量判"转"、`p_oral` AUC < 0.5 的原因之一。网页模式（`PcmCaptureAudioProcessor`）
+有正确下混，不受影响。
+
+`check` 能拿真实数据证实或否定这一点：若 `phone` 管线复现得明显比 `clean` 好，真机喂的就是半速音频。
+证实之后再改 `AudioDecoder` —— 改了之后音频概率的分布会变，`fusion_config.json` 必须重新拟合。
+
+### 2. 重算：rescore
+
+```bash
+python bench/tools/audio_rescore.py rescore --videos D:/xcup/videos --pipeline phone   # 真机现状
+python bench/tools/audio_rescore.py rescore --videos D:/xcup/videos --pipeline clean   # 修好解码之后
+python bench/tools/audio_rescore.py rescore --videos D:/xcup/videos --pipeline clean --classifier new.tflite
+```
+
+写到 `bench/rescored/<管线>[_<分类器>]/`，**文件名与 `bench/runs/` 里的一样**，所以 metrics.py /
+fusion_lab.py 指向这个目录就能用：
+
+- `a_p_*` 换成重算的概率，`a_action` / `a_conf` 按原阈值重判（过期规则同融合循环）；
+- 追加 `a_ys_*`：YAMNet AudioSet 类别分数（见下表）；
+- 旁边的 `<run>.yamnet.npz` 存了每个结果的全部 521 类分数，给 `auc --all-classes` 用；
+- 决策列（`smoothed`、`gated`、`ble_*`、`sent*`）仍是原 run 的：端到端指标请用 `fusion_lab.py eval/oracle`
+  重放，`fusion_lab.py check` 对重算目录没有意义。
+
+自洽检查：`fusion_lab.py eval bench/gt bench/rescored/phone` 应该和 `bench/runs` 的结果基本一样
+（同一管线、同一模型）。`clean` 和 `phone` 的 eval 一比，就是"修好解码"在端到端上值多少。
+
+### 3. 看判别力：auc
+
+```bash
+python bench/tools/audio_rescore.py auc bench/gt bench/rescored/clean
+python bench/tools/audio_rescore.py auc bench/gt bench/rescored/clean --all-classes   # 521 类排行
+python bench/tools/metrics.py bench/gt/v01.csv bench/rescored/clean/v01_base.csv --diag
+```
+
+`auc` 按结果算（每个音频结果一次，只用整个 2 秒窗口都落在同一真值段里的结果，与拟合证据表时用的样本
+一致），给出每部片和合并后的 AUC：> 0.5 越高越像动作，< 0.5 越高越像剧情。重点看两张表：
+
+1. 全部结果：某个类（如 Speech）是不是在**每部片**上都明显偏离 0.5（"最差片"那一列）；
+2. 只看分类器已经判"转"（`p_sex ≥ 0.5`）的结果：它还能不能把剧情挑出来 —— 这才是"拿它当不转证据、
+   压剧情误转"真正需要的。`--scan speech,music` 打印阈值扫描（剧情里命中多少、动作里误伤多少）。
+
+### run CSV 新增的列
+
+新版 app（`BenchLogger`）和 `rescore` 都会写这些列，旧版 dump 没有也不影响其他工具：
+
+| 列 | 含义 |
+|---|---|
+| `a_pos` | 该音频结果读 PCM 时的播放位置：模型窗口 = `[a_pos-2s, a_pos]`。有它，`check` 不用再反推窗口位置（只有 app 写） |
+| `a_ys_speech` / `conversation` / `narration` / `music` | AudioSet 0 / 2 / 3 / 132 类，"剧情"候选证据 |
+| `a_ys_silence` / `moan` / `groan` / `breathing` / `pant` / `slap` | AudioSet 494 / 22 / 33 / 36 / 40 / 461 类，"动作"候选 |
+
+分数是 YAMNet output 0（`[帧, 521]`，sigmoid，多标签）按帧取平均；output 1 才是分类器用的 embedding。
+挑哪几类在 `AudioInferenceHelper.AUDIOSET_LOG_CLASSES` 和 `metrics.YS_CLASSES` 两处，`metrics.py --selftest`
+会核对两边一致。

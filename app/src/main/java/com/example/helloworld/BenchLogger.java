@@ -110,11 +110,15 @@ public final class BenchLogger {
      * <p>vProbs/vAgeMs（及音频的）必须来自同一个模型结果快照：离线回放靠 wall_ms - age 还原
      * "这组概率是哪一刻出的"来去重，概率和年龄错配会让回放与真机对不上。</p>
      *
+     * @param aPosMs     该音频结果读 PCM 时的播放位置（模型窗口 = [aPosMs-2s, aPosMs]），没有结果时 -1。
+     *                   bench/tools/audio_rescore.py 靠它离线还原模型输入，不用再从出结果时刻反推
+     * @param aAudioSet  同一音频结果的 AudioSet 类别分数（AudioInferenceHelper.AUDIOSET_LOG_CLASSES），可为 null
      * @param ev 证据融合本 tick 的输出；未启用时传 null（ev_* 列留空）
      */
     public void tick(long posMs, long wallMs,
                      String vAction, float vConf, long vAgeMs, float[] vProbs,
                      String aAction, float aConf, long aAgeMs, float[] aProbs,
+                     long aPosMs, float[] aAudioSet,
                      int loudLevel, float loudConf, boolean loudValid, long loudAgeMs,
                      String smoothed, String gated, int finalFreq,
                      String bleState, int bleLevel,
@@ -139,6 +143,10 @@ public final class BenchLogger {
               .append(d(ev.llrV)).append(',').append(d(ev.llrA));
         } else {
             sb.append(",,,,");
+        }
+        sb.append(',').append(aPosMs < 0 ? -1 : aPosMs);
+        for (int k = 0; k < AudioInferenceHelper.AUDIOSET_LOG_CLASSES.length; k++) {
+            sb.append(',').append(p(aAudioSet, k));
         }
 
         if (queue.offer(sb.toString())) {
@@ -224,7 +232,12 @@ public final class BenchLogger {
                     + "loud_lv,loud_conf,loud_valid,loud_age,"
                     + "smoothed,gated,final_freq,"
                     + "ble_state,ble_level,sent,sent_action,sent_level,"
-                    + "ev_action,ev_l,ev_llr_v,ev_llr_a\n");
+                    + "ev_action,ev_l,ev_llr_v,ev_llr_a,"
+                    // a_pos：音频窗口结尾的播放位置；a_ys_*：AudioSet 类别分数，
+                    // 顺序同 AudioInferenceHelper.AUDIOSET_LOG_NAMES
+                    + "a_pos,"
+                    + "a_ys_speech,a_ys_conversation,a_ys_narration,a_ys_music,a_ys_silence,"
+                    + "a_ys_moan,a_ys_groan,a_ys_breathing,a_ys_pant,a_ys_slap\n");
             out.flush();
             writerThread = new Thread(this::drain, "BenchLoggerWriter");
             writerThread.setDaemon(true);
