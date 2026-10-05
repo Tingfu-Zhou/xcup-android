@@ -121,8 +121,12 @@ python3 bench/tools/fusion_lab.py fit
 python3 bench/tools/fusion_lab.py fit --mode live      # 确认 eval 结果后，让证据融合驱动蓝牙
 ```
 
+Windows 下把 `python3` 换成 `python`（或 `py`）、路径用 `\` 也可以。`eval` 约 4 分钟，`oracle`
+约 10 分钟；参数搜索默认"先粗后细"，`--exhaustive` 改扫全网格（慢约 9 倍，结果基本一致）。
+
 `check` 一致率要 ≥99% 才说明回放器可信，后面的对比才有意义。少量不一致来自 CSV 把置信度
 存成 4 位小数、以及蓝牙状态机内部取时间比 `wall_ms` 晚几毫秒，正好卡在阈值边界上时会翻转。
+live 模式采集的 run（参数行里 `FUSION=live/<配置 id>`）会自动改用证据融合回放来比对。
 
 ### 证据融合是什么
 
@@ -132,17 +136,24 @@ python3 bench/tools/fusion_lab.py fit --mode live      # 确认 eval 结果后�
 ```
 证据：模型每出一个新结果，取特征 s（视频 p_oral+p_sex；音频 p_sex+p_oral 或 p_sex），
       查表 LLR = log P(s 落在该区间 | 动作) / P(s 落在该区间 | 剧情)       ← 从 bench 统计
-累积：L = clamp(L + w_v·LLR_v + w_a·LLR_a, -C, +C)                     ← 每个结果只计一次
+累积：L = clamp(L + w_v·LLR_v + w_a·LLR_a, -clamp_lo, +clamp_hi)       ← 每个结果只计一次
 决策：不转→转：L ≥ theta_on；转→不转：L ≤ theta_off；之后照旧走蓝牙状态机
 ```
 
 - 证据表用真实片子统计：模型窗口跨真值边界的结果不用；分 12 格，保序回归后裁到 ±3。
-- `w_a`、`C`、`theta_on`、`theta_off`（和音频用哪个特征）按代价扫出来：
+  视频"像剧情"那一半证据可以整体打折（`video_neg_scale`，拟合时在 1 / 0.6 / 0.35 里选）：
+  遮挡、特写时视频模型在动作里也判"剧情"，原样的负证据会把马达压停。
+- 上下界分开：`clamp_lo` 管剧情里信念压多深（越小，动作开始后启动越快）；`clamp_hi` 管动作里
+  攒多少余量（越大越扛得住遮挡/镜头掉线，但动作结束后停得越慢）。
+- `w_a`、`clamp_lo/hi`、`theta_on/off`、音频特征、视频负证据折扣按代价一起搜：
   `代价 = 误转秒数×fp + 漏转秒数×fn + 动作中误停次数×stop`，默认 `--cost fp=1,fn=1,stop=3`。
   这是产品取舍，不随模型变；换了模型只需重新 `fit`。
-- **拼接停转样本**：现有片子全是"剧情→动作"，一个停转切换点都没有，不补的话扫参会挑出
-  "永远不停"的参数。所以把同一部片的一段动作和一段剧情首尾拼起来造出停转点，一起算进代价。
-  拼接处感知是瞬间切换的，测出的停转延迟比真实片子乐观约 1~2 秒。
+- **拼接样本**：现有片子全是"剧情→动作"，而且动作前几乎都隔着一段 other_adult（不计分）：
+  停转切换点一个都没有，干净的启动切换点也只有一两个，不补的话扫参会挑出"永远不停"或
+  "启动很慢"的参数。所以用同一部片的动作段和剧情段首尾拼接，造"停转样本"（动作 60s +
+  剧情 45s）和"启动样本"（剧情 45s + 动作 60s），一起算进代价。`eval` 报表里的
+  "启动后没转 / 停止后还转"就是拼接点之后马达该转没转 / 该停还转的秒数（中位数）。
+  拼接处感知是瞬间切换的，比真实片子乐观约 1~2 秒。
 
 ### 配置的三种模式（`fusion_config.json` 的 `mode`）
 
@@ -152,9 +163,8 @@ python3 bench/tools/fusion_lab.py fit --mode live      # 确认 eval 结果后�
 | `shadow` | 每 tick 计算并写进 run CSV 的 `ev_*` 列，**蓝牙仍由原融合驱动**（默认） |
 | `live` | 证据融合驱动蓝牙，原投票窗与启动仲裁不再参与；蓝牙状态机照旧 |
 
-配置缺失或解析失败时 app 自动回退到原融合。仓库里现在的配置是**临时配置**
-（`provisional: true`）：证据表由 10.2 报告的阈值扫描表粗算，动态参数没经过回放验证，
-所以只用 shadow。拿到 run CSV 后跑 `fit` 生成正式配置。
+配置缺失或解析失败时 app 自动回退到原融合。想退回原融合，把 `fusion_config.json` 的
+`"mode"` 改成 `"shadow"`（照样记证据融合的影子列）或 `"legacy"`，重新编译即可。
 
 改了证据融合算法时：Python 和 Java 两边一起改，然后 `fusion_lab.py golden` 重新生成
 `app/src/test/resources/fusion/` 下的对拍数据，`EvidenceFusionTest` 会逐 tick 校验两边一致。

@@ -15,9 +15,12 @@ import org.json.JSONObject;
  * <pre>
  * 证据：模型每出一个新结果，取特征 s = Σ weights[i]·probs[i]（裁到 [0,1]），按 edges 分箱查 llr，
  *       llr = log P(s 落在该区间 | 动作) / P(s 落在该区间 | 剧情)
- * 累积：L = clamp(L + wV·llrV + wA·llrA, -clamp, +clamp)        只在有新结果时更新
+ * 累积：L = clamp(L + wV·llrV + wA·llrA, -clampLo, +clampHi)    只在有新结果时更新
  * 决策：不转 → 转：L ≥ thetaOn；转 → 不转：L ≤ thetaOff        thetaOff &lt; thetaOn，迟滞
  * </pre>
+ *
+ * <p>上下界分开：clampLo 管"剧情里信念压多深"（越小，动作开始后启动越快）；clampHi 管"动作里攒多少
+ * 余量"（越大越扛得住遮挡、镜头掉线，但动作结束后停得越慢）。</p>
  *
  * <p>每个模型结果只计一次（按结果时间戳去重）。融合循环 500ms 一次而音频 1000ms 才出一个结果，
  * 原来的投票窗会把同一个音频结果数两遍。过期（超过 maxAgeMs）或推理失败的结果不给证据。</p>
@@ -120,7 +123,8 @@ public final class EvidenceFusion {
         public final Modality audio;
         public final double wV;
         public final double wA;
-        public final double clamp;
+        public final double clampLo;
+        public final double clampHi;
         public final double thetaOn;
         public final double thetaOff;
         public final long maxAgeMs;
@@ -130,14 +134,16 @@ public final class EvidenceFusion {
         /** 未经回放验证的临时配置（例如手算的证据表）。 */
         public final boolean provisional;
 
-        public Config(Modality video, Modality audio, double wV, double wA, double clamp,
-                      double thetaOn, double thetaOff, long maxAgeMs, String mode, String id,
-                      boolean provisional) {
+        public Config(Modality video, Modality audio, double wV, double wA, double clampLo,
+                      double clampHi, double thetaOn, double thetaOff, long maxAgeMs, String mode,
+                      String id, boolean provisional) {
             if (video == null || audio == null) {
                 throw new IllegalArgumentException("缺少 video/audio 证据表");
             }
-            if (!(clamp > 0 && -clamp < thetaOff && thetaOff < thetaOn && thetaOn <= clamp)) {
-                throw new IllegalArgumentException("需满足 -clamp < theta_off < theta_on <= clamp");
+            if (!(clampLo > 0 && clampHi > 0 && -clampLo < thetaOff && thetaOff < thetaOn
+                    && thetaOn <= clampHi)) {
+                throw new IllegalArgumentException(
+                        "需满足 -clamp_lo < theta_off < theta_on <= clamp_hi");
             }
             if (!MODE_LEGACY.equals(mode) && !MODE_SHADOW.equals(mode) && !MODE_LIVE.equals(mode)) {
                 throw new IllegalArgumentException("mode 只能是 legacy/shadow/live: " + mode);
@@ -146,7 +152,8 @@ public final class EvidenceFusion {
             this.audio = audio;
             this.wV = wV;
             this.wA = wA;
-            this.clamp = clamp;
+            this.clampLo = clampLo;
+            this.clampHi = clampHi;
             this.thetaOn = thetaOn;
             this.thetaOff = thetaOff;
             this.maxAgeMs = maxAgeMs;
@@ -161,8 +168,11 @@ public final class EvidenceFusion {
             if (!FORMAT.equals(o.optString("format"))) {
                 throw new JSONException("不认识的配置格式: " + o.optString("format"));
             }
+            // 兼容只有对称 clamp 的旧配置
+            double lo = o.has("clamp_lo") ? o.getDouble("clamp_lo") : o.getDouble("clamp");
+            double hi = o.has("clamp_hi") ? o.getDouble("clamp_hi") : o.getDouble("clamp");
             return new Config(modality(o.getJSONObject("video")), modality(o.getJSONObject("audio")),
-                    o.getDouble("w_v"), o.getDouble("w_a"), o.getDouble("clamp"),
+                    o.getDouble("w_v"), o.getDouble("w_a"), lo, hi,
                     o.getDouble("theta_on"), o.getDouble("theta_off"),
                     o.optLong("max_age_ms", 2000), o.optString("mode", MODE_SHADOW),
                     o.optString("id", "unnamed"), o.optBoolean("provisional", false));
@@ -250,7 +260,7 @@ public final class EvidenceFusion {
             if (usedV) d += cfg.wV * llrV;
             if (usedA) d += cfg.wA * llrA;
             double x = l + d;
-            l = x > cfg.clamp ? cfg.clamp : (x < -cfg.clamp ? -cfg.clamp : x);
+            l = x > cfg.clampHi ? cfg.clampHi : (x < -cfg.clampLo ? -cfg.clampLo : x);
             if (state == DO) {
                 if (l <= cfg.thetaOff) state = NOISE;
             } else {

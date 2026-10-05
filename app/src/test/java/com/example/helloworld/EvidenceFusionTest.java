@@ -88,7 +88,7 @@ public class EvidenceFusionTest {
                         new double[]{-1.0, 1.0}),
                 new EvidenceFusion.Modality(new double[]{1, 1, 0}, new double[]{0, 0.5, 1},
                         new double[]{-0.5, 0.5}),
-                1.0, 0.5, 2.0, 1.5, -0.5, 2000, EvidenceFusion.MODE_SHADOW, "t", false);
+                1.0, 0.5, 2.0, 2.0, 1.5, -0.5, 2000, EvidenceFusion.MODE_SHADOW, "t", false);
     }
 
     private static final float[] V_DO = {0.1f, 0.2f, 0.7f};
@@ -158,14 +158,20 @@ public class EvidenceFusionTest {
         EvidenceFusion.Modality m = new EvidenceFusion.Modality(new double[]{0, 1, 1},
                 new double[]{0, 1}, new double[]{0});
         try {
-            new EvidenceFusion.Config(m, m, 1, 1, 2, 0.5, 1.0, 2000, "shadow", "x", false);
+            new EvidenceFusion.Config(m, m, 1, 1, 2, 2, 0.5, 1.0, 2000, "shadow", "x", false);
             fail("theta_off >= theta_on 应报错");
         } catch (IllegalArgumentException expected) {
             // ok
         }
         try {
-            new EvidenceFusion.Config(m, m, 1, 1, 2, 1.0, -1.0, 2000, "on", "x", false);
+            new EvidenceFusion.Config(m, m, 1, 1, 2, 2, 1.0, -1.0, 2000, "on", "x", false);
             fail("非法 mode 应报错");
+        } catch (IllegalArgumentException expected) {
+            // ok
+        }
+        try {
+            new EvidenceFusion.Config(m, m, 1, 1, 1, 4, 1.0, -1.0, 2000, "shadow", "x", false);
+            fail("theta_off <= -clamp_lo 应报错");
         } catch (IllegalArgumentException expected) {
             // ok
         }
@@ -175,6 +181,30 @@ public class EvidenceFusionTest {
         } catch (IllegalArgumentException expected) {
             // ok
         }
+    }
+
+    /** 上下界分开：剧情里 L 最低到 -clampLo，动作里最高到 +clampHi。 */
+    @Test
+    public void asymmetricClamp() {
+        EvidenceFusion.Config c = simple();
+        EvidenceFusion ef = new EvidenceFusion(new EvidenceFusion.Config(c.video, c.audio, 1.0, 0.0,
+                1.0, 3.0, 0.5, -0.5, 2000, EvidenceFusion.MODE_SHADOW, "t", false));
+        EvidenceFusion.Output o = null;
+        for (int i = 0; i < 6; i++) o = ef.update(v(V_NO, 100 + i), null, 200 + i);
+        assertEquals(-1.0, o.l, 0);
+        for (int i = 0; i < 6; i++) o = ef.update(v(V_DO, 300 + i), null, 400 + i);
+        assertEquals(3.0, o.l, 0);
+    }
+
+    /** 只有对称 clamp 的旧配置仍能解析（上下界都取 clamp）。 */
+    @Test
+    public void legacySymmetricClampKey() throws Exception {
+        String json = resource("fusion/golden_config.json")
+                .replaceAll("\"clamp_lo\":\\s*[0-9.]+,", "")
+                .replaceAll("\"clamp_hi\":\\s*[0-9.]+,", "\"clamp\": 2.5,");
+        EvidenceFusion.Config cfg = EvidenceFusion.Config.fromJson(json);
+        assertEquals(2.5, cfg.clampLo, 0);
+        assertEquals(2.5, cfg.clampHi, 0);
     }
 
     /** 打进 APK 的配置必须能解析，否则 app 会静默回退到原融合。 */

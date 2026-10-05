@@ -16,7 +16,8 @@
   },
   "w_v": 1.0,
   "w_a": 0.5,
-  "clamp": 3.0,
+  "clamp_lo": 2.0,
+  "clamp_hi": 3.0,
   "theta_on": 1.25,
   "theta_off": -0.75,
   "max_age_ms": 2000

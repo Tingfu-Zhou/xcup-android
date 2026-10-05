@@ -28,8 +28,10 @@ run CSV 里已经存了两个模型每个 tick 的原始概率（v_p_* / a_p_*�
 证据融合（Java 端见 EvidenceFusion.java，两边逐 tick 对拍）:
   证据：每个模型每出一个新结果，取特征 s（视频 p_oral+p_sex，音频 p_sex+p_oral 或 p_sex），
         查表得 LLR = log P(s 落在该区间 | 动作) / P(s 落在该区间 | 剧情)。表从 bench 统计。
-  累积：L = clamp(L + w_v*LLR_v + w_a*LLR_a, -C, +C)
+  累积：L = clamp(L + w_v*LLR_v + w_a*LLR_a, -clamp_lo, +clamp_hi)
   决策：不转 -> 转：L >= theta_on；转 -> 不转：L <= theta_off；之后照旧走蓝牙状态机。
+  上下界分开：clamp_lo 管"剧情里信念压多深"（越小启动越快），clamp_hi 管"动作里攒多少余量"
+  （越大越扛得住遮挡/镜头掉线，但动作结束后停得越慢）。
   每个模态"说话算多少"由统计出来的 LLR 决定，不再手写"音频权重 1.2"。换了模型重新 fit 即可。
 """
 import argparse
@@ -133,8 +135,10 @@ def load_run(path):
 
 class Video(object):
     def __init__(self, vid, segs, dur, ticks, params, gt_path='', run_path='',
-                 synthetic=False, policy='exclude'):
+                 synthetic=False, policy='exclude', splice=None):
         self.vid = vid
+        self.splice = splice            # None=真实片子；'stop'/'start'=拼接样本
+        self.fusion = ''                # run 参数行里的 FUSION=<mode>/<配置 id>（旧版 app 没有）
         self.segs = segs
         self.dur = dur
         self.ticks = ticks
@@ -234,6 +238,8 @@ def load_videos(gt_dir, runs_dir, pairs=(), policy='exclude', quiet=False):
         vid = os.path.splitext(os.path.basename(g))[0]
         videos.append(Video(vid, segs, dur, ticks, parse_params(rmeta.get('params', '')),
                             g, r, policy=policy))
+        m = re.search(r'\bFUSION=(\S+)', rmeta.get('params', ''))
+        videos[-1].fusion = m.group(1) if m else ''
         say('  ✓ %-5s %-28s %5d tick%s' % (vid, os.path.basename(r), len(ticks), note))
     if not videos:
         sys.exit('没有可用的 真值+run 配对')
@@ -519,29 +525,32 @@ class Modality(object):
 class EvidenceConfig(object):
     FORMAT = 'xcup-fusion-v1'
 
-    def __init__(self, video, audio, w_v=1.0, w_a=0.5, clamp=4.0, theta_on=1.5, theta_off=-1.0,
-                 max_age_ms=MAX_AGE_MS, mode='shadow', meta=None):
+    def __init__(self, video, audio, w_v=1.0, w_a=0.5, clamp_lo=4.0, clamp_hi=4.0, theta_on=1.5,
+                 theta_off=-1.0, max_age_ms=MAX_AGE_MS, mode='shadow', meta=None):
         self.video, self.audio = video, audio
         self.w_v, self.w_a = float(w_v), float(w_a)
-        self.clamp, self.theta_on, self.theta_off = float(clamp), float(theta_on), float(theta_off)
+        self.clamp_lo, self.clamp_hi = float(clamp_lo), float(clamp_hi)
+        self.theta_on, self.theta_off = float(theta_on), float(theta_off)
         self.max_age_ms = int(max_age_ms)
         self.mode = mode
         self.meta = meta or {}
-        if not (self.clamp > 0 and -self.clamp < self.theta_off < self.theta_on <= self.clamp):
-            raise ValueError('需满足 -clamp < theta_off < theta_on <= clamp')
+        if not (self.clamp_lo > 0 and self.clamp_hi > 0
+                and -self.clamp_lo < self.theta_off < self.theta_on <= self.clamp_hi):
+            raise ValueError('需满足 -clamp_lo < theta_off < theta_on <= clamp_hi')
 
-    def with_params(self, w_v, w_a, clamp, theta_on, theta_off):
-        return EvidenceConfig(self.video, self.audio, w_v, w_a, clamp, theta_on, theta_off,
-                              self.max_age_ms, self.mode, dict(self.meta))
+    def with_params(self, w_v, w_a, clamp_lo, clamp_hi, theta_on, theta_off):
+        return EvidenceConfig(self.video, self.audio, w_v, w_a, clamp_lo, clamp_hi, theta_on,
+                              theta_off, self.max_age_ms, self.mode, dict(self.meta))
 
     def params(self):
-        return (self.w_v, self.w_a, self.clamp, self.theta_on, self.theta_off)
+        return (self.w_v, self.w_a, self.clamp_lo, self.clamp_hi, self.theta_on, self.theta_off)
 
     def to_json(self):
         d = {'format': self.FORMAT, 'mode': self.mode,
              'id': self.meta.get('id', 'unnamed'),
              'video': self.video.to_dict(), 'audio': self.audio.to_dict(),
-             'w_v': self.w_v, 'w_a': self.w_a, 'clamp': self.clamp,
+             'w_v': self.w_v, 'w_a': self.w_a,
+             'clamp_lo': self.clamp_lo, 'clamp_hi': self.clamp_hi,
              'theta_on': self.theta_on, 'theta_off': self.theta_off,
              'max_age_ms': self.max_age_ms}
         for k, v in self.meta.items():
@@ -558,11 +567,13 @@ class EvidenceConfig(object):
         d = json.loads(text)
         if d.get('format') != cls.FORMAT:
             raise ValueError('不认识的配置格式: %r' % d.get('format'))
-        known = ('format', 'mode', 'video', 'audio', 'w_v', 'w_a', 'clamp', 'theta_on',
-                 'theta_off', 'max_age_ms')
+        known = ('format', 'mode', 'video', 'audio', 'w_v', 'w_a', 'clamp', 'clamp_lo',
+                 'clamp_hi', 'theta_on', 'theta_off', 'max_age_ms')
         meta = dict((k, v) for k, v in d.items() if k not in known)
+        lo = d['clamp_lo'] if 'clamp_lo' in d else d['clamp']      # 兼容只有对称 clamp 的旧配置
+        hi = d['clamp_hi'] if 'clamp_hi' in d else d['clamp']
         return cls(Modality.from_dict(d['video']), Modality.from_dict(d['audio']),
-                   d['w_v'], d['w_a'], d['clamp'], d['theta_on'], d['theta_off'],
+                   d['w_v'], d['w_a'], lo, hi, d['theta_on'], d['theta_off'],
                    d.get('max_age_ms', MAX_AGE_MS), d.get('mode', 'shadow'), meta)
 
 
@@ -610,8 +621,7 @@ class EvidenceFusion(object):
             if llr_a is not None:
                 d += cfg.w_a * llr_a
             x = self.L + d
-            c = cfg.clamp
-            self.L = c if x > c else (-c if x < -c else x)
+            self.L = cfg.clamp_hi if x > cfg.clamp_hi else (-cfg.clamp_lo if x < -cfg.clamp_lo else x)
             if self.state == self.DO:
                 if self.L <= cfg.theta_off:
                     self.state = self.NOISE
@@ -647,7 +657,7 @@ def prepare(video, cfg):
     return out
 
 
-def simulate(prep, w_v, w_a, clamp, on, off, params):
+def simulate(prep, w_v, w_a, lo, hi, on, off, params):
     """replay_evidence 的快速版（只要状态切换点）。selftest 保证二者结果一致。"""
     L, state, cur = 0.0, 0, 'noise'
     ble = Ble(params)
@@ -660,7 +670,7 @@ def simulate(prep, w_v, w_a, clamp, on, off, params):
             if la is not None:
                 d += w_a * la
             x = L + d
-            L = clamp if x > clamp else (-clamp if x < -clamp else x)
+            L = hi if x > hi else (-lo if x < -lo else x)
             if state == 2:
                 if L <= off:
                     state = 1
@@ -852,16 +862,16 @@ def _pct(x):
     return '   —  ' if x != x else '%5.1f%%' % (100.0 * x)
 
 
-def _sec(v):
-    return '   —  ' if not v else '%5.1fs' % (statistics.median(v) / 1000.0)
-
-
-# ======================================================================== 拼接停转样本
+# ======================================================================== 拼接样本
 def make_splices(video, n=3, act_ms=60000, plot_ms=45000, margin=3000):
-    """bench 里的片子都是"剧情 -> 动作"，一个停转切换点都没有。不补的话扫参会挑出"永远不停"的参数。
+    """bench 里的片子都是"剧情 -> 动作"，而且动作前几乎都隔着一段 other_adult（不计分）：
+    停转切换点一个都没有，干净的启动切换点也只有一两个。不补的话扫参会挑出"永远不停"
+    或"启动很慢"的参数。
 
-    这里把同一部片的一段动作和一段剧情首尾拼起来，造出 do->noise 切换点。
-    拼接处感知是瞬间切换的，真实片子里模型窗口要 2~3 秒才翻过来，所以测出的停转延迟偏乐观。
+    这里用同一部片的动作段和剧情段首尾拼接，造两类样本：
+      停转样本 'stop'：动作 60s + 剧情 45s，看动作结束后马达多转几秒
+      启动样本 'start'：剧情 45s + 动作 60s，看动作开始后马达多久才转
+    拼接处感知是瞬间切换的，真实片子里模型窗口要 2~3 秒才翻过来，所以两种延迟都偏乐观。
     """
     if video.synthetic:
         return []
@@ -874,31 +884,43 @@ def make_splices(video, n=3, act_ms=60000, plot_ms=45000, margin=3000):
     if not dos or not plots:
         return []
     out = []
-    for k in range(n):
-        frac = (k + 1) / float(n + 1)
-        ds, de = dos[k % len(dos)]
-        ps, pe = plots[k % len(plots)]
-        a1 = int(ds + margin + act_ms + frac * (de - ds - 2 * margin - act_ms))
-        a0 = a1 - act_ms
-        p0 = int(ps + margin + frac * (pe - ps - 2 * margin - plot_ms))
-        p1 = p0 + plot_ms
-        part1 = [t for t in video.ticks if a0 <= t.pos < a1]
-        part2 = [t for t in video.ticks if p0 <= t.pos < p1]
-        if len(part1) < 20 or len(part2) < 20:
-            continue
-        # 墙钟保持原来的量级（蓝牙状态机拿"距上次发送"算间隔，不能从 0 开始）；
-        # 结果时间戳 = wall - age，age 不变，所以去重/新鲜度在拼接后照样成立。
-        ticks = [t.copy(pos=t.pos - a0) for t in part1]
-        b_pos = ticks[-1].pos + 500
-        b_wall = ticks[-1].wall + 500
-        for t in part2:
-            ticks.append(t.copy(pos=b_pos + (t.pos - part2[0].pos),
-                                wall=b_wall + (t.wall - part2[0].wall)))
-        dur = ticks[-1].pos + 500
-        segs = [(0, b_pos, 'sex'), (b_pos, dur, 'plot')]
-        out.append(Video('%s#拼%d' % (video.vid, k + 1), segs, dur, ticks, video.params,
-                         video.gt_path, video.run_path, synthetic=True, policy=pol))
+    for kind in ('stop', 'start'):
+        for k in range(n):
+            frac = (k + 1) / float(n + 1)
+            ds, de = dos[k % len(dos)]
+            ps, pe = plots[k % len(plots)]
+            a1 = int(ds + margin + act_ms + frac * (de - ds - 2 * margin - act_ms))
+            a0 = a1 - act_ms
+            p0 = int(ps + margin + frac * (pe - ps - 2 * margin - plot_ms))
+            p1 = p0 + plot_ms
+            part_a = [t for t in video.ticks if a0 <= t.pos < a1]
+            part_p = [t for t in video.ticks if p0 <= t.pos < p1]
+            if len(part_a) < 20 or len(part_p) < 20:
+                continue
+            first, second = (part_a, part_p) if kind == 'stop' else (part_p, part_a)
+            # 墙钟保持原来的量级（蓝牙状态机拿"距上次发送"算间隔，不能从 0 开始）；
+            # 结果时间戳 = wall - age，age 不变，所以去重/新鲜度在拼接后照样成立。
+            ticks = [t.copy(pos=t.pos - first[0].pos) for t in first]
+            b_pos = ticks[-1].pos + 500
+            b_wall = ticks[-1].wall + 500
+            for t in second:
+                ticks.append(t.copy(pos=b_pos + (t.pos - second[0].pos),
+                                    wall=b_wall + (t.wall - second[0].wall)))
+            dur = ticks[-1].pos + 500
+            labs = ('sex', 'plot') if kind == 'stop' else ('plot', 'sex')
+            segs = [(0, b_pos, labs[0]), (b_pos, dur, labs[1])]
+            out.append(Video('%s#%s%d' % (video.vid, '停' if kind == 'stop' else '启', k + 1),
+                             segs, dur, ticks, video.params, video.gt_path, video.run_path,
+                             synthetic=True, policy=pol, splice=kind))
     return out
+
+
+def splice_seconds(sp, trans):
+    """停转样本：拼接点之后马达还在转的秒数；启动样本：拼接点之后马达没转的秒数。"""
+    b, e = sp.segs[1][0], sp.segs[1][1]
+    want = 'noise' if sp.splice == 'stop' else 'do'
+    bad = sum(1 for i in range(b // GRID_MS, e // GRID_MS) if M.state_at(trans, i * GRID_MS) != want)
+    return bad * GRID_MS / 1000.0
 
 
 # ======================================================================== 拟合
@@ -910,17 +932,22 @@ LLR_CLIP = 3.0       # 单个结果最多贡献的证据，防止某个极端区
 ALPHA = 0.5          # 每格的平滑伪计数
 
 GRID = {
-    'w_a': [0.0, 0.25, 0.5, 1.0],
-    'clamp': [2.0, 3.0, 4.0, 6.0, 8.0],
-    'theta_on': [0.5, 1.0, 1.5, 2.0, 3.0],
-    'theta_off': [-2.0, -1.0, -0.5, 0.0, 0.5],
+    'w_a': [0.0, 0.5, 1.0, 2.0, 3.0],
+    'clamp_lo': [1.0, 2.0, 3.0, 4.0, 6.0],
+    'clamp_hi': [3.0, 4.0, 6.0, 8.0, 12.0, 16.0],
+    'theta_on': [-0.5, 0.0, 0.5, 1.0, 1.5, 2.0],
+    'theta_off': [-4.0, -2.0, -1.0, -0.5, 0.0, 0.5],
 }
 QUICK_GRID = {
-    'w_a': [0.0, 0.5, 1.0],
-    'clamp': [3.0, 6.0],
-    'theta_on': [1.0, 2.0],
+    'w_a': [0.0, 1.0],
+    'clamp_lo': [2.0, 4.0],
+    'clamp_hi': [4.0, 8.0],
+    'theta_on': [0.5, 1.5],
     'theta_off': [-1.0, 0.0],
 }
+# 视频"像剧情"那一半证据的软化系数，拟合时一起搜，结果直接乘进证据表（Java 端不用改）。
+# 动机：遮挡/特写时视频模型在动作段里也判"剧情"，原样的负证据会把马达压停。
+NEG_SCALES = [1.0, 0.6, 0.35]
 
 
 def bin_index(edges, s):
@@ -1002,51 +1029,140 @@ def fit_table(samples, edges=EDGES, alpha=ALPHA, clip=LLR_CLIP):
     return llr, (nd, nn)
 
 
-def param_combos(variant, grid):
+GRID_KEYS = ('w_a', 'clamp_lo', 'clamp_hi', 'theta_on', 'theta_off')
+
+
+def _space(variant, grid):
+    sp = dict((k, list(grid[k])) for k in GRID_KEYS)
     if variant == 'video_only':
-        wvs, was = [1.0], [0.0]
+        sp['w_a'] = [0.0]
     elif variant == 'audio_only':
-        wvs, was = [0.0], [1.0]
-    else:
-        wvs, was = [1.0], grid['w_a']
-    for w_v in wvs:
-        for w_a in was:
-            for c in grid['clamp']:
-                for on in grid['theta_on']:
-                    for off in grid['theta_off']:
-                        if -c < off < on <= c:
-                            yield (w_v, w_a, c, on, off)
+        sp['w_a'] = [1.0]
+    return sp, (0.0 if variant == 'audio_only' else 1.0)
 
 
-def fit(train, cost, variant='evidence', grid=GRID):
-    """证据表只用真实片子统计；动态参数在 真实片子 + 拼接样本 上按代价扫。"""
+def _combo(space, w_v, ix):
+    return (w_v,) + tuple(space[k][i] for k, i in zip(GRID_KEYS, ix))
+
+
+def _combo_ok(combo):
+    _, _, lo, hi, on, off = combo
+    return -lo < off < on <= hi
+
+
+def param_combos(variant, grid):
+    """全网格（--exhaustive 用）。"""
+    space, w_v = _space(variant, grid)
+    for ix in _product([range(len(space[k])) for k in GRID_KEYS]):
+        c = _combo(space, w_v, ix)
+        if _combo_ok(c):
+            yield c
+
+
+def _product(ranges):
+    if not ranges:
+        yield ()
+        return
+    for i in ranges[0]:
+        for rest in _product(ranges[1:]):
+            yield (i,) + rest
+
+
+def fit(train, cost, variant='evidence', grid=GRID, exhaustive=False, top_k=10):
+    """证据表只用真实片子统计；动态参数在 真实片子 + 拼接样本 上按代价搜。
+
+    默认先粗后细：粗扫（每维隔一个取值）留下最好的 top_k 组，再在它们的邻域（每维 ±1 档）
+    里扫全网格，比全网格快约 10 倍，结果与全网格一致或几乎一致（--exhaustive 可对照）。
+    """
     real = [v for v in train if not v.synthetic]
     vs = []
     for v in real:
         vs += result_samples(v, 'v', VIDEO_FEATURE[1])
-    vt, vcounts = fit_table(vs)
+    vt0, vcounts = fit_table(vs)
     afeats = AUDIO_FEATURES if variant != 'video_only' else AUDIO_FEATURES[:1]
-    best = None
-    for aname, aw in afeats:
-        as_ = []
-        for v in real:
-            as_ += result_samples(v, 'a', aw)
-        at, acounts = fit_table(as_)
-        base = EvidenceConfig(Modality(VIDEO_FEATURE[1], EDGES, vt, VIDEO_FEATURE[0]),
-                              Modality(aw, EDGES, at, aname))
-        preps = sorted([(prepare(v, base), v) for v in train], key=lambda x: -len(x[0]))
-        for combo in param_combos(variant, grid):
-            total, pruned = 0.0, False
-            for prep, v in preps:
-                cm, fs = v.gti.score(simulate(prep, *combo, params=v.params))
-                total += cost(cm, fs)
-                if best is not None and total >= best[0]:
-                    pruned = True
-                    break
-            if not pruned:
-                info = {'audio_feature': aname, 'video_counts': vcounts, 'audio_counts': acounts}
-                best = (total, base.with_params(*combo), info)
-    return best
+    negs = NEG_SCALES if variant != 'audio_only' else [1.0]
+    space, w_v = _space(variant, grid)
+    atables = {}
+    contexts = []
+    for ns in negs:
+        vt = [round(x * ns, 4) if x < 0 else x for x in vt0]
+        for aname, aw in afeats:
+            if aname not in atables:
+                as_ = []
+                for v in real:
+                    as_ += result_samples(v, 'a', aw)
+                atables[aname] = fit_table(as_)
+            at, acounts = atables[aname]
+            base = EvidenceConfig(Modality(VIDEO_FEATURE[1], EDGES, vt, VIDEO_FEATURE[0]),
+                                  Modality(aw, EDGES, at, aname))
+            preps = sorted([(prepare(v, base), v) for v in train], key=lambda x: -len(x[0]))
+            info = {'audio_feature': aname, 'neg_scale': ns,
+                    'video_counts': vcounts, 'audio_counts': acounts}
+            contexts.append((base, preps, info))
+
+    best = [None]
+
+    def evaluate(ctx, combo, bound):
+        """总代价；超过 bound 就提前放弃（返回 None）。"""
+        total = 0.0
+        for prep, v in contexts[ctx][1]:
+            cm, fs = v.gti.score(simulate(prep, *combo, params=v.params))
+            total += cost(cm, fs)
+            if bound is not None and total >= bound:
+                return None
+        return total
+
+    def consider(ctx, combo):
+        b = best[0][0] if best[0] else None
+        t = evaluate(ctx, combo, b)
+        if t is not None and (b is None or t < b):
+            base, _, info = contexts[ctx]
+            best[0] = (t, base.with_params(*combo), info)
+        return t
+
+    if exhaustive:
+        for ctx in range(len(contexts)):
+            for combo in param_combos(variant, grid):
+                consider(ctx, combo)
+        return best[0]
+
+    coarse = dict((k, sorted(set(range(0, len(space[k]), 2)) | {len(space[k]) - 1}))
+                  for k in GRID_KEYS)
+    scored = []
+    for ctx in range(len(contexts)):
+        for ix in _product([coarse[k] for k in GRID_KEYS]):
+            combo = _combo(space, w_v, ix)
+            if _combo_ok(combo):
+                t = evaluate(ctx, combo, None)
+                scored.append((t, ctx, ix))
+                if best[0] is None or t < best[0][0]:
+                    base, _, info = contexts[ctx]
+                    best[0] = (t, base.with_params(*combo), info)
+    scored.sort()
+    seen = set()
+    where = {}                                     # 当前最优在哪个 (ctx, ix)
+
+    def neighbourhood(ctx, ix):
+        ranges = [range(max(0, i - 1), min(len(space[k]), i + 2)) for k, i in zip(GRID_KEYS, ix)]
+        for nix in _product(ranges):
+            if (ctx, nix) in seen:
+                continue
+            seen.add((ctx, nix))
+            combo = _combo(space, w_v, nix)
+            if _combo_ok(combo):
+                before = best[0][0]
+                consider(ctx, combo)
+                if best[0][0] < before:
+                    where['at'] = (ctx, nix)
+
+    for _, ctx, ix in scored[:top_k]:
+        neighbourhood(ctx, ix)
+    for _ in range(4):                             # 围着当前最优继续爬，直到不再变好
+        if 'at' not in where:
+            break
+        at = where.pop('at')
+        neighbourhood(*at)
+    return best[0]
 
 
 # ======================================================================== 各策略跑一遍
@@ -1069,7 +1185,8 @@ POLICIES = [('legacy', '现有融合'), ('always', '一直转'), ('video_only', 
             ('audio_only', '只用音频'), ('evidence', '证据融合')]
 
 
-def lovo(videos, cost, grid, variants=('video_only', 'audio_only', 'evidence'), log=print):
+def lovo(videos, cost, grid, variants=('video_only', 'audio_only', 'evidence'), log=print,
+         exhaustive=False):
     """留一视频交叉验证：拟合时连同被留出那部片的拼接样本一起排除。"""
     splices = dict((v.vid, make_splices(v)) for v in videos)
     folds = {}
@@ -1080,7 +1197,7 @@ def lovo(videos, cost, grid, variants=('video_only', 'audio_only', 'evidence'), 
             train_all += splices[v.vid]
         for var in variants:
             t0 = time.time()
-            best = fit(train_all, cost, var, grid)
+            best = fit(train_all, cost, var, grid, exhaustive)
             folds[(held.vid, var)] = best
             log('  · 留出 %-5s %-8s 拟合完成（%.0fs）  %s' % (
                 held.vid, dict(POLICIES)[var], time.time() - t0, fmt_params(best[1], best[2])))
@@ -1088,16 +1205,20 @@ def lovo(videos, cost, grid, variants=('video_only', 'audio_only', 'evidence'), 
 
 
 def fmt_params(cfg, info=None):
-    s = 'w_a=%g C=%g on=%g off=%g' % (cfg.w_a, cfg.clamp, cfg.theta_on, cfg.theta_off)
+    s = 'w_a=%g C=-%g/+%g on=%g off=%g' % (cfg.w_a, cfg.clamp_lo, cfg.clamp_hi,
+                                          cfg.theta_on, cfg.theta_off)
     if info and cfg.w_a:
         s += ' 音频特征=%s' % info.get('audio_feature', '?')
+    if info and cfg.w_v and info.get('neg_scale', 1.0) != 1.0:
+        s += ' 视频负证据x%g' % info['neg_scale']
     return s
 
 
-def evaluate_all(videos, cost, grid, log=print, variants=('video_only', 'audio_only', 'evidence')):
-    folds, splices = lovo(videos, cost, grid, variants, log)
+def evaluate_all(videos, cost, grid, log=print, variants=('video_only', 'audio_only', 'evidence'),
+                 exhaustive=False):
+    folds, splices = lovo(videos, cost, grid, variants, log, exhaustive)
     per = dict((p, {}) for p, _ in POLICIES)
-    sp = dict((p, Score()) for p, _ in POLICIES)
+    sp = dict((p, []) for p, _ in POLICIES)       # [(kind, Score, 秒数)]
     for v in videos:
         for p, _ in POLICIES:
             if p in ('legacy', 'always'):
@@ -1108,14 +1229,23 @@ def evaluate_all(videos, cost, grid, log=print, variants=('video_only', 'audio_o
                 continue
             per[p][v.vid] = Score.of(v, run_policy(v, p, cfg)[0], cost)
             for s in splices[v.vid]:
-                sp[p].add(Score.of(s, run_policy(s, p, cfg)[0], cost))
+                tr = run_policy(s, p, cfg)[0]
+                sp[p].append((s.splice, Score.of(s, tr, cost), splice_seconds(s, tr)))
     return per, sp, folds, splices
+
+
+def _splice_col(rows, kind):
+    xs = [sec for k, _, sec in rows if k == kind]
+    if not xs:
+        return '—'
+    stuck = sum(1 for x in xs if x >= 40)
+    return '%.1fs%s' % (statistics.median(xs), '(%d个≥40s)' % stuck if stuck else '')
 
 
 def print_table(title, videos, per, sp, policies=POLICIES, show_videos=True):
     print('══ %s ══' % title)
-    print('  %-10s %7s %7s %7s %8s %9s %10s %9s' % (
-        '策略', '准确率', '误转', '漏转', '误停/分', '启动延迟', '拼接停转', '代价'))
+    print('  %-10s %7s %7s %7s %8s %14s %14s %8s' % (
+        '策略', '准确率', '误转', '漏转', '误停/分', '启动后没转', '停止后还转', '代价'))
     for p, name in policies:
         if not per.get(p):
             continue
@@ -1123,12 +1253,11 @@ def print_table(title, videos, per, sp, policies=POLICIES, show_videos=True):
         for v in videos:
             if v.vid in per[p]:
                 pooled.add(per[p][v.vid])
-        s = sp.get(p) or Score()
-        print('  %-10s %7s %7s %7s %8.2f %9s %10s %9.0f' % (
+        rows = sp.get(p) or []
+        print('  %-10s %7s %7s %7s %8.2f %14s %14s %8.0f' % (
             name, _pct(pooled.acc()), _pct(pooled.fp()), _pct(pooled.fn()),
-            pooled.stops_per_min(), _sec(pooled.lat['noise->do']),
-            _sec(s.lat['do->noise']) + ('' if not s.miss['do->noise'] else '(漏%d)' % s.miss['do->noise']),
-            pooled.cost + s.cost))
+            pooled.stops_per_min(), _splice_col(rows, 'start'), _splice_col(rows, 'stop'),
+            pooled.cost + sum(sc.cost for _, sc, _ in rows)))
     if show_videos:
         print('\n  逐片（准确率 / 误转 / 漏转 / 误停次数）')
         print('  %-6s' % '' + ''.join('%-24s' % name for p, name in policies if per.get(p)))
@@ -1145,13 +1274,31 @@ def print_table(title, videos, per, sp, policies=POLICIES, show_videos=True):
 
 
 # ======================================================================== 子命令
+def _load_cfg(path):
+    return EvidenceConfig.from_json(io.open(path, encoding='utf-8').read())
+
+
 def cmd_check(args):
     videos = load_videos(args.gt_dir, args.runs_dir, args.pair, args.policy)
     print()
+    cfg = _load_cfg(args.config) if args.config else None
+    shipped = _load_cfg(DEFAULT_CONFIG_OUT) if os.path.exists(DEFAULT_CONFIG_OUT) else None
     cols = ('smoothed', 'gated', 'final_freq', 'ble_state', 'ble_level', 'sent')
     worst = 1.0
     for v in videos:
-        steps = replay_legacy(v.ticks, v.params)
+        # live 模式的 run 是证据融合驱动的蓝牙，要用证据融合回放来对；配置 id 记在参数行里
+        if v.fusion.startswith('live'):
+            use = cfg
+            if use is None and shipped is not None and v.fusion == 'live/' + shipped.meta.get('id', ''):
+                use = shipped
+            if use is None:
+                print('══ %s：live 模式采集（%s），需要用 --config 给出当时的配置文件 ══\n' % (v.vid, v.fusion))
+                continue
+            steps = replay_evidence(v.ticks, use, v.params)
+            what = '证据融合（%s）' % use.meta.get('id', '?')
+        else:
+            steps = replay_legacy(v.ticks, v.params)
+            what = '现有融合'
         agree = dict((c, 0) for c in cols)
         divs = []
         for t, s in zip(v.ticks, steps):
@@ -1177,7 +1324,7 @@ def cmd_check(args):
         tl_agree = same / float(cells) if cells else 1.0
         worst = min(worst, tl_agree, agree['gated'] / n)
         sl, sr = Score.of(v, tl, Cost()), Score.of(v, tr, Cost())
-        print('══ %s  %s ══' % (v.vid, os.path.basename(v.run_path)))
+        print('══ %s  %s  回放：%s ══' % (v.vid, os.path.basename(v.run_path), what))
         print('  逐 tick 一致率  ' + '  '.join('%s %.2f%%' % (c, 100.0 * agree[c] / n) for c in cols))
         print('  马达状态时间线一致率 %.2f%%   准确率 实测 %s / 回放 %s'
               % (100.0 * tl_agree, _pct(sl.acc()).strip(), _pct(sr.acc()).strip()))
@@ -1187,10 +1334,11 @@ def cmd_check(args):
     ok = worst >= 0.99
     print('结论: %s（最差一致率 %.2f%%，阈值 99%%）' % ('回放器可信' if ok else '回放与实测不一致，先查清再比较',
                                                   100.0 * worst))
-    if args.config:
-        cfg = EvidenceConfig.from_json(io.open(args.config, encoding='utf-8').read())
+    if cfg is not None:
         print('\n══ 证据融合影子列对拍（%s）══' % args.config)
         for v in videos:
+            if v.fusion.startswith('live'):
+                continue
             if not any(t.log.get('ev_action') for t in v.ticks):
                 print('  %s: run CSV 里没有 ev_* 列（旧版 app 采集），跳过' % v.vid)
                 continue
@@ -1209,13 +1357,15 @@ def cmd_eval(args):
         sys.exit('留一交叉验证至少要 2 部片')
     print('\n留一视频交叉验证（每部片只用其余 %d 部拟合）…' % (len(videos) - 1))
     t0 = time.time()
-    per, sp, folds, splices = evaluate_all(videos, cost, grid)
+    per, sp, folds, splices = evaluate_all(videos, cost, grid, exhaustive=args.exhaustive)
     print('  共用时 %.0fs\n' % (time.time() - t0))
-    nsp = sum(len(x) for x in splices.values())
-    print_table('留一视频交叉验证（拼接停转样本 %d 个）' % nsp, videos, per, sp)
-    print('  · 准确率/误转/漏转/误停只算真实片子；"拼接停转"是人工拼出的动作->剧情切换点的停转延迟中位数')
-    print('    （拼接处感知瞬间切换，比真实片子乐观约 1~2 秒）。代价 = 真实片子 + 拼接样本。')
-    print('  · 误转 = 剧情时长里马达在转的比例；漏转 = 动作时长里马达没转的比例。\n')
+    nst = sum(1 for x in splices.values() for s in x if s.splice == 'start')
+    nsp = sum(1 for x in splices.values() for s in x if s.splice == 'stop')
+    print_table('留一视频交叉验证（拼接样本：启动 %d 个，停转 %d 个）' % (nst, nsp), videos, per, sp)
+    print('  · 准确率/误转/漏转/误停只算真实片子：误转 = 剧情时长里马达在转的比例，漏转 = 动作时长里马达没转的比例。')
+    print('  · 启动后没转 / 停止后还转：拼接样本里，切换点之后马达"该转没转" / "该停还转"的秒数（中位数，括号里是')
+    print('    ≥40 秒、基本等于没切过去的个数）。拼接处感知是瞬间切换的，比真实片子乐观约 1~2 秒。')
+    print('  · 代价 = 真实片子 + 拼接样本（误转秒×fp + 漏转秒×fn + 误停次数×stop）。\n')
     return 0
 
 
@@ -1251,7 +1401,8 @@ def cmd_oracle(args):
     pols = [('legacy', '现有融合'), ('evidence', '证据融合')]
     for name, which in scen:
         vs = [oracle_video(v, which) if which else v for v in videos]
-        per, sp, _, _ = evaluate_all(vs, cost, grid, log=lambda *a: None, variants=('evidence',))
+        per, sp, _, _ = evaluate_all(vs, cost, grid, log=lambda *a: None, variants=('evidence',),
+                                     exhaustive=args.exhaustive)
         print_table(name, vs, per, sp, pols, show_videos=False)
     print('  · 如果"视频完美"在现有融合下几乎不涨、在证据融合下大涨，说明现有融合挡住了视频侧的改进。')
     return 0
@@ -1265,7 +1416,7 @@ def cmd_fit(args):
     for v in videos:
         train += make_splices(v)
     print('\n用全部 %d 部片（+%d 个拼接样本）拟合…' % (len(videos), len(train) - len(videos)))
-    total, cfg, info = fit(train, cost, 'evidence', grid)
+    total, cfg, info = fit(train, cost, 'evidence', grid, args.exhaustive)
     cfg.mode = args.mode
     stamp = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
     cfg.meta = {
@@ -1277,6 +1428,7 @@ def cmd_fit(args):
             'videos': ['%s=%s' % (v.vid, os.path.basename(v.run_path)) for v in videos],
             'policy': args.policy, 'cost': str(cost), 'train_cost': round(total, 1),
             'audio_feature': info['audio_feature'],
+            'video_neg_scale': info['neg_scale'],
             'samples': {'video_do_by_bin': info['video_counts'][0],
                         'video_plot_by_bin': info['video_counts'][1],
                         'audio_do_by_bin': info['audio_counts'][0],
@@ -1289,14 +1441,14 @@ def cmd_fit(args):
     print('  视频证据表 %s' % cfg.video.llr)
     print('  音频证据表 %s（%s）' % (cfg.audio.llr, info['audio_feature']))
     per = dict((p, {}) for p, _ in POLICIES)
-    sp = dict((p, Score()) for p, _ in POLICIES)
+    sp = dict((p, []) for p, _ in POLICIES)
     for v in train:
         for p in ('legacy', 'evidence'):
-            s = Score.of(v, run_policy(v, p, cfg)[0], cost)
+            tr = run_policy(v, p, cfg)[0]
             if v.synthetic:
-                sp[p].add(s)
+                sp[p].append((v.splice, Score.of(v, tr, cost), splice_seconds(v, tr)))
             else:
-                per[p][v.vid] = s
+                per[p][v.vid] = Score.of(v, tr, cost)
     print()
     print_table('训练集内表现（偏乐观；要看泛化请跑 eval）', videos, per, sp,
                 [('legacy', '现有融合'), ('evidence', '证据融合')])
@@ -1311,8 +1463,8 @@ def cmd_fit(args):
 GOLDEN_CFG = EvidenceConfig(
     Modality([0.0, 1.0, 1.0], [0.0, 0.1, 0.5, 0.9, 1.0], [-1.5, -0.25, 0.75, 2.5], 'p_oral+p_sex'),
     Modality([1.0, 1.0, 0.0], [0.0, 0.3, 0.6, 1.0], [-0.75, 0.125, 0.5], 'p_sex+p_oral'),
-    w_v=1.0, w_a=0.5, clamp=3.0, theta_on=1.25, theta_off=-0.75, max_age_ms=2000, mode='shadow',
-    meta={'id': 'golden'})
+    w_v=1.0, w_a=0.5, clamp_lo=2.0, clamp_hi=3.0, theta_on=1.25, theta_off=-0.75, max_age_ms=2000,
+    mode='shadow', meta={'id': 'golden'})
 # probs 列：空 = null（推理失败时 Java 端快照里的 probs）；'-' = 空数组；否则 '|' 分隔的 %.4f。
 # ts 列为空 = 还没有任何结果（快照本身为 null），此时 probs 列无意义。
 GOLDEN_COLS = ['reset', 'now', 'v_ts', 'v_probs', 'a_ts', 'a_probs',
@@ -1481,15 +1633,16 @@ def _synth_video(seed, layout, vid='syn', policy='exclude'):
     return Video(vid, segs, dur, ticks, p, policy=policy)
 
 
-def _write_synth(video, gt_path, run_path):
+def _write_synth(video, gt_path, run_path, fusion=''):
     with io.open(gt_path, 'w', encoding='utf-8', newline='\n') as fh:
         fh.write('# xcup-gt spec_version=1\n# video_id=%s\n# duration_ms=%d\n' % (video.vid, video.dur))
         fh.write('start_ms,end_ms,label,note\n')
         for s, e, l in video.segs:
             fh.write('%d,%d,%s,\n' % (s, e, l))
     with io.open(run_path, 'w', encoding='utf-8', newline='\n') as fh:
-        fh.write('# xcup-bench-run v1\n# video_name=%s\n# params: %s\n' % (
-            video.vid, ' '.join('%s=%s' % kv for kv in sorted(LEGACY_DEFAULTS.items()))))
+        fh.write('# xcup-bench-run v1\n# video_name=%s\n# params: %s%s\n' % (
+            video.vid, ' '.join('%s=%s' % kv for kv in sorted(LEGACY_DEFAULTS.items())),
+            (' FUSION=' + fusion) if fusion else ''))
         fh.write(','.join(M.RUN_COLS_NEEDED) + '\n')
         for t in video.ticks:
             def pr(ps, i):
@@ -1564,7 +1717,7 @@ def selftest():
     # 3. 证据融合语义
     cfg = EvidenceConfig(Modality([0, 1, 1], [0, 0.5, 1], [-1.0, 1.0]),
                          Modality([1, 1, 0], [0, 0.5, 1], [-0.5, 0.5]),
-                         1.0, 0.5, 2.0, 1.5, -0.5)
+                         1.0, 0.5, 2.0, 2.0, 1.5, -0.5)
     ef = EvidenceFusion(cfg)
     do_p, no_p = (0.1, 0.2, 0.7), (0.9, 0.05, 0.05)
     check(ef.update(None, None, None, None, 1000)[0] == '', '没有任何结果时应输出空')
@@ -1585,14 +1738,33 @@ def selftest():
     rt = EvidenceConfig.from_json(cfg.to_json())
     check(rt.to_json() == cfg.to_json() and rt.params() == cfg.params(), '配置 JSON 往返不一致')
     try:
-        EvidenceConfig(cfg.video, cfg.audio, 1, 1, 2.0, 0.5, 1.0)
+        EvidenceConfig(cfg.video, cfg.audio, 1, 1, 2.0, 2.0, 0.5, 1.0)
         fails.append('theta_off >= theta_on 应报错')
     except ValueError:
         pass
+    try:
+        EvidenceConfig(cfg.video, cfg.audio, 1, 1, 1.0, 4.0, 1.5, -1.0)
+        fails.append('theta_off <= -clamp_lo 应报错')
+    except ValueError:
+        pass
+    # 上下界分开：L 的下界是 -clamp_lo、上界是 +clamp_hi
+    ef2 = EvidenceFusion(EvidenceConfig(cfg.video, cfg.audio, 1.0, 0.0, 1.0, 3.0, 0.5, -0.5))
+    for i in range(6):
+        ef2.update(no_p, 100 + i, None, None, 200 + i)
+    check(ef2.L == -1.0, '下界应为 -clamp_lo，实际 %r' % ef2.L)
+    for i in range(6):
+        ef2.update(do_p, 300 + i, None, None, 400 + i)
+    check(ef2.L == 3.0, '上界应为 +clamp_hi，实际 %r' % ef2.L)
+    old = json.loads(cfg.to_json())
+    del old['clamp_lo'], old['clamp_hi']
+    old['clamp'] = 2.0
+    c_old = EvidenceConfig.from_json(json.dumps(old))
+    check((c_old.clamp_lo, c_old.clamp_hi) == (2.0, 2.0), '旧配置的对称 clamp 应同时作为上下界')
 
     # 4. simulate == replay_evidence（扫参用的快速版不能和精确版有出入）
     for v in loaded:
-        for combo in [(1.0, 0.5, 4.0, 1.5, -1.0), (1.0, 0.0, 2.0, 0.5, -0.5), (0.0, 1.0, 6.0, 3.0, 0.5)]:
+        for combo in [(1.0, 0.5, 4.0, 4.0, 1.5, -1.0), (1.0, 0.0, 2.0, 2.0, 0.5, -0.5),
+                      (0.0, 1.0, 6.0, 6.0, 3.0, 0.5), (1.0, 1.0, 2.0, 8.0, 1.0, -1.5)]:
             c = EvidenceConfig(Modality(VIDEO_FEATURE[1], EDGES, [x * 0.4 - 2 for x in range(12)]),
                                Modality(AUDIO_FEATURES[0][1], EDGES, [x * 0.1 - 0.5 for x in range(12)]),
                                *combo)
@@ -1606,14 +1778,20 @@ def selftest():
     llr, _ = fit_table([(0.9, 'do')] * 50 + [(0.05, 'noise')] * 50 + [(0.05, 'do')] * 10)
     check(llr[bin_index(EDGES, 0.9)] > 0 > llr[bin_index(EDGES, 0.05)], '证据表方向错误')
 
-    # 6. 拼接样本
+    # 6. 拼接样本：停转 3 个 + 启动 3 个
     sps = make_splices(loaded[0])
-    check(len(sps) == 3, '应拼出 3 个停转样本，实际 %d' % len(sps))
+    kinds = [s.splice for s in sps]
+    check(kinds.count('stop') == 3 and kinds.count('start') == 3,
+          '应拼出停转/启动各 3 个，实际 %r' % kinds)
     for s in sps:
         tr = M.gt_transitions(s.segs, s.policy)
-        check(len(tr) == 1 and tr[0][1:] == ('do', 'noise'), '拼接样本应恰有一个 do->noise 切换')
+        want = ('do', 'noise') if s.splice == 'stop' else ('noise', 'do')
+        check(len(tr) == 1 and tr[0][1:] == want, '%s 样本应恰有一个 %s 切换' % (s.splice, want))
         check(all(s.ticks[i].pos < s.ticks[i + 1].pos and s.ticks[i].wall < s.ticks[i + 1].wall
                   for i in range(len(s.ticks) - 1)), '拼接后 pos/wall 应单调')
+        b = s.segs[1][0]
+        check(splice_seconds(s, []) == (0.0 if s.splice == 'stop' else (s.segs[1][1] // GRID_MS - b // GRID_MS) / 10.0),
+              '一直不转时：停转样本应记 0 秒、启动样本应记整段')
 
     # 7. 拟合：合成数据上证据融合的代价应低于现有融合
     cost = Cost()
@@ -1633,6 +1811,33 @@ def selftest():
               'golden.csv 与当前算法不一致：改了证据融合就要 fusion_lab.py golden 重新生成，并同步改 Java')
         check(io.open(os.path.join(GOLDEN_DIR, 'golden_config.json'), encoding='utf-8').read()
               == cfg_text, 'golden_config.json 过期')
+
+    # 8b. live 模式采集的 run：check 要改用证据融合回放
+    live_cfg = EvidenceConfig(Modality(VIDEO_FEATURE[1], EDGES, [x * 0.4 - 2 for x in range(12)]),
+                              Modality(AUDIO_FEATURES[1][1], EDGES, [x * 0.1 - 0.5 for x in range(12)]),
+                              1.0, 1.0, 2.0, 8.0, 1.0, -1.5, meta={'id': 'selftest-live'})
+    lv = loaded[0]
+    steps = replay_evidence(lv.ticks, live_cfg, lv.params)
+    for t, st in zip(lv.ticks, steps):
+        t.log = dict(t.log, smoothed=st.smoothed, gated=st.gated, final_freq=str(st.final_freq),
+                     ble_state=st.ble_state, ble_level=str(st.ble_level),
+                     sent='1' if st.sent else '0', sent_action=st.sent[0] if st.sent else '',
+                     sent_level=str(st.sent[1]) if st.sent else '-1')
+    ldir = os.path.join(tmp, 'live')
+    os.makedirs(os.path.join(ldir, 'gt'))
+    os.makedirs(os.path.join(ldir, 'runs'))
+    _write_synth(lv, os.path.join(ldir, 'gt', 'l01.csv'), os.path.join(ldir, 'runs', 'l01_base.csv'),
+                 fusion='live/selftest-live')
+    cpath = os.path.join(ldir, 'cfg.json')
+    with io.open(cpath, 'w', encoding='utf-8') as fh:
+        fh.write(live_cfg.to_json())
+    ns = argparse.Namespace(gt_dir=os.path.join(ldir, 'gt'), runs_dir=os.path.join(ldir, 'runs'),
+                            pair=[], policy='exclude', show=0, config=cpath)
+    import contextlib
+    with contextlib.redirect_stdout(io.StringIO()) as out:
+        rc = cmd_check(ns)
+    check(rc == 0 and '证据融合（selftest-live）' in out.getvalue(),
+          'live 模式的 run 应该用证据融合回放并完全一致:\n' + out.getvalue()[-400:])
 
     # 9. 线上配置能被解析
     if os.path.exists(DEFAULT_CONFIG_OUT):
@@ -1665,7 +1870,8 @@ def main():
     p = sub.add_parser('check', help='回放现有融合，与 run CSV 逐 tick 比对')
     common(p)
     p.add_argument('--show', type=int, default=8, help='每部片列出前几处不一致')
-    p.add_argument('--config', help='同时对拍 run CSV 里的 ev_* 影子列（给出当时 app 用的配置）')
+    p.add_argument('--config', help='采集时 app 用的配置：live 模式的 run 用它回放；shadow 模式的 run 用它对拍 ev_* 影子列'
+                                    '（不给时，live 的 run 若与仓库里的配置 id 相同会自动使用）')
     for name, hlp in (('eval', '留一视频交叉验证：各融合策略对比'),
                       ('oracle', '模态上限：假设某个模型完美'),
                       ('fit', '拟合证据融合并写出配置')):
@@ -1674,6 +1880,8 @@ def main():
         p.add_argument('--cost', default='fp=1,fn=1,stop=3',
                        help='扫参目标：误转秒 x fp + 漏转秒 x fn + 误停次数 x stop（默认 fp=1,fn=1,stop=3）')
         p.add_argument('--quick', action='store_true', help='用小网格（调试用）')
+        p.add_argument('--exhaustive', action='store_true',
+                       help='扫全网格（默认先粗后细，快约 10 倍，结果基本一致）')
         if name == 'fit':
             p.add_argument('--out', default=DEFAULT_CONFIG_OUT)
             p.add_argument('--mode', default='shadow', choices=('legacy', 'shadow', 'live'),
