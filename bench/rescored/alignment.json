@@ -1,0 +1,350 @@
+{
+  "v01": {
+    "audio": {
+      "channels": 2,
+      "codec": "aac",
+      "frame": 1024,
+      "profile": "LC",
+      "sample_rate": 48000,
+      "start_time": 0.0
+    },
+    "checked_at": "2026-10-05 20:10",
+    "clean": {
+      "argmax": 0.5216,
+      "corr": 0.3289,
+      "corr_sex": 0.5113,
+      "dip": 0.2284,
+      "lead": 0,
+      "mae": 0.2837,
+      "n": 809,
+      "offset_ms": -182,
+      "p90": 0.857,
+      "plateau": 0.2739,
+      "top": [
+        [-182, 0.2873],
+        [-183, 0.2891],
+        [-185, 0.2922],
+        [-181, 0.2924],
+        [-184, 0.2953],
+        [-180, 0.2954]
+      ],
+      "within_005": 0.0902
+    },
+    "device_pipeline": "phone",
+    "frame": 1024,
+    "model": ["yamnet.tflite", "yamnet_finetuned.tflite"],
+    "phone": {
+      "argmax": 0.8702,
+      "corr": 0.8999,
+      "corr_sex": 0.9121,
+      "dip": 0.0599,
+      "lead": 0,
+      "mae": 0.07,
+      "n": 809,
+      "offset_ms": 25,
+      "p90": 0.2609,
+      "plateau": 0.1448,
+      "top": [
+        [25, 0.0804],
+        [26, 0.0818],
+        [24, 0.082],
+        [23, 0.0886],
+        [22, 0.0908],
+        [31, 0.0953]
+      ],
+      "within_005": 0.4512
+    },
+    "run": "v01_base.csv",
+    "video": "视频1.mp4"
+  },
+  "v02": {
+    "audio": {
+      "channels": 2,
+      "codec": "aac",
+      "frame": 1024,
+      "profile": "LC",
+      "sample_rate": 48000,
+      "start_time": 0.0
+    },
+    "checked_at": "2026-10-05 20:12",
+    "clean": {
+      "argmax": 0.5092,
+      "corr": 0.092,
+      "corr_sex": 0.1077,
+      "dip": 0.2574,
+      "lead": 0,
+      "mae": 0.2751,
+      "n": 654,
+      "offset_ms": 126,
+      "p90": 0.8359,
+      "plateau": 0.3009,
+      "top": [
+        [126, 0.2367],
+        [127, 0.2368],
+        [125, 0.2375],
+        [133, 0.2414],
+        [373, 0.2415],
+        [130, 0.2426]
+      ],
+      "within_005": 0.0673
+    },
+    "device_pipeline": "phone",
+    "frame": 1024,
+    "model": ["yamnet.tflite", "yamnet_finetuned.tflite"],
+    "phone": {
+      "argmax": 0.9327,
+      "corr": 0.959,
+      "corr_sex": 0.9612,
+      "dip": 0.0357,
+      "lead": 0,
+      "mae": 0.0401,
+      "n": 654,
+      "offset_ms": 27,
+      "p90": 0.1597,
+      "plateau": 0.1262,
+      "top": [
+        [27, 0.0332],
+        [26, 0.0352],
+        [28, 0.0414],
+        [25, 0.0461],
+        [29, 0.0574],
+        [30, 0.0612]
+      ],
+      "within_005": 0.5979
+    },
+    "run": "v02_base.csv",
+    "video": "视频2.mp4"
+  },
+  "v04": {
+    "audio": {
+      "channels": 2,
+      "codec": "aac",
+      "frame": 1024,
+      "profile": "LC",
+      "sample_rate": 48000,
+      "start_time": 0.0
+    },
+    "checked_at": "2026-10-05 20:15",
+    "clean": {
+      "argmax": 0.544,
+      "corr": 0.2014,
+      "corr_sex": 0.3642,
+      "dip": 0.1819,
+      "lead": 0,
+      "mae": 0.2529,
+      "n": 886,
+      "offset_ms": 303,
+      "p90": 0.8092,
+      "plateau": 0.2236,
+      "top": [
+        [303, 0.2247],
+        [304, 0.2255],
+        [232, 0.2277],
+        [301, 0.228],
+        [302, 0.2282],
+        [61, 0.2321]
+      ],
+      "within_005": 0.0892
+    },
+    "device_pipeline": "phone",
+    "frame": 1024,
+    "model": ["yamnet.tflite", "yamnet_finetuned.tflite"],
+    "phone": {
+      "argmax": 0.9639,
+      "corr": 0.9732,
+      "corr_sex": 0.9782,
+      "dip": 0.0266,
+      "lead": 0,
+      "mae": 0.0273,
+      "n": 886,
+      "offset_ms": 26,
+      "p90": 0.1159,
+      "plateau": 0.1189,
+      "top": [
+        [26, 0.024],
+        [27, 0.0276],
+        [25, 0.0346],
+        [28, 0.0411],
+        [24, 0.0413],
+        [23, 0.0473]
+      ],
+      "within_005": 0.7449
+    },
+    "run": "v04_base.csv",
+    "video": "视频4.mp4"
+  },
+  "v05": {
+    "audio": {
+      "channels": 2,
+      "codec": "aac",
+      "frame": 1024,
+      "profile": "LC",
+      "sample_rate": 48000,
+      "start_time": 0.0
+    },
+    "checked_at": "2026-10-05 20:17",
+    "clean": {
+      "argmax": 0.5888,
+      "corr": 0.5283,
+      "corr_sex": 0.4924,
+      "dip": 0.2199,
+      "lead": 0,
+      "mae": 0.237,
+      "n": 890,
+      "offset_ms": 110,
+      "p90": 0.8459,
+      "plateau": 0.2545,
+      "top": [
+        [110, 0.213],
+        [111, 0.2136],
+        [109, 0.2144],
+        [-161, 0.2156],
+        [-146, 0.2207],
+        [108, 0.2212]
+      ],
+      "within_005": 0.1921
+    },
+    "device_pipeline": "phone",
+    "frame": 1024,
+    "model": ["yamnet.tflite", "yamnet_finetuned.tflite"],
+    "phone": {
+      "argmax": 0.927,
+      "corr": 0.9663,
+      "corr_sex": 0.9624,
+      "dip": 0.0439,
+      "lead": 0,
+      "mae": 0.0434,
+      "n": 890,
+      "offset_ms": 27,
+      "p90": 0.1871,
+      "plateau": 0.173,
+      "top": [
+        [27, 0.0382],
+        [26, 0.0388],
+        [28, 0.043],
+        [25, 0.0455],
+        [29, 0.0659],
+        [31, 0.0683]
+      ],
+      "within_005": 0.6146
+    },
+    "run": "v05_base.csv",
+    "video": "视频5.mp4"
+  },
+  "v06": {
+    "audio": {
+      "channels": 2,
+      "codec": "aac",
+      "frame": 1024,
+      "profile": "LC",
+      "sample_rate": 48000,
+      "start_time": 0.0
+    },
+    "checked_at": "2026-10-05 20:20",
+    "clean": {
+      "argmax": 0.4781,
+      "corr": 0.249,
+      "corr_sex": 0.206,
+      "dip": 0.1661,
+      "lead": 0,
+      "mae": 0.2483,
+      "n": 912,
+      "offset_ms": -32,
+      "p90": 0.7456,
+      "plateau": 0.2234,
+      "top": [
+        [-32, 0.2146],
+        [-26, 0.2147],
+        [-33, 0.2152],
+        [-11, 0.2155],
+        [-34, 0.217],
+        [-20, 0.2174]
+      ],
+      "within_005": 0.0691
+    },
+    "device_pipeline": "phone",
+    "frame": 1024,
+    "model": ["yamnet.tflite", "yamnet_finetuned.tflite"],
+    "phone": {
+      "argmax": 0.9627,
+      "corr": 0.9852,
+      "corr_sex": 0.9799,
+      "dip": 0.021,
+      "lead": 0,
+      "mae": 0.0208,
+      "n": 912,
+      "offset_ms": 26,
+      "p90": 0.0852,
+      "plateau": 0.1178,
+      "top": [
+        [26, 0.0161],
+        [27, 0.0209],
+        [25, 0.0214],
+        [28, 0.0276],
+        [24, 0.038],
+        [31, 0.0466]
+      ],
+      "within_005": 0.8092
+    },
+    "run": "v06_base.csv",
+    "video": "视频6.mp4"
+  },
+  "v07": {
+    "audio": {
+      "channels": 2,
+      "codec": "aac",
+      "frame": 1024,
+      "profile": "LC",
+      "sample_rate": 48000,
+      "start_time": 0.0
+    },
+    "checked_at": "2026-10-05 20:22",
+    "clean": {
+      "argmax": 0.4733,
+      "corr": 0.3157,
+      "corr_sex": 0.3602,
+      "dip": 0.22,
+      "lead": 0,
+      "mae": 0.2996,
+      "n": 1274,
+      "offset_ms": 223,
+      "p90": 0.9067,
+      "plateau": 0.2787,
+      "top": [
+        [223, 0.2524],
+        [232, 0.2533],
+        [224, 0.2562],
+        [220, 0.257],
+        [221, 0.259],
+        [222, 0.2596]
+      ],
+      "within_005": 0.0793
+    },
+    "device_pipeline": "phone",
+    "frame": 1024,
+    "model": ["yamnet.tflite", "yamnet_finetuned.tflite"],
+    "phone": {
+      "argmax": 0.9105,
+      "corr": 0.9576,
+      "corr_sex": 0.9511,
+      "dip": 0.0533,
+      "lead": 0,
+      "mae": 0.049,
+      "n": 1274,
+      "offset_ms": 25,
+      "p90": 0.1982,
+      "plateau": 0.1492,
+      "top": [
+        [25, 0.0429],
+        [26, 0.047],
+        [24, 0.0502],
+        [27, 0.0538],
+        [28, 0.0693],
+        [23, 0.0715]
+      ],
+      "within_005": 0.5903
+    },
+    "run": "v07_base.csv",
+    "video": "视频7.mp4"
+  }
+}
