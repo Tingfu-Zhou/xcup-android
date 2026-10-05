@@ -965,6 +965,9 @@ LLR_CLIP = 3.0       # 单个结果最多贡献的证据，防止某个极端区
 ALPHA = 0.5          # 每格的平滑伪计数
 
 GRID = {
+    # 视频证据的权重也要搜：音频修好之后，"少信视频、甚至只用音频"在剧情有裸露的片子上更好，
+    # 固定 w_v=1 就搜不到这一片（w_v=0 即只用音频）
+    'w_v': [1.0, 0.5, 0.25, 0.0],
     'w_a': [0.0, 0.5, 1.0, 2.0, 3.0],
     'clamp_lo': [1.0, 2.0, 3.0, 4.0, 6.0],
     'clamp_hi': [3.0, 4.0, 6.0, 8.0, 12.0, 16.0],
@@ -972,6 +975,7 @@ GRID = {
     'theta_off': [-4.0, -2.0, -1.0, -0.5, 0.0, 0.5],
 }
 QUICK_GRID = {
+    'w_v': [1.0, 0.0],
     'w_a': [0.0, 1.0],
     'clamp_lo': [2.0, 4.0],
     'clamp_hi': [4.0, 8.0],
@@ -1062,32 +1066,32 @@ def fit_table(samples, edges=EDGES, alpha=ALPHA, clip=LLR_CLIP):
     return llr, (nd, nn)
 
 
-GRID_KEYS = ('w_a', 'clamp_lo', 'clamp_hi', 'theta_on', 'theta_off')
+GRID_KEYS = ('w_v', 'w_a', 'clamp_lo', 'clamp_hi', 'theta_on', 'theta_off')
 
 
 def _space(variant, grid):
-    sp = dict((k, list(grid[k])) for k in GRID_KEYS)
+    sp = dict((k, list(grid.get(k, [1.0]))) for k in GRID_KEYS)
     if variant == 'video_only':
-        sp['w_a'] = [0.0]
+        sp['w_v'], sp['w_a'] = [1.0], [0.0]
     elif variant == 'audio_only':
-        sp['w_a'] = [1.0]
-    return sp, (0.0 if variant == 'audio_only' else 1.0)
+        sp['w_v'], sp['w_a'] = [0.0], [1.0]
+    return sp
 
 
-def _combo(space, w_v, ix):
-    return (w_v,) + tuple(space[k][i] for k, i in zip(GRID_KEYS, ix))
+def _combo(space, ix):
+    return tuple(space[k][i] for k, i in zip(GRID_KEYS, ix))
 
 
 def _combo_ok(combo):
-    _, _, lo, hi, on, off = combo
-    return -lo < off < on <= hi
+    w_v, w_a, lo, hi, on, off = combo
+    return (w_v > 0 or w_a > 0) and -lo < off < on <= hi
 
 
 def param_combos(variant, grid):
     """全网格（--exhaustive 用）。"""
-    space, w_v = _space(variant, grid)
+    space = _space(variant, grid)
     for ix in _product([range(len(space[k])) for k in GRID_KEYS]):
-        c = _combo(space, w_v, ix)
+        c = _combo(space, ix)
         if _combo_ok(c):
             yield c
 
@@ -1114,7 +1118,7 @@ def fit(train, cost, variant='evidence', grid=GRID, exhaustive=False, top_k=10):
     vt0, vcounts = fit_table(vs)
     afeats = AUDIO_FEATURES + _EXTRA_AUDIO_FEATURES if variant != 'video_only' else AUDIO_FEATURES[:1]
     negs = NEG_SCALES if variant != 'audio_only' else [1.0]
-    space, w_v = _space(variant, grid)
+    space = _space(variant, grid)
     atables = {}
     contexts = []
     for ns in negs:
@@ -1134,6 +1138,12 @@ def fit(train, cost, variant='evidence', grid=GRID, exhaustive=False, top_k=10):
             contexts.append((base, preps, info))
 
     best = [None]
+
+    def redundant(ctx, combo):
+        """w_v=0 时视频负证据折扣无关、w_a=0 时音频特征无关：这些组合只在第一个对应的 context 里算。"""
+        info = contexts[ctx][2]
+        return ((combo[0] == 0 and info['neg_scale'] != negs[0])
+                or (combo[1] == 0 and info['audio_feature'] != afeats[0][0]))
 
     def evaluate(ctx, combo, bound):
         """总代价；超过 bound 就提前放弃（返回 None）。"""
@@ -1156,7 +1166,8 @@ def fit(train, cost, variant='evidence', grid=GRID, exhaustive=False, top_k=10):
     if exhaustive:
         for ctx in range(len(contexts)):
             for combo in param_combos(variant, grid):
-                consider(ctx, combo)
+                if not redundant(ctx, combo):
+                    consider(ctx, combo)
         return best[0]
 
     coarse = dict((k, sorted(set(range(0, len(space[k]), 2)) | {len(space[k]) - 1}))
@@ -1164,8 +1175,8 @@ def fit(train, cost, variant='evidence', grid=GRID, exhaustive=False, top_k=10):
     scored = []
     for ctx in range(len(contexts)):
         for ix in _product([coarse[k] for k in GRID_KEYS]):
-            combo = _combo(space, w_v, ix)
-            if _combo_ok(combo):
+            combo = _combo(space, ix)
+            if _combo_ok(combo) and not redundant(ctx, combo):
                 t = evaluate(ctx, combo, None)
                 scored.append((t, ctx, ix))
                 if best[0] is None or t < best[0][0]:
@@ -1181,8 +1192,8 @@ def fit(train, cost, variant='evidence', grid=GRID, exhaustive=False, top_k=10):
             if (ctx, nix) in seen:
                 continue
             seen.add((ctx, nix))
-            combo = _combo(space, w_v, nix)
-            if _combo_ok(combo):
+            combo = _combo(space, nix)
+            if _combo_ok(combo) and not redundant(ctx, combo):
                 before = best[0][0]
                 consider(ctx, combo)
                 if best[0][0] < before:
@@ -1218,28 +1229,59 @@ POLICIES = [('legacy', '现有融合'), ('always', '一直转'), ('video_only', 
             ('audio_only', '只用音频'), ('evidence', '证据融合')]
 
 
+_W = {}          # 留一拟合的共享数据；并行时每个子进程由 _lovo_init 填一次
+
+
+def _lovo_init(videos, splices, cost, grid, exhaustive, extra_feats):
+    _W.update(videos=videos, splices=splices, cost=cost, grid=grid, exhaustive=exhaustive)
+    _EXTRA_AUDIO_FEATURES[:] = extra_feats        # spawn 出来的子进程不继承 --speech 的设置
+
+
+def _lovo_task(held_vid, var):
+    train = [v for v in _W['videos'] if v.vid != held_vid]
+    train_all = list(train)
+    for v in train:
+        train_all += _W['splices'][v.vid]
+    t0 = time.time()
+    best = fit(train_all, _W['cost'], var, _W['grid'], _W['exhaustive'])
+    return held_vid, var, best, time.time() - t0
+
+
 def lovo(videos, cost, grid, variants=('video_only', 'audio_only', 'evidence'), log=print,
-         exhaustive=False):
-    """留一视频交叉验证：拟合时连同被留出那部片的拼接样本一起排除。"""
+         exhaustive=False, jobs=1):
+    """留一视频交叉验证：拟合时连同被留出那部片的拼接样本一起排除。
+    各折互相独立，jobs>1 时多进程并行（spawn，Windows/Linux 行为一致），结果与串行完全相同。"""
     splices = dict((v.vid, make_splices(v)) for v in videos)
+    tasks = [(held.vid, var) for held in videos for var in variants]
+    init = (videos, splices, cost, grid, exhaustive, list(_EXTRA_AUDIO_FEATURES))
     folds = {}
-    for held in videos:
-        train = [v for v in videos if v is not held]
-        train_all = list(train)
-        for v in train:
-            train_all += splices[v.vid]
-        for var in variants:
-            t0 = time.time()
-            best = fit(train_all, cost, var, grid, exhaustive)
-            folds[(held.vid, var)] = best
-            log('  · 留出 %-5s %-8s 拟合完成（%.0fs）  %s' % (
-                held.vid, dict(POLICIES)[var], time.time() - t0, fmt_params(best[1], best[2])))
+
+    def done(held_vid, var, best, dt):
+        folds[(held_vid, var)] = best
+        log('  · 留出 %-5s %-8s 拟合完成（%.0fs）  %s' % (
+            held_vid, dict(POLICIES)[var], dt, fmt_params(best[1], best[2])))
+
+    jobs = max(1, min(jobs or (os.cpu_count() or 1), len(tasks)))
+    if jobs == 1:
+        _lovo_init(*init)
+        for t in tasks:
+            done(*_lovo_task(*t))
+    else:
+        import concurrent.futures as cf
+        import multiprocessing as mp
+        log('  （%d 个进程并行）' % jobs)
+        order = sorted(tasks, key=lambda t: t[1] != 'evidence')      # 证据融合最慢，先排上
+        with cf.ProcessPoolExecutor(jobs, mp_context=mp.get_context('spawn'),
+                                    initializer=_lovo_init, initargs=init) as ex:
+            futs = [ex.submit(_lovo_task, *t) for t in order]
+            for f in cf.as_completed(futs):
+                done(*f.result())
     return folds, splices
 
 
 def fmt_params(cfg, info=None):
-    s = 'w_a=%g C=-%g/+%g on=%g off=%g' % (cfg.w_a, cfg.clamp_lo, cfg.clamp_hi,
-                                          cfg.theta_on, cfg.theta_off)
+    s = 'w_v=%g w_a=%g C=-%g/+%g on=%g off=%g' % (cfg.w_v, cfg.w_a, cfg.clamp_lo, cfg.clamp_hi,
+                                                 cfg.theta_on, cfg.theta_off)
     if info and cfg.w_a:
         s += ' 音频特征=%s' % info.get('audio_feature', '?')
     if info and cfg.w_v and info.get('neg_scale', 1.0) != 1.0:
@@ -1248,8 +1290,8 @@ def fmt_params(cfg, info=None):
 
 
 def evaluate_all(videos, cost, grid, log=print, variants=('video_only', 'audio_only', 'evidence'),
-                 exhaustive=False):
-    folds, splices = lovo(videos, cost, grid, variants, log, exhaustive)
+                 exhaustive=False, jobs=1):
+    folds, splices = lovo(videos, cost, grid, variants, log, exhaustive, jobs)
     per = dict((p, {}) for p, _ in POLICIES)
     sp = dict((p, []) for p, _ in POLICIES)       # [(kind, Score, 秒数)]
     for v in videos:
@@ -1395,7 +1437,7 @@ def cmd_eval(args):
         print('  音频特征候选加上 Speech：%s' % ', '.join(n for n, _ in SPEECH_FEATURES))
     print('\n留一视频交叉验证（每部片只用其余 %d 部拟合）…' % (len(videos) - 1))
     t0 = time.time()
-    per, sp, folds, splices = evaluate_all(videos, cost, grid, exhaustive=args.exhaustive)
+    per, sp, folds, splices = evaluate_all(videos, cost, grid, exhaustive=args.exhaustive, jobs=args.jobs)
     print('  共用时 %.0fs\n' % (time.time() - t0))
     nst = sum(1 for x in splices.values() for s in x if s.splice == 'start')
     nsp = sum(1 for x in splices.values() for s in x if s.splice == 'stop')
@@ -1444,7 +1486,7 @@ def cmd_oracle(args):
     for name, which in scen:
         vs = [oracle_video(v, which) if which else v for v in videos]
         per, sp, _, _ = evaluate_all(vs, cost, grid, log=lambda *a: None, variants=('evidence',),
-                                     exhaustive=args.exhaustive)
+                                     exhaustive=args.exhaustive, jobs=args.jobs)
         print_table(name, vs, per, sp, pols, show_videos=False)
     print('  · 如果"视频完美"在现有融合下几乎不涨、在证据融合下大涨，说明现有融合挡住了视频侧的改进。')
     return 0
@@ -1979,6 +2021,8 @@ def main():
         p.add_argument('--quick', action='store_true', help='用小网格（调试用）')
         p.add_argument('--exhaustive', action='store_true',
                        help='扫全网格（默认先粗后细，快约 10 倍，结果基本一致）')
+        p.add_argument('--jobs', type=int, default=0,
+                       help='eval/oracle 的留一拟合用几个进程并行（默认 0 = CPU 核数；1 = 串行）')
         p.add_argument('--speech', action='store_true',
                        help='音频特征候选里加上 YAMNet Speech（需要 a_ys_* 列）：%s'
                             % ', '.join(n for n, _ in SPEECH_FEATURES))
