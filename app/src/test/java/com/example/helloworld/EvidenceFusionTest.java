@@ -5,6 +5,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
+import org.json.JSONObject;
 import org.junit.Test;
 
 import java.io.BufferedReader;
@@ -207,7 +208,10 @@ public class EvidenceFusionTest {
         assertEquals(2.5, cfg.clampHi, 0);
     }
 
-    /** 打进 APK 的配置必须能解析，否则 app 会静默回退到原融合。 */
+    /**
+     * 打进 APK 的配置必须能解析，并且与 app 对得上（同 VideoProcessActivity.initEvidenceFusion 的检查），
+     * 否则 app 会回退到原融合。
+     */
     @Test
     public void shippedConfigParses() throws Exception {
         File f = new File("src/main/assets/fusion_config.json");          // Gradle 单测工作目录 = app/
@@ -216,5 +220,10 @@ public class EvidenceFusionTest {
         String text = new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8);
         EvidenceFusion.Config cfg = EvidenceFusion.Config.fromJson(text);
         assertNotNull(cfg.id);
+        if (!EvidenceFusion.MODE_LEGACY.equals(cfg.mode)) {
+            // 离线模式只有修复后的音频
+            assertEquals("证据表必须在修复后的音频上拟合", "fixed",
+                    new JSONObject(text).optString("audio_pipeline"));
+        }
     }
 }

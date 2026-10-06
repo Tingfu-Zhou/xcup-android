@@ -174,9 +174,10 @@ live 模式采集的 run（参数行里 `FUSION=live/<配置 id>`）会自动改
 配置缺失或解析失败时 app 自动回退到原融合。想退回原融合，把 `fusion_config.json` 的
 `"mode"` 改成 `"shadow"`（照样记证据融合的影子列）或 `"legacy"`，重新编译即可。
 
-配置里的 `"audio_pipeline"` 决定离线模式怎么解码音频（见下文"音频解码修复"）：`"fixed"` = 修复后的
-`PcmResampler`，没有这一项或其他值 = 原来的（半速）处理。证据表只对拟合时那种音频有效，所以由 `fit`
-按训练数据自动写入，不要手改。
+配置里的 `"audio_pipeline"` 记录证据表是在哪种音频上拟合的，由 `fit` 按训练数据自动写入，不要手改。
+离线模式现在只有修复后的音频（`PcmResampler`，见下文"音频解码修复"），旧的半速处理已删除，所以 app 只接受
+`"fixed"` 的配置；没有这一项的旧配置（在半速音频上拟合的）会被拒绝，app 回退到原融合（logcat 里有
+`[证据融合]` 的报错）。`EvidenceFusionTest` 和 `fusion_lab.py --selftest` 也会检查打包的配置。
 
 ### 当前结果（2026-10-05，6 部片，留一视频交叉验证）
 
@@ -280,12 +281,12 @@ python bench/tools/audio_rescore.py check --videos D:/xcup/videos
 
 **修复**：`PcmResampler`（纯 Java）先按声道平均下混，再用 Blackman 窗 sinc 低通插值重采样到 16kHz
 （截止 7.6kHz：7kHz 内 −0.1dB，8.5kHz 以上衰减 >76dB），流式处理、跨 buffer 连续，不丢样本；`AudioDecoder`
-在 `fixed` 模式下把每个解码 buffer 交给它，按"起头 pts + 样本序号/16000"连续写入 `PcmCircularBuffer`。
+把每个解码 buffer 交给它，按"起头 pts + 样本序号/16000"连续写入 `PcmCircularBuffer`。
 `audio_rescore.py` 的 `fixed` 管线是它的逐行移植（`PcmResamplerTest` 用 `audio_rescore.py golden` 的
 对拍数据校验），所以离线重算出的就是手机会喂给模型的音频。
 
-修复由 `fusion_config.json` 的 `audio_pipeline` 打开：现有配置是在半速音频上拟合的，没有这一项，app 行为
-不变。上线步骤：
+修复最初由 `fusion_config.json` 的 `audio_pipeline` 开关打开（2026-10-05）；2026-10-06 起旧的半速处理已从
+`AudioDecoder` 删除，离线模式只有修复后的音频。证据表要在 `fixed` 音频上拟合：
 
 ```bash
 python bench/tools/audio_rescore.py rescore --videos D:/xcup/videos            # 默认 --pipeline fixed
@@ -294,16 +295,16 @@ python bench/tools/fusion_lab.py eval bench/gt bench/rescored/fixed --speech    
 python bench/tools/fusion_lab.py fit  bench/gt bench/rescored/fixed --mode live [--speech]
 ```
 
-`fit` 会检查所有 run 是同一种音频（重算头部的 `pipeline=` / app 参数行的 `AUDIO_PIPE=`），把它写进配置的
-`audio_pipeline`；`clean` 是 app 产生不了的音频，拒绝拟合。新配置装上后 app 的离线模式就按 `fixed` 解码，
-bench 参数行记 `AUDIO_PIPE=fixed`；之后用新包重录 bench，`check` 就是 `fixed` 对 `phone`，并且有 `a_pos`，
-能逐个精确对上。
+`fit` 会检查所有 run 是同一种音频（重算头部的 `pipeline=` / app 参数行的 `AUDIO_PIPE=`），写进配置的
+`audio_pipeline`，并且只接受 `fixed`：`clean` 是 app 产生不了的音频，`legacy`（旧版 app 录的、或 `phone`
+重算的）是 app 已经删掉的音频，都拒绝拟合。app 采集的 run 参数行记 `AUDIO_PIPE=fixed`（网页视频模式记
+`web`）；用新包重录 bench 后，`check` 就是 `fixed` 对 `phone`，并且有 `a_pos`，能逐个精确对上。
 
 ### 2. 重算：rescore
 
 ```bash
 python bench/tools/audio_rescore.py rescore --videos D:/xcup/videos                    # fixed：修复后的 app
-python bench/tools/audio_rescore.py rescore --videos D:/xcup/videos --pipeline phone   # 旧版 app 的现状
+python bench/tools/audio_rescore.py rescore --videos D:/xcup/videos --pipeline phone   # 旧版 app 的半速音频
 python bench/tools/audio_rescore.py rescore --videos D:/xcup/videos --classifier new.tflite   # 换分类器
 ```
 

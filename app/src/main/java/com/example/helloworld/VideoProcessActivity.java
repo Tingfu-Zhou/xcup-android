@@ -93,9 +93,6 @@ public class VideoProcessActivity extends AppCompatActivity {
     private EvidenceFusion evidenceFusion;          // null = 不运行
     private boolean evidenceLive = false;           // true = 证据融合驱动蓝牙
     private String fusionModeTag = "legacy";        // 写进评测参数行，例如 shadow/provisional-20261004
-    // [音频修复] 离线模式音频解码用哪条管线：fusion_config.json 的 audio_pipeline。证据表是在哪种音频上
-    // 拟合的，就必须喂哪种；配置里没有这一项（旧配置）或读不到配置，就保持原来的 legacy 管线。
-    private boolean audioPipelineFixed = false;
     // 模型结果快照（概率 + 产出时刻）作为一个对象原子发布，证据融合不会读到"新概率配旧时间戳"
     private final AtomicReference<EvidenceFusion.Snapshot> latestVideoSnap = new AtomicReference<>(null);
     private final AtomicReference<AudioSnap> latestAudioSnap = new AtomicReference<>(null);
@@ -402,7 +399,7 @@ public class VideoProcessActivity extends AppCompatActivity {
             });
 
             audioDecoder = new AudioDecoder(this, videoUri, null, pcmBuffer,
-                    () -> videoView.getCurrentPosition(), audioPipelineFixed);
+                    () -> videoView.getCurrentPosition());
             audioDecoder.setOnCompleteListener(() -> {
                 isAudioCompleted = true;
                 Log.d(TAG, "音频解码完成");
@@ -1427,27 +1424,29 @@ public class VideoProcessActivity extends AppCompatActivity {
     private int downThreshold(int cur) { return Math.max(0,  cur - 1); }
 
     /**
-     * [证据融合] 读 assets/fusion_config.json。缺文件、格式错、参数非法都回退到原融合，绝不影响正常使用。
-     * 配置由 bench/tools/fusion_lab.py fit 生成。
+     * [证据融合] 读 assets/fusion_config.json。缺文件、格式错、参数非法、与 app 对不上，都回退到原融合，
+     * 绝不影响正常使用。配置由 bench/tools/fusion_lab.py fit 生成。
      */
     private void initEvidenceFusion() {
         evidenceFusion = null;
         evidenceLive = false;
         fusionModeTag = "legacy";
-        audioPipelineFixed = false;
         try (InputStream in = getAssets().open(FUSION_CONFIG_ASSET)) {
             ByteArrayOutputStream buf = new ByteArrayOutputStream();
             byte[] b = new byte[4096];
             int n;
             while ((n = in.read(b)) > 0) buf.write(b, 0, n);
             String text = new String(buf.toByteArray(), StandardCharsets.UTF_8);
-            audioPipelineFixed = "fixed".equals(new org.json.JSONObject(text).optString("audio_pipeline"));
-            Log.i(TAG, "[音频修复] 音频管线 = " + (audioPipelineFixed ? "fixed" : "legacy"));
             EvidenceFusion.Config cfg = EvidenceFusion.Config.fromJson(text);
             fusionModeTag = (cfg.mode + "/" + cfg.id).replaceAll("\\s+", "_");
             if (EvidenceFusion.MODE_LEGACY.equals(cfg.mode)) {
                 Log.i(TAG, "[证据融合] 配置 mode=legacy，不运行");
                 return;
+            }
+            // 证据表只对拟合时那种音频有效。离线模式只有修复后的音频（PcmResampler），
+            // 没标明 audio_pipeline=fixed 的配置是在旧的半速音频上拟合的，装上去对不上
+            if (!"fixed".equals(new org.json.JSONObject(text).optString("audio_pipeline"))) {
+                throw new IllegalArgumentException("audio_pipeline 不是 fixed：证据表不是在修复后的音频上拟合的");
             }
             evidenceFusion = new EvidenceFusion(cfg);
             evidenceLive = EvidenceFusion.MODE_LIVE.equals(cfg.mode);
@@ -1455,7 +1454,7 @@ public class VideoProcessActivity extends AppCompatActivity {
                     + (cfg.provisional ? "（临时配置，未经回放验证）" : ""));
         } catch (Exception e) {
             fusionModeTag = "legacy(配置无效)";
-            Log.e(TAG, "[证据融合] 读取 " + FUSION_CONFIG_ASSET + " 失败，回退到原融合", e);
+            Log.e(TAG, "[证据融合] " + FUSION_CONFIG_ASSET + " 不可用，回退到原融合", e);
         }
     }
 
@@ -1491,7 +1490,7 @@ public class VideoProcessActivity extends AppCompatActivity {
                 BLUETOOTH_MIN_DURATION, BLUETOOTH_SEND_INTERVAL,
                 LEVEL_STABLE_MS, LEVEL_MIN_DUR_MS,
                 MAIN_FUSION_INTERVAL, VIDEO_INFERENCE_INTERVAL, AUDIO_INFERENCE_INTERVAL,
-                fusionModeTag, isWebVideoMode ? "web" : (audioPipelineFixed ? "fixed" : "legacy"));
+                fusionModeTag, isWebVideoMode ? "web" : "fixed");
     }
 
 

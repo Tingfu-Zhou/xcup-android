@@ -125,10 +125,10 @@ def _apply_lead(pcm, ch, lead):
 
 
 class PhonePipeline(object):
-    """逐行复刻离线模式的音频链路（AudioDecoder.startDecoding → PcmCircularBuffer.write →
-    readWindowRelaxed）。输入是解码器输出的交错 int16 PCM（ffmpeg 解出来的，采样率/声道数不变）。
+    """逐行复刻旧版 app（1.2.5 之前）离线模式的音频链路（AudioDecoder.startDecoding → PcmCircularBuffer.write →
+    readWindowRelaxed）。这段处理已从 app 删除，这里留着用来分析旧版 app 录的 run。输入是解码器输出的交错 int16 PCM（ffmpeg 解出来的，采样率/声道数不变）。
 
-    AudioDecoder 没看声道数，把 MediaCodec 输出的交错 PCM（L R L R …）直接当单声道用：
+    旧版 AudioDecoder 没看声道数，把 MediaCodec 输出的交错 PCM（L R L R …）直接当单声道用：
       windowSize = sampleRate*4 个 short 凑一块；重采样按 i/sampleRate 算原始时间轴、只取前 2 秒，
       即前 2*sampleRate 个 short 拉成 32000 点，时间戳铺满 2000ms。所以
       · 双声道：每块只用到前 1 秒真实音频（L/R 交错），以 0.5 倍速、低八度送进模型，后 1 秒丢弃；
@@ -228,9 +228,9 @@ class PhonePipeline(object):
             return '16kHz 单声道源：与正确做法一致'
         if self.ch >= 2:
             real = 2.0 / self.ch if self.sr != SR else 4.0 / self.ch
-            return ('AudioDecoder 把 %d 声道交错 PCM 当单声道：每块只用了 %.1f 秒真实音频，'
+            return ('旧版 AudioDecoder 把 %d 声道交错 PCM 当单声道：每块只用了 %.1f 秒真实音频，'
                     '拉长到 2 秒（%.2f 倍速）送进模型' % (self.ch, real, real / 2.0))
-        return 'AudioDecoder：单声道源每 4 秒只用前 2 秒，速度正确，但中间 2 秒没有数据'
+        return '旧版 AudioDecoder：单声道源每 4 秒只用前 2 秒，速度正确，但中间 2 秒没有数据'
 
 
 class Resampler(object):
@@ -295,7 +295,7 @@ def downmix(pcm, ch):
 
 
 class FixedPipeline(object):
-    """修好之后的离线模式（app 里 audio_pipeline=fixed）：AudioDecoder 把每个解码 buffer 交给
+    """修好之后的离线模式（现在 app 离线模式唯一的音频处理）：AudioDecoder 把每个解码 buffer 交给
     PcmResampler，产出的 16kHz 样本连续写进 PcmCircularBuffer，时间戳 = 首个 buffer 的 pts + n/16000；
     readWindowRelaxed(T) 取到的就是 [T-2s, T]。与 app 逐样本一致，所以拿它重算出来的 run 拟合的
     融合配置，装到手机上就是那个效果。"""
@@ -918,7 +918,7 @@ def cmd_check(a):
                     print('  → ✓ 真机喂给模型的是 %s 管线的音频%s，但逐个结果还有出入（MAE %.3f）：%s'
                           % (bk, '（比另一种接近得多）' if others else '', bst['mae'], why))
                 if bk == 'phone' and info['channels'] >= 2:
-                    print('    也就是说，真机送进模型的是 0.5 倍速、L/R 交错的音频（AudioDecoder 没按声道数处理）')
+                    print('    也就是说，真机送进模型的是 0.5 倍速、L/R 交错的音频（旧版 AudioDecoder 没按声道数处理）')
                 elif bk == 'fixed':
                     print('    真机用的是修复后的管线（PcmResampler），与离线 fixed 重算一致')
             else:
@@ -1334,7 +1334,7 @@ def golden(path=GOLDEN_PATH, write=True):
 
 # ======================================================================== selftest
 def _java_reference(pcm, sr, ch, frame, Ts, lead=0, base_us=0):
-    """把 AudioDecoder.startDecoding() 的循环和 PcmCircularBuffer 一行一行照抄成 Python（慢），
+    """把旧版 AudioDecoder.startDecoding() 的循环和 PcmCircularBuffer 一行一行照抄成 Python（慢），
     用来校验 PhonePipeline 的向量化实现。Ts 必须递增：读之前先让"解码线程"跑到 T+3 秒。"""
     f32 = np.float32
     cap = SR * 20

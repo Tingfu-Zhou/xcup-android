@@ -1496,13 +1496,14 @@ def cmd_fit(args):
     cost = Cost.parse(args.cost)
     grid = QUICK_GRID if args.quick else GRID
     videos = load_videos(args.gt_dir, args.runs_dir, args.pair, args.policy)
-    # 证据表只对拟合时那种音频有效：app 按配置里的 audio_pipeline 决定离线模式怎么解码音频
+    # 证据表只对拟合时那种音频有效。app 离线模式只有修复后的音频（PcmResampler），所以只能在 fixed 上拟合；
+    # app 也会拒绝 audio_pipeline 不是 fixed 的配置（回退到原融合）
     pipes = sorted(set(v.audio_pipe for v in videos))
     if len(pipes) > 1:
         sys.exit('这些 run 的音频管线不一致 %s：证据表只能在同一种音频上拟合'
                  % ['%s=%s' % (v.vid, v.audio_pipe) for v in videos])
-    if pipes[0] not in ('legacy', 'fixed'):
-        sys.exit('音频管线 %s 是 app 产生不了的音频，拟合出的配置装上去对不上。'
+    if pipes[0] != 'fixed':
+        sys.exit('音频管线 %s 不是 app 现在喂给模型的音频（离线模式只有 fixed），拟合出的配置装上去对不上。'
                  '请用 audio_rescore.py rescore --pipeline fixed 的结果拟合' % pipes[0])
     if args.speech:
         use_speech_features(videos)
@@ -1518,7 +1519,7 @@ def cmd_fit(args):
         'fitted_at': stamp,
         'provisional': False,
         'note': '由 bench/tools/fusion_lab.py fit 生成。mode: legacy=不运行 / shadow=只记日志 / live=驱动蓝牙；'
-                'audio_pipeline: 证据表是在哪种音频上拟合的，app 离线模式就按它解码（fixed=修复后，legacy=旧的半速音频）',
+                'audio_pipeline: 证据表是在哪种音频上拟合的，app 只接受 fixed（修复后的音频），否则回退到原融合',
         'audio_pipeline': pipes[0],
         'fit': {
             'videos': ['%s=%s' % (v.vid, os.path.basename(v.run_path)) for v in videos],
@@ -1978,11 +1979,27 @@ def selftest():
     rt = EvidenceConfig.from_json(sp_cfg.to_json())
     check(rt.audio.weights == SPEECH_FEATURES[0][1], '带 Speech 的配置 JSON 往返后权重变了')
 
-    # 9. 线上配置能被解析
+    # 10b. fit 只接受 fixed 音频（8b 的合成 run 没有 AUDIO_PIPE，算旧版 app 的 legacy）
+    fns = argparse.Namespace(gt_dir=os.path.join(ldir, 'gt'), runs_dir=os.path.join(ldir, 'runs'), pair=[],
+                             policy='exclude', cost='fp=1,fn=1,stop=3', quick=True, exhaustive=False,
+                             speech=False, out=os.path.join(tmp, 'fit_legacy.json'), mode='shadow')
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            cmd_fit(fns)
+        check(False, 'fit 应该拒绝 legacy 音频的 run')
+    except SystemExit as e:
+        check('不是 app 现在喂给模型的音频' in str(e.code), 'fit 拒绝 legacy 的原因不对: %r' % (e.code,))
+    check(not os.path.exists(fns.out), 'fit 拒绝时不应写出配置')
+
+    # 9. 线上配置能被解析，并且与 app 对得上（同 VideoProcessActivity.initEvidenceFusion 的检查）
     if os.path.exists(DEFAULT_CONFIG_OUT):
         try:
             c = EvidenceConfig.from_json(io.open(DEFAULT_CONFIG_OUT, encoding='utf-8').read())
             check(c.mode in ('legacy', 'shadow', 'live'), 'fusion_config.json 的 mode 非法: %r' % c.mode)
+            if c.mode != 'legacy':
+                check(c.meta.get('audio_pipeline') == 'fixed',
+                      'fusion_config.json 的 audio_pipeline 不是 fixed（app 会回退到原融合）: %r'
+                      % c.meta.get('audio_pipeline'))
         except (ValueError, KeyError) as e:
             fails.append('fusion_config.json 解析失败: %s' % e)
 

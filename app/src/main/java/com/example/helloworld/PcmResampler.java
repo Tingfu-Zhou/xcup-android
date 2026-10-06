@@ -1,9 +1,9 @@
 package com.example.helloworld;
 
 /**
- * 交错 16-bit PCM → 单声道 float、16kHz，流式。离线模式 AudioDecoder 的"修复后"管线用它。
+ * 交错 16-bit PCM → 单声道 float、16kHz，流式。离线模式 AudioDecoder 用它把解码输出变成模型要的音频。
  *
- * <p>原来的 AudioDecoder 没看声道数，把交错立体声（L R L R …）当单声道，每 4 秒块只用前一半：
+ * <p>早先的 AudioDecoder（已删除）没看声道数，把交错立体声（L R L R …）当单声道，每 4 秒块只用前一半：
  * 双声道片源送进模型的是 0.5 倍速、低八度的音频（bench/tools/audio_rescore.py check 在 6 部片上
  * 证实了这一点，见 bench/README.md）。这里做正确的处理：</p>
  * <ol>
