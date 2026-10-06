@@ -543,8 +543,6 @@ RUN_COLS_NEEDED = ['pos_ms', 'wall_ms',
                    'loud_lv', 'loud_conf', 'loud_valid', 'loud_age',
                    'smoothed', 'gated', 'final_freq',
                    'ble_state', 'ble_level', 'sent', 'sent_action', 'sent_level',
-                   # 证据融合的影子列（mode=shadow/live 时有值），由 fusion_lab.py check --config 对拍
-                   'ev_action', 'ev_l', 'ev_llr_v', 'ev_llr_a',
                    # 音频窗口结尾的播放位置，给 audio_rescore.py 还原模型窗口用
                    'a_pos']
 
@@ -595,7 +593,9 @@ def _write_run_csv(path, rows):
                         r['smoothed'], r['gated'], r['ble_level'],
                         r['ble_state'], r['ble_level'],
                         1 if r['sent'] else 0, r['sent_action'], r['sent_level'],
-                        '', '', '', '', -1])
+                        -1])
+
+
 def selftest():
     """用真值合成一份"延迟固定 2000ms 的完美系统"的 run CSV，验证指标算得对。"""
     segs = [(0, 6900, 'exclude'), (6900, 214503, 'plot'), (214503, 318624, 'other_adult'),

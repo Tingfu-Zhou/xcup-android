@@ -59,8 +59,6 @@ dependencies {
     implementation("org.chromium.net:cronet-embedded:113.5672.61")
     // 单元测试 & Android 测试
     testImplementation(libs.junit)
-    // 单测要用真的 org.json：android.jar 里的是 stub，一调用就抛 "Stub!"（EvidenceFusionTest 要解析配置）
-    testImplementation("org.json:json:20240303")
     androidTestImplementation(libs.ext.junit)
     androidTestImplementation(libs.espresso.core)
 }

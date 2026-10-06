@@ -32,7 +32,7 @@ google-services.json
 .DS_Store
 
 # bench: 原始视频与中间缓存不入库
-# （bench/runs/ 里的 run CSV 要提交：融合配置是从它们拟合出来的，必须能从仓库复现）
+# （bench/runs/ 里的 run CSV 要提交：离线实验的结论必须能从仓库复现）
 bench/videos/
 bench/cache/
 __pycache__/

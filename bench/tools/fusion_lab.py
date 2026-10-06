@@ -12,27 +12,25 @@ run CSV 里已经存了两个模型每个 tick 的原始概率（v_p_* / a_p_*�
   eval    留一视频交叉验证：证据融合 vs 现有融合 vs 三条基线（一直转/只用视频/只用音频）。
           每部片的参数只用其余几部拟合，数字代表"没见过的片子"上的表现。
   oracle  假设某个模态完美（概率换成真值），端到端最多能到多少——决定先改哪个模型。
-  fit     用全部视频拟合证据融合，写出 app/src/main/assets/fusion_config.json。
-  golden  重新生成 Java 端 EvidenceFusionTest 的对拍数据（改了证据融合算法才需要）。
 
 用法:
   python3 bench/tools/fusion_lab.py check  bench/gt bench/runs
   python3 bench/tools/fusion_lab.py eval   bench/gt bench/runs
   python3 bench/tools/fusion_lab.py oracle bench/gt bench/runs
-  python3 bench/tools/fusion_lab.py fit    bench/gt bench/runs
   python3 bench/tools/fusion_lab.py --selftest
 
 真值与 run 的配对：bench/gt/v01.csv 配 bench/runs/ 下以 "v01" 开头的文件（如 v01_base.csv）；
 同一部片有多份时优先 <id>_base.csv。也可以用 --pair gt.csv=run.csv 显式指定（可重复）。
 
-证据融合（Java 端见 EvidenceFusion.java，两边逐 tick 对拍）:
+证据融合（只在这里离线实验、和现有融合对比。app 里的 EvidenceFusion.java 与 fusion_config.json
+已于 2026-10-06 删除，app 只用现有融合；要重新接入见 git 历史）:
   证据：每个模型每出一个新结果，取特征 s（视频 p_oral+p_sex，音频 p_sex+p_oral 或 p_sex），
         查表得 LLR = log P(s 落在该区间 | 动作) / P(s 落在该区间 | 剧情)。表从 bench 统计。
   累积：L = clamp(L + w_v*LLR_v + w_a*LLR_a, -clamp_lo, +clamp_hi)
   决策：不转 -> 转：L >= theta_on；转 -> 不转：L <= theta_off；之后照旧走蓝牙状态机。
   上下界分开：clamp_lo 管"剧情里信念压多深"（越小启动越快），clamp_hi 管"动作里攒多少余量"
   （越大越扛得住遮挡/镜头掉线，但动作结束后停得越慢）。
-  每个模态"说话算多少"由统计出来的 LLR 决定，不再手写"音频权重 1.2"。换了模型重新 fit 即可。
+  每个模态"说话算多少"由统计出来的 LLR 决定，不再手写"音频权重 1.2"。换了模型重新拟合即可。
 """
 import argparse
 import glob
@@ -58,8 +56,6 @@ VIDEO_WIN_MS = 3000        # 视频模型窗口：12 帧 x 250ms
 AUDIO_WIN_MS = 2000        # 音频模型窗口：32000 点 @16kHz
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
-DEFAULT_CONFIG_OUT = os.path.join(ROOT, 'app', 'src', 'main', 'assets', 'fusion_config.json')
-GOLDEN_DIR = os.path.join(ROOT, 'app', 'src', 'test', 'resources', 'fusion')
 
 _F32 = struct.Struct('<f')
 
@@ -86,7 +82,7 @@ class Tick(object):
 
 
 LOG_COLS = ('smoothed', 'gated', 'final_freq', 'ble_state', 'ble_level', 'sent',
-            'sent_action', 'sent_level', 'ev_action', 'ev_l', 'ev_llr_v', 'ev_llr_a')
+            'sent_action', 'sent_level')
 
 
 def _fnum(s):
@@ -125,7 +121,7 @@ def load_run(path):
         t.a = (d.get('a_action') or '').strip()
         t.ac = f32(_fnum(d.get('a_conf')) or 0.0)
         t.a_age = _inum(d.get('a_age'), -1)
-        # 与 app 送进证据融合的音频向量一致：只有 [sex, oral, noise]（rescore 写的 a_ys_* 列只做离线分析）
+        # 与 app 音频模型的输出一致：只有 [sex, oral, noise]（rescore 写的 a_ys_* 列只做离线分析）
         t.ap = _probs(d, ('a_p_sex', 'a_p_oral', 'a_p_noise'))
         t.loud_lv = _inum(d.get('loud_lv'), -1)
         t.loud_conf = f32(_fnum(d.get('loud_conf')) or 0.0)
@@ -139,7 +135,7 @@ class Video(object):
                  synthetic=False, policy='exclude', splice=None):
         self.vid = vid
         self.splice = splice            # None=真实片子；'stop'/'start'=拼接样本
-        self.fusion = ''                # run 参数行里的 FUSION=<mode>/<配置 id>（旧版 app 没有）
+        self.fusion = ''                # run 参数行里的 FUSION=<mode>/<配置 id>（只有 app 带证据融合那几版录的 run 有）
         self.audio_pipe = 'legacy'      # 这份 run 的音频是哪条管线出的（audio_pipe_of）
         self.rescored = False           # audio_rescore.py 离线重算出来的 run
         self.segs = segs
@@ -223,7 +219,7 @@ def load_videos(gt_dir, runs_dir, pairs=(), policy='exclude', quiet=False):
         if not runs:
             sys.exit('在 %s 下没找到 run CSV。\n'
                      '  · 把手机里导出的 run_*.csv 拷到 bench/runs/，文件名以真值 id 开头（如 v01_base.csv）\n'
-                     '  · bench/runs/ 已允许提交进 git：拟合出的融合配置要能从仓库里的数据复现'
+                     '  · bench/runs/ 已允许提交进 git：离线实验的结论要能从仓库里的数据复现'
                      % runs_dir)
         for g in gts:
             gmeta, _, _, _ = M.read_gt(g)
@@ -606,7 +602,7 @@ def _valid(probs, n):
 
 
 class EvidenceFusion(object):
-    """与 app/.../EvidenceFusion.java 逐行对应（double 运算，顺序一致，逐 tick 可对拍）。"""
+    """证据融合（double 运算）。app 里原有一份逐 tick 对拍的 Java 版，2026-10-06 随证据融合一起删除。"""
     NONE, NOISE, DO = 0, 1, 2
 
     def __init__(self, cfg):
@@ -966,7 +962,7 @@ QUICK_GRID = {
     'theta_on': [0.5, 1.5],
     'theta_off': [-1.0, 0.0],
 }
-# 视频"像剧情"那一半证据的软化系数，拟合时一起搜，结果直接乘进证据表（Java 端不用改）。
+# 视频"像剧情"那一半证据的软化系数，拟合时一起搜，结果直接乘进证据表。
 # 动机：遮挡/特写时视频模型在动作段里也判"剧情"，原样的负证据会把马达压停。
 NEG_SCALES = [1.0, 0.6, 0.35]
 
@@ -1342,20 +1338,18 @@ def cmd_check(args):
     if any(v.rescored for v in videos):
         print('⚠ 这里有 audio_rescore.py 离线重算的 run：它们的决策列还是原 run 的，check 对不上是正常的。\n')
     cfg = _load_cfg(args.config) if args.config else None
-    shipped = _load_cfg(DEFAULT_CONFIG_OUT) if os.path.exists(DEFAULT_CONFIG_OUT) else None
     cols = ('smoothed', 'gated', 'final_freq', 'ble_state', 'ble_level', 'sent')
     worst = 1.0
     for v in videos:
-        # live 模式的 run 是证据融合驱动的蓝牙，要用证据融合回放来对；配置 id 记在参数行里
+        # live 模式的 run（app 带证据融合那几版、由它驱动蓝牙时录的）要用证据融合回放来对；配置 id 记在参数行里
         if v.fusion.startswith('live'):
-            use = cfg
-            if use is None and shipped is not None and v.fusion == 'live/' + shipped.meta.get('id', ''):
-                use = shipped
-            if use is None:
-                print('══ %s：live 模式采集（%s），需要用 --config 给出当时的配置文件 ══\n' % (v.vid, v.fusion))
+            if cfg is None:
+                print('══ %s：live 模式采集（%s），需要用 --config 给出当时的配置文件（已从 app 删除，'
+                      '按配置 id 在 git log -p -- app/src/main/assets/fusion_config.json 里找）══\n'
+                      % (v.vid, v.fusion))
                 continue
-            steps = replay_evidence(v.ticks, use, v.params)
-            what = '证据融合（%s）' % use.meta.get('id', '?')
+            steps = replay_evidence(v.ticks, cfg, v.params)
+            what = '证据融合（%s）' % cfg.meta.get('id', '?')
         else:
             steps = replay_legacy(v.ticks, v.params)
             what = '现有融合'
@@ -1394,17 +1388,6 @@ def cmd_check(args):
     ok = worst >= 0.99
     print('结论: %s（最差一致率 %.2f%%，阈值 99%%）' % ('回放器可信' if ok else '回放与实测不一致，先查清再比较',
                                                   100.0 * worst))
-    if cfg is not None:
-        print('\n══ 证据融合影子列对拍（%s）══' % args.config)
-        for v in videos:
-            if v.fusion.startswith('live'):
-                continue
-            if not any(t.log.get('ev_action') for t in v.ticks):
-                print('  %s: run CSV 里没有 ev_* 列（旧版 app 采集），跳过' % v.vid)
-                continue
-            steps = replay_evidence(v.ticks, cfg, v.params)
-            bad = sum(1 for t, s in zip(v.ticks, steps) if t.log.get('ev_action') != s.gated)
-            print('  %s: ev_action 不一致 %d / %d tick' % (v.vid, bad, len(v.ticks)))
     return 0 if ok else 1
 
 
@@ -1465,167 +1448,6 @@ def cmd_oracle(args):
                                      exhaustive=args.exhaustive, jobs=args.jobs)
         print_table(name, vs, per, sp, pols, show_videos=False)
     print('  · 如果"视频完美"在现有融合下几乎不涨、在证据融合下大涨，说明现有融合挡住了视频侧的改进。')
-    return 0
-
-
-def cmd_fit(args):
-    cost = Cost.parse(args.cost)
-    grid = QUICK_GRID if args.quick else GRID
-    videos = load_videos(args.gt_dir, args.runs_dir, args.pair, args.policy)
-    # 证据表只对拟合时那种音频有效。app 离线模式只有修复后的音频（PcmResampler），所以只能在 fixed 上拟合；
-    # app 也会拒绝 audio_pipeline 不是 fixed 的配置（回退到原融合）
-    pipes = sorted(set(v.audio_pipe for v in videos))
-    if len(pipes) > 1:
-        sys.exit('这些 run 的音频管线不一致 %s：证据表只能在同一种音频上拟合'
-                 % ['%s=%s' % (v.vid, v.audio_pipe) for v in videos])
-    if pipes[0] != 'fixed':
-        sys.exit('音频管线 %s 不是 app 现在喂给模型的音频（离线模式只有 fixed），拟合出的配置装上去对不上。'
-                 '请用 audio_rescore.py rescore --pipeline fixed 的结果拟合' % pipes[0])
-    train = list(videos)
-    for v in videos:
-        train += make_splices(v)
-    print('\n用全部 %d 部片（+%d 个拼接样本）拟合…' % (len(videos), len(train) - len(videos)))
-    total, cfg, info = fit(train, cost, 'evidence', grid, args.exhaustive)
-    cfg.mode = args.mode
-    stamp = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
-    cfg.meta = {
-        'id': 'fit-' + time.strftime('%Y%m%d-%H%M%S', time.gmtime()),
-        'fitted_at': stamp,
-        'provisional': False,
-        'note': '由 bench/tools/fusion_lab.py fit 生成。mode: legacy=不运行 / shadow=只记日志 / live=驱动蓝牙；'
-                'audio_pipeline: 证据表是在哪种音频上拟合的，app 只接受 fixed（修复后的音频），否则回退到原融合',
-        'audio_pipeline': pipes[0],
-        'fit': {
-            'videos': ['%s=%s' % (v.vid, os.path.basename(v.run_path)) for v in videos],
-            'policy': args.policy, 'cost': str(cost), 'train_cost': round(total, 1),
-            'audio_feature': info['audio_feature'],
-            'video_neg_scale': info['neg_scale'],
-            'samples': {'video_do_by_bin': info['video_counts'][0],
-                        'video_plot_by_bin': info['video_counts'][1],
-                        'audio_do_by_bin': info['audio_counts'][0],
-                        'audio_plot_by_bin': info['audio_counts'][1]},
-        },
-    }
-    with io.open(args.out, 'w', encoding='utf-8', newline='\n') as fh:
-        fh.write(cfg.to_json())
-    print('  %s' % fmt_params(cfg, info))
-    print('  视频证据表 %s' % cfg.video.llr)
-    print('  音频证据表 %s（%s）' % (cfg.audio.llr, info['audio_feature']))
-    per = dict((p, {}) for p, _ in POLICIES)
-    sp = dict((p, []) for p, _ in POLICIES)
-    for v in train:
-        for p in ('legacy', 'evidence'):
-            tr = run_policy(v, p, cfg)[0]
-            if v.synthetic:
-                sp[p].append((v.splice, Score.of(v, tr, cost), splice_seconds(v, tr)))
-            else:
-                per[p][v.vid] = Score.of(v, tr, cost)
-    print()
-    print_table('训练集内表现（偏乐观；要看泛化请跑 eval）', videos, per, sp,
-                [('legacy', '现有融合'), ('evidence', '证据融合')])
-    print('已写出 %s（mode=%s，audio_pipeline=%s）' % (args.out, cfg.mode, pipes[0]))
-    if cfg.mode != 'live':
-        print('确认 eval 的留一结果后，用 --mode live 重新生成，证据融合才会驱动蓝牙。')
-    return 0
-
-
-# ======================================================================== Java 对拍数据
-# 证据和阈值都取二进制精确的值，L 会经常恰好落在 theta_on/theta_off 上，边界比较（>= vs >）写错能被抓到
-GOLDEN_CFG = EvidenceConfig(
-    Modality([0.0, 1.0, 1.0], [0.0, 0.1, 0.5, 0.9, 1.0], [-1.5, -0.25, 0.75, 2.5], 'p_oral+p_sex'),
-    Modality([1.0, 1.0, 0.0], [0.0, 0.3, 0.6, 1.0], [-0.75, 0.125, 0.5], 'p_sex+p_oral'),
-    w_v=1.0, w_a=0.5, clamp_lo=2.0, clamp_hi=3.0, theta_on=1.25, theta_off=-0.75, max_age_ms=2000,
-    mode='shadow', meta={'id': 'golden'})
-# probs 列：空 = null（推理失败时 Java 端快照里的 probs）；'-' = 空数组；否则 '|' 分隔的 %.4f。
-# ts 列为空 = 还没有任何结果（快照本身为 null），此时 probs 列无意义。
-GOLDEN_COLS = ['reset', 'now', 'v_ts', 'v_probs', 'a_ts', 'a_probs',
-               'exp_action', 'exp_l', 'exp_llr_v', 'exp_llr_a']
-
-
-def _rand_probs(rnd, do_bias):
-    if do_bias:
-        p = [rnd.random() * 0.4, rnd.random(), rnd.random() * 2]
-    else:
-        p = [rnd.random() * 2 + 0.5, rnd.random() * 0.3, rnd.random() * 0.3]
-    s = sum(p)
-    return '|'.join('%.4f' % (x / s) for x in p)
-
-
-def parse_golden_probs(s):
-    if s == '':
-        return None
-    if s == '-':
-        return ()
-    return tuple(f32(float(x)) for x in s.split('|'))
-
-
-def golden_rows():
-    """覆盖：去重、过期、无效概率、缺失、恰好落在分箱边界、reset、双向越过阈值。"""
-    rnd = random.Random(20261004)
-    now = 1760000000000
-    v_ts = a_ts = None
-    vp = ap = ''
-    rows = []
-    phase_do = False
-    for i in range(480):
-        now += 500 + rnd.randint(-25, 25)
-        if i % 40 == 0:
-            phase_do = not phase_do
-        r = rnd.random()
-        if r < 0.70:
-            v_ts, vp = now - rnd.randint(0, 150), _rand_probs(rnd, phase_do and rnd.random() < 0.7)
-        elif r < 0.73:
-            v_ts, vp = now - rnd.randint(0, 150), '0.0000|0.0000|0.0000'   # 推理失败（全 0）
-        elif r < 0.75:
-            v_ts, vp = now - rnd.randint(0, 150), ''                        # 推理失败（null）
-        elif r < 0.78:
-            v_ts, vp = now - 2600, _rand_probs(rnd, True)                   # 过期
-        elif r < 0.81:
-            v_ts, vp = now - 40, '0.5000|0.2500|0.2500'                     # 特征恰为 0.5 边界
-        elif r < 0.83:
-            v_ts, vp = None, ''                                             # 快照为 null
-        # 其余：沿用上一个结果（去重）
-        if i % 2 == 0 or rnd.random() < 0.1:
-            r2 = rnd.random()
-            if r2 < 0.85:
-                a_ts, ap = now - rnd.randint(0, 300), _rand_probs(rnd, rnd.random() < 0.8)
-            elif r2 < 0.9:
-                a_ts, ap = now - 30, '0.3000|0.0000|0.7000'                 # 特征恰为 0.3 边界
-            elif r2 < 0.95:
-                a_ts, ap = now - 10, '-'                                    # 空数组 = 无效
-        reset = 1 if i in (200, 201, 333) else 0
-        if i in (333, 334):                     # seek 后快照已清空：reset 后应输出 ""（无判定）
-            v_ts = a_ts = None
-            vp = ap = ''
-        rows.append((reset, now, v_ts, vp, a_ts, ap))
-    return rows
-
-
-def golden(out_dir=GOLDEN_DIR, write=True):
-    ef = EvidenceFusion(GOLDEN_CFG)
-    lines = [','.join(GOLDEN_COLS)]
-    for reset, now, v_ts, vp, a_ts, ap in golden_rows():
-        if reset:
-            ef.reset()
-        act, lv, la = ef.update(parse_golden_probs(vp), v_ts, parse_golden_probs(ap), a_ts, now)
-        lines.append(','.join([
-            str(reset), str(now), '' if v_ts is None else str(v_ts), vp,
-            '' if a_ts is None else str(a_ts), ap,
-            act, repr(ef.L), '' if lv is None else repr(lv), '' if la is None else repr(la)]))
-    csv_text = '\n'.join(lines) + '\n'
-    cfg_text = GOLDEN_CFG.to_json()
-    if write:
-        if not os.path.isdir(out_dir):
-            os.makedirs(out_dir)
-        for name, text in (('golden.csv', csv_text), ('golden_config.json', cfg_text)):
-            with io.open(os.path.join(out_dir, name), 'w', encoding='utf-8', newline='\n') as fh:
-                fh.write(text)
-    return csv_text, cfg_text
-
-
-def cmd_golden(args):
-    golden(args.out_dir)
-    print('已写出 %s/golden.csv 与 golden_config.json' % args.out_dir)
     return 0
 
 
@@ -1723,7 +1545,7 @@ def _write_synth(video, gt_path, run_path, fusion=''):
                    t.a, '%.4f' % t.ac, t.a_age, pr(t.ap, 0), pr(t.ap, 1), pr(t.ap, 2),
                    t.loud_lv, '%.4f' % t.loud_conf, 1, 100,
                    lg['smoothed'], lg['gated'], lg['final_freq'], lg['ble_state'], lg['ble_level'],
-                   lg['sent'], lg['sent_action'], lg['sent_level'], '', '', '', '']
+                   lg['sent'], lg['sent_action'], lg['sent_level']]
             row += [''] * (len(M.RUN_COLS_NEEDED) - len(row))      # 后加的列（a_pos）留空
             fh.write(','.join(str(x) for x in row) + '\n')
 
@@ -1875,16 +1697,7 @@ def selftest():
     check(ce.cost < cl.cost, '合成数据上证据融合应优于现有融合（%.0f vs %.0f）' % (ce.cost, cl.cost))
     check(ce.fp() < cl.fp(), '合成数据上证据融合的误转应更少')
 
-    # 8. Java 对拍数据与当前算法一致
-    gcsv = os.path.join(GOLDEN_DIR, 'golden.csv')
-    if os.path.exists(gcsv):
-        csv_text, cfg_text = golden(write=False)
-        check(io.open(gcsv, encoding='utf-8').read() == csv_text,
-              'golden.csv 与当前算法不一致：改了证据融合就要 fusion_lab.py golden 重新生成，并同步改 Java')
-        check(io.open(os.path.join(GOLDEN_DIR, 'golden_config.json'), encoding='utf-8').read()
-              == cfg_text, 'golden_config.json 过期')
-
-    # 8b. live 模式采集的 run：check 要改用证据融合回放
+    # 8. live 模式采集的 run（app 带证据融合那几版录的）：check 要用 --config 改用证据融合回放
     live_cfg = EvidenceConfig(Modality(VIDEO_FEATURE[1], EDGES, [x * 0.4 - 2 for x in range(12)]),
                               Modality(AUDIO_FEATURES[1][1], EDGES, [x * 0.1 - 0.5 for x in range(12)]),
                               1.0, 1.0, 2.0, 8.0, 1.0, -1.5, meta={'id': 'selftest-live'})
@@ -1910,9 +1723,13 @@ def selftest():
         rc = cmd_check(ns)
     check(rc == 0 and '证据融合（selftest-live）' in out.getvalue(),
           'live 模式的 run 应该用证据融合回放并完全一致:\n' + out.getvalue()[-400:])
+    ns.config = None
+    with contextlib.redirect_stdout(io.StringIO()) as out:
+        cmd_check(ns)
+    check('需要用 --config' in out.getvalue() and '回放：' not in out.getvalue(),
+          'live 模式的 run 没给 --config 时应跳过并提示:\n' + out.getvalue()[-400:])
 
-    # 10. 音频管线标记；rescore 写的 run 带 a_ys_* 列，读出来的音频向量仍是 [sex, oral, noise]（与 app 一致）；
-    #     fit 只接受 fixed 音频（8b 的合成 run 没有 AUDIO_PIPE，算旧版 app 的 legacy）
+    # 9. 音频管线标记；rescore 写的 run 带 a_ys_* 列，读出来的音频向量仍是 [sex, oral, noise]（与 app 一致）
     check(audio_pipe_of({'params': 'FUSION=live/x AUDIO_PIPE=fixed'}) == 'fixed'
           and audio_pipe_of({'pipeline': 'phone'}) == 'legacy' and audio_pipe_of({}) == 'legacy'
           and audio_pipe_of({'pipeline': 'clean'}) == 'clean', 'audio_pipe_of 映射不对')
@@ -1928,30 +1745,6 @@ def selftest():
     _, yt = load_run(ypath)
     check(yt[0].ap == (f32(0.6), f32(0.1), f32(0.3)),
           '带 a_ys_* 的 run 应读成 3 维音频向量 [sex, oral, noise]，实际 %r' % (yt[0].ap,))
-    fns = argparse.Namespace(gt_dir=os.path.join(ldir, 'gt'), runs_dir=os.path.join(ldir, 'runs'), pair=[],
-                             policy='exclude', cost='fp=1,fn=1,stop=3', quick=True, exhaustive=False,
-                             out=os.path.join(tmp, 'fit_legacy.json'), mode='shadow')
-    try:
-        with contextlib.redirect_stdout(io.StringIO()):
-            cmd_fit(fns)
-        check(False, 'fit 应该拒绝 legacy 音频的 run')
-    except SystemExit as e:
-        check('不是 app 现在喂给模型的音频' in str(e.code), 'fit 拒绝 legacy 的原因不对: %r' % (e.code,))
-    check(not os.path.exists(fns.out), 'fit 拒绝时不应写出配置')
-
-    # 9. 线上配置能被解析，并且与 app 对得上（同 VideoProcessActivity.initEvidenceFusion 的检查）
-    if os.path.exists(DEFAULT_CONFIG_OUT):
-        try:
-            c = EvidenceConfig.from_json(io.open(DEFAULT_CONFIG_OUT, encoding='utf-8').read())
-            check(c.mode in ('legacy', 'shadow', 'live'), 'fusion_config.json 的 mode 非法: %r' % c.mode)
-            if c.mode != 'legacy':
-                check(c.meta.get('audio_pipeline') == 'fixed',
-                      'fusion_config.json 的 audio_pipeline 不是 fixed（app 会回退到原融合）: %r'
-                      % c.meta.get('audio_pipeline'))
-                check(len(c.video.weights) <= 3 and len(c.audio.weights) <= 3,
-                      'fusion_config.json 的特征权重超过 3 项（app 只有模型的 3 个概率）')
-        except (ValueError, KeyError) as e:
-            fails.append('fusion_config.json 解析失败: %s' % e)
 
     for f in fails:
         print('  FAIL ' + f)
@@ -1976,11 +1769,10 @@ def main():
     p = sub.add_parser('check', help='回放现有融合，与 run CSV 逐 tick 比对')
     common(p)
     p.add_argument('--show', type=int, default=8, help='每部片列出前几处不一致')
-    p.add_argument('--config', help='采集时 app 用的配置：live 模式的 run 用它回放；shadow 模式的 run 用它对拍 ev_* 影子列'
-                                    '（不给时，live 的 run 若与仓库里的配置 id 相同会自动使用）')
+    p.add_argument('--config', help='live 模式的 run（app 带证据融合那几版录的）采集时用的配置，用它回放'
+                                    '（配置已从 app 删除，到 git 历史里按参数行的配置 id 找）')
     for name, hlp in (('eval', '留一视频交叉验证：各融合策略对比'),
-                      ('oracle', '模态上限：假设某个模型完美'),
-                      ('fit', '拟合证据融合并写出配置')):
+                      ('oracle', '模态上限：假设某个模型完美')):
         p = sub.add_parser(name, help=hlp)
         common(p)
         p.add_argument('--cost', default='fp=1,fn=1,stop=3',
@@ -1989,19 +1781,12 @@ def main():
         p.add_argument('--exhaustive', action='store_true',
                        help='扫全网格（默认先粗后细，快约 10 倍，结果基本一致）')
         p.add_argument('--jobs', type=int, default=0,
-                       help='eval/oracle 的留一拟合用几个进程并行（默认 0 = CPU 核数；1 = 串行）')
-        if name == 'fit':
-            p.add_argument('--out', default=DEFAULT_CONFIG_OUT)
-            p.add_argument('--mode', default='shadow', choices=('legacy', 'shadow', 'live'),
-                           help='写进配置的模式（默认 shadow：只记日志，不驱动蓝牙）')
-    p = sub.add_parser('golden', help='重新生成 Java 对拍数据')
-    p.add_argument('--out-dir', default=GOLDEN_DIR)
+                       help='留一拟合用几个进程并行（默认 0 = CPU 核数；1 = 串行）')
 
     a = ap.parse_args()
     if a.selftest:
         sys.exit(selftest())
-    fn = {'check': cmd_check, 'eval': cmd_eval, 'oracle': cmd_oracle, 'fit': cmd_fit,
-          'golden': cmd_golden}.get(a.cmd)
+    fn = {'check': cmd_check, 'eval': cmd_eval, 'oracle': cmd_oracle}.get(a.cmd)
     if fn is None:
         ap.print_help()
         sys.exit(2)

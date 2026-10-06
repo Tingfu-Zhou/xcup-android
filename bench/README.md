@@ -8,14 +8,14 @@
 bench/
   ANNOTATION_SPEC.md      人工真值标注规范（改动需递增 spec_version）
   gt/<video_id>.csv       人工真值（提交进 git）
-  runs/<video_id>_*.csv   真机 dump（提交进 git：融合配置是从它们拟合出来的，要能复现）
+  runs/<video_id>_*.csv   真机 dump（提交进 git：离线实验的结论要能从仓库复现）
   rescored/               audio_rescore.py 的输出：对齐结果 alignment.json + 离线重算的 run CSV
   videos/                 原始视频（不进 git，放这里命令最短；也可以放别处用 --videos 指定）
   tools/
     labeler.html          真值标注器，双击即用，纯本地无上传
     test_labeler.js       标注器核心逻辑测试：node bench/tools/test_labeler.js
     metrics.py            单部片的指标 / 误判定位 / 模态诊断
-    fusion_lab.py         融合层离线实验台：回放、交叉验证、模态上限、拟合配置
+    fusion_lab.py         融合层离线实验台：回放、交叉验证、模态上限
     audio_rescore.py      音频离线重打分：从原视频还原真机送进模型的 2 秒音频，换模型/换解码方式重算
     yamnet_class_map.csv  YAMNet 的 AudioSet 521 类名（来自 tensorflow/models，Apache-2.0）
 ```
@@ -119,10 +119,6 @@ python3 bench/tools/fusion_lab.py eval
 
 # 3. 模态上限：假设视频（或音频）完美，端到端最多能到多少 —— 决定先改哪个模型
 python3 bench/tools/fusion_lab.py oracle
-
-# 4. 用全部片子拟合，写出 app/src/main/assets/fusion_config.json（默认 mode=shadow）
-python3 bench/tools/fusion_lab.py fit
-python3 bench/tools/fusion_lab.py fit --mode live      # 确认 eval 结果后，让证据融合驱动蓝牙
 ```
 
 Windows 下把 `python3` 换成 `python`（或 `py`）、路径用 `\` 也可以。`eval` / `oracle` 的留一拟合默认按 CPU 核数
@@ -134,12 +130,14 @@ Windows 下把 `python3` 换成 `python`（或 `py`）、路径用 `\` 也可以
 
 `check` 一致率要 ≥99% 才说明回放器可信，后面的对比才有意义。少量不一致来自 CSV 把置信度
 存成 4 位小数、以及蓝牙状态机内部取时间比 `wall_ms` 晚几毫秒，正好卡在阈值边界上时会翻转。
-live 模式采集的 run（参数行里 `FUSION=live/<配置 id>`）会自动改用证据融合回放来比对。
+app 带证据融合那几版在 live 模式下录的 run（参数行里 `FUSION=live/<配置 id>`）是证据融合驱动的蓝牙，要加
+`--config <当时的配置>` 才能比对；配置已从 app 删除，按配置 id 在 `git log -p -- app/src/main/assets/fusion_config.json`
+里找。
 
 ### 证据融合是什么
 
 原融合把"音频更准、音频权重 1.2、音频可直通启动"写死在代码里；bench 显示这个前提不成立。
-证据融合（`EvidenceFusion.java`，Python 端同名类逐 tick 对拍）不写死谁更可信：
+证据融合（现在只在 `fusion_lab.py` 里离线实验，app 里的实现已删除，见下文）不写死谁更可信：
 
 ```
 证据：模型每出一个新结果，取特征 s（视频 p_oral+p_sex；音频 p_sex+p_oral 或 p_sex），
@@ -155,7 +153,7 @@ live 模式采集的 run（参数行里 `FUSION=live/<配置 id>`）会自动改
   攒多少余量（越大越扛得住遮挡/镜头掉线，但动作结束后停得越慢）。
 - `w_a`、`clamp_lo/hi`、`theta_on/off`、音频特征、视频负证据折扣按代价一起搜：
   `代价 = 误转秒数×fp + 漏转秒数×fn + 动作中误停次数×stop`，默认 `--cost fp=1,fn=1,stop=3`。
-  这是产品取舍，不随模型变；换了模型只需重新 `fit`。
+  这是产品取舍，不随模型变；换了模型只需重新拟合。
 - **拼接样本**：现有片子全是"剧情→动作"，而且动作前几乎都隔着一段 other_adult（不计分）：
   停转切换点一个都没有，干净的启动切换点也只有一两个，不补的话扫参会挑出"永远不停"或
   "启动很慢"的参数。所以用同一部片的动作段和剧情段首尾拼接，造"停转样本"（动作 60s +
@@ -163,22 +161,16 @@ live 模式采集的 run（参数行里 `FUSION=live/<配置 id>`）会自动改
   "启动后没转 / 停止后还转"就是拼接点之后马达该转没转 / 该停还转的秒数（中位数）。
   拼接处感知是瞬间切换的，比真实片子乐观约 1~2 秒。
 
-### 配置的三种模式（`fusion_config.json` 的 `mode`）
+### app 里的证据融合已删除（2026-10-06）
 
-| mode | 行为 |
-|---|---|
-| `legacy` | 不运行证据融合 |
-| `shadow` | 每 tick 计算并写进 run CSV 的 `ev_*` 列，**蓝牙仍由原融合驱动**（默认） |
-| `live` | 证据融合驱动蓝牙，原投票窗与启动仲裁不再参与；蓝牙状态机照旧 |
+app 只保留原融合：离线模式、网页视频模式、在线模式（抓屏）都是投票窗（`smoothedFusion`）+ 快通道 +
+启动仲裁（`applyDoStartGate`）+ `selectBestAction`，之后照旧走蓝牙状态机。一起删掉的有：`EvidenceFusion.java`、
+`assets/fusion_config.json`（`mode` / `audio_pipeline` 开关随之没了）、`EvidenceFusionTest` 与
+`app/src/test/resources/fusion/` 下的对拍数据，以及 `fusion_lab.py` 的 `fit`（写 app 的配置）和 `golden`
+（生成 Java 对拍数据）。run CSV 不再有 `ev_*` 列，参数行不再有 `FUSION=`。
 
-配置缺失或解析失败时 app 自动回退到原融合。想退回原融合，把 `fusion_config.json` 的
-`"mode"` 改成 `"shadow"`（照样记证据融合的影子列）或 `"legacy"`，重新编译即可。
-
-配置里的 `"audio_pipeline"` 记录证据表是在哪种音频上拟合的，由 `fit` 按训练数据自动写入，不要手改。
-离线模式现在只有修复后的音频（`PcmResampler`，见下文"音频解码修复"），旧的半速处理已删除，所以 app 只接受
-`"fixed"` 的配置。没有这一项（在半速音频上拟合的旧配置），或者特征权重超过 3 项（例如以前用 `--speech`
-拟合、带 YAMNet Speech 的配置），app 都会拒绝并回退到原融合（logcat 里有 `[证据融合]` 的报错）。
-`EvidenceFusionTest` 和 `fusion_lab.py --selftest` 也会检查打包的配置。
+`fusion_lab.py` 里的证据融合留作离线实验，`eval` / `oracle` 照样拿它和现有融合、几条基线对比。以后要重新接入 app，
+用 `git log -- app/src/main/java/com/example/helloworld/EvidenceFusion.java` 找到删除它的提交，从上一个版本取回。
 
 ### 当前结果（2026-10-06，修复后的音频，6 部片，留一视频交叉验证）
 
@@ -193,14 +185,14 @@ live 模式采集的 run（参数行里 `FUSION=live/<配置 id>`）会自动改
 | 证据融合 | 92.5% | 17.4% | 4.0% | 0.10 | 2.6s | 4.6s（2 个基本不停） |
 
 音频修好后，拟合几乎总是选 `w_v=0`（只用音频）：6 折里 5 折如此，只有留出 v07 那一折选了 `w_v=0.25`，
-v07 从 89.7% 掉到 80.8%，所以"证据融合"一行比"只用音频"差。仓库里的配置 `fit-20261006-074840` 是用全部
-6 部片拟合的，同样是 `w_v=0`、音频特征 `p_sex+p_oral`，泛化表现看"只用音频"一行。
+v07 从 89.7% 掉到 80.8%，所以"证据融合"一行比"只用音频"差。当时打包进 app 的配置 `fit-20261006-074840`
+（已随证据融合删除）是用全部 6 部片拟合的，同样是 `w_v=0`、音频特征 `p_sex+p_oral`，泛化表现看"只用音频"一行。
 剩下的误转主要在 v04（24%）、v07（19%），漏转主要在 v05（15%）。视频模型改进之后重新拟合，视频才会重新参与。
 
-**2026-10-06 起 `mode` 改为 `legacy`**：证据融合先停用，离线模式和网页视频模式改回原融合（投票窗 + 启动仲裁），
-证据表和参数仍留在配置里，把 `mode` 改回 `live` 重新编译即可启用。注意原融合现在拿到的是修复后的音频，
-它的阈值是在半速音频时代手调的；上表"现有融合"一行（89.8% / 误转 37.3% / 漏转 0.8% / 停止后还转 18.5s）
-就是它在修复后音频上的回放结果（原融合没有拟合参数，不受留一影响）。
+**2026-10-06 起 app 只用原融合**（先把 `mode` 改成 `legacy` 停用了证据融合，随后整个删除，见上）。
+注意原融合现在拿到的是修复后的音频，它的阈值是在半速音频时代手调的；
+上表"现有融合"一行（89.8% / 误转 37.3% / 漏转 0.8% / 停止后还转 18.5s）就是它在修复后音频上的回放结果
+（原融合没有拟合参数，不受留一影响）。
 
 ### 旧结果（2026-10-05，旧的半速音频，留一视频交叉验证）
 
@@ -213,12 +205,6 @@ v07 从 89.7% 掉到 80.8%，所以"证据融合"一行比"只用音频"差。�
 
 当时 6 部片逐片都比现有融合好（v01 73.8→75.1，v02 96.8→100，v04 77.8→80.5，v05 85.5→93.4，
 v06 85.2→100，v07 62.6→69.1），用的配置是 `fit-20261005-060733`（音频特征 `p_sex`，`w_v=1`）。
-
-改了证据融合算法时：Python 和 Java 两边一起改，然后 `fusion_lab.py golden` 重新生成
-`app/src/test/resources/fusion/` 下的对拍数据，`EvidenceFusionTest` 会逐 tick 校验两边一致。
-
-在线模式（`OnlineAnalysisActivity`，抓屏）仍是原融合：抓屏画面和离线解码的输入分布不同，
-等有了在线模式的 bench 数据再接。
 
 ### 自检
 
@@ -308,18 +294,15 @@ python bench/tools/audio_rescore.py check --videos D:/xcup/videos
 对拍数据校验），所以离线重算出的就是手机会喂给模型的音频。
 
 修复最初由 `fusion_config.json` 的 `audio_pipeline` 开关打开（2026-10-05）；2026-10-06 起旧的半速处理已从
-`AudioDecoder` 删除，离线模式只有修复后的音频。证据表要在 `fixed` 音频上拟合：
+`AudioDecoder` 删除，离线模式只有修复后的音频（这个配置文件后来也随证据融合删了）。离线评估用 `fixed` 重算的结果：
 
 ```bash
 python bench/tools/audio_rescore.py rescore --videos D:/xcup/videos            # 默认 --pipeline fixed
 python bench/tools/fusion_lab.py eval bench/gt bench/rescored/fixed             # 与 bench/runs 的 eval 对比
-python bench/tools/fusion_lab.py fit  bench/gt bench/rescored/fixed --mode live
 ```
 
-`fit` 会检查所有 run 是同一种音频（重算头部的 `pipeline=` / app 参数行的 `AUDIO_PIPE=`），写进配置的
-`audio_pipeline`，并且只接受 `fixed`：`clean` 是 app 产生不了的音频，`legacy`（旧版 app 录的、或 `phone`
-重算的）是 app 已经删掉的音频，都拒绝拟合。app 采集的 run 参数行记 `AUDIO_PIPE=fixed`（网页视频模式记
-`web`）；用新包重录 bench 后，`check` 就是 `fixed` 对 `phone`，并且有 `a_pos`，能逐个精确对上。
+app 采集的 run 参数行记 `AUDIO_PIPE=fixed`（网页视频模式记 `web`）；用新包重录 bench 后，`check` 就是
+`fixed` 对 `phone`，并且有 `a_pos`，能逐个精确对上。
 
 ### 2. 重算：rescore
 
@@ -357,10 +340,9 @@ python bench/tools/metrics.py bench/gt/v01.csv bench/rescored/fixed/v01_base.csv
    压剧情误转"真正需要的。`--scan speech,music` 打印阈值扫描（剧情里命中多少、动作里误伤多少）。
 
 AUC 好看不等于端到端有用。2026-10-06 起 app 不再算 AudioSet 分数（`AudioInferenceHelper` 只取 YAMNet 的
-embedding，与 main 分支一致），证据融合的音频向量只有 `[sex, oral, noise]`，`fusion_lab.py` 的 `--speech`
+embedding，与 main 分支一致），`fusion_lab.py` 里证据融合的音频向量只有 `[sex, oral, noise]`，`--speech`
 也一起撤掉了；`a_ys_*` 现在只用于离线分析。以后要把 AudioSet 类别用进融合，app（`AudioInferenceHelper`
-取 output 0、送进证据融合的向量、`BenchLogger` 的列）和 `fusion_lab.py` 要一起加回来，可参考提交
-`a3efcf5`、`20f08f9`。
+取 output 0、融合层、`BenchLogger` 的列）和 `fusion_lab.py` 要一起改，可参考提交 `a3efcf5`、`20f08f9`。
 
 ### run CSV 新增的列
 

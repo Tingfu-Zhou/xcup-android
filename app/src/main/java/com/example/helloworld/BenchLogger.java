@@ -112,7 +112,6 @@ public final class BenchLogger {
      *
      * @param aPosMs     该音频结果读 PCM 时的播放位置（模型窗口 = [aPosMs-2s, aPosMs]），没有结果时 -1。
      *                   bench/tools/audio_rescore.py 靠它离线还原模型输入，不用再从出结果时刻反推
-     * @param ev 证据融合本 tick 的输出；未启用时传 null（ev_* 列留空）
      */
     public void tick(long posMs, long wallMs,
                      String vAction, float vConf, long vAgeMs, float[] vProbs,
@@ -120,8 +119,7 @@ public final class BenchLogger {
                      long aPosMs,
                      int loudLevel, float loudConf, boolean loudValid, long loudAgeMs,
                      String smoothed, String gated, int finalFreq,
-                     String bleState, int bleLevel,
-                     EvidenceFusion.Output ev) {
+                     String bleState, int bleLevel) {
         if (!enabled || failed) return;
         if (out == null && !open()) return;
 
@@ -137,12 +135,6 @@ public final class BenchLogger {
         sb.append(csv(smoothed)).append(',').append(csv(gated)).append(',').append(finalFreq).append(',');
         sb.append(csv(bleState)).append(',').append(bleLevel).append(',')
           .append(sent ? 1 : 0).append(',').append(csv(sentAction)).append(',').append(sentLevel);
-        if (ev != null) {
-            sb.append(',').append(csv(ev.action)).append(',').append(d(ev.l)).append(',')
-              .append(d(ev.llrV)).append(',').append(d(ev.llrA));
-        } else {
-            sb.append(",,,,");
-        }
         sb.append(',').append(aPosMs < 0 ? -1 : aPosMs);
 
         if (queue.offer(sb.toString())) {
@@ -228,7 +220,6 @@ public final class BenchLogger {
                     + "loud_lv,loud_conf,loud_valid,loud_age,"
                     + "smoothed,gated,final_freq,"
                     + "ble_state,ble_level,sent,sent_action,sent_level,"
-                    + "ev_action,ev_l,ev_llr_v,ev_llr_a,"
                     // a_pos：音频窗口结尾的播放位置
                     + "a_pos\n");
             out.flush();
@@ -310,10 +301,6 @@ public final class BenchLogger {
 
     private static String f(float v) {
         return Float.isNaN(v) ? "" : String.format(Locale.US, "%.4f", v);
-    }
-
-    private static String d(double v) {
-        return Double.isNaN(v) ? "" : String.format(Locale.US, "%.4f", v);
     }
 
     /** 过期时长可能是 Long.MAX_VALUE（从未出结果），统一写 -1。 */

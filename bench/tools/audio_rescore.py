@@ -1164,8 +1164,9 @@ def result_rows(run_path, segs, policy):
 
 MIN_N = 5          # 每部片每类至少这么多个结果才算 AUC
 
-BASE_FEATS = [('p_sex', '分类器 p_sex [证据融合现用]', lambda r: r['ap'][0]),
-              ('p_sex+p_oral', '分类器 p_sex+p_oral', lambda r: r['ap'][0] + r['ap'][1]),
+# app 现用：音频线程按 P(do) = p_sex + p_oral ≥ AUDIO_DO 判"转"，结果交给原融合
+BASE_FEATS = [('p_sex', '分类器 p_sex', lambda r: r['ap'][0]),
+              ('p_sex+p_oral', '分类器 p_sex+p_oral [app 现用]', lambda r: r['ap'][0] + r['ap'][1]),
               ('p_oral', '分类器 p_oral', lambda r: r['ap'][1])]
 
 
