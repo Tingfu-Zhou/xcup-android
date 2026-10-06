@@ -38,7 +38,16 @@ public class AudioDecoder {
     private Uri videoUri;
     private Map<String, String> httpHeaders;   // 网页视频模式下使用的 HTTP headers
     private AudioInferenceHelper audioHelper;
-    private volatile boolean isDecoding = false;
+
+    /**
+     * 解码"轮次"：每次 startDecoding / stop 加一（只在 writeLock 里改）。解码线程只在自己那一轮还是当前轮时工作，
+     * 被作废后在下一次检查时退出。原来所有线程共用一个 isDecoding 标志：seekTo 里先 stop() 置 false、紧接着
+     * 新线程又置回 true，旧线程（多半停在限速等待里，那里不检查标志）就会接着解码，和新线程一起写缓冲区；
+     * 退出页面时 VideoView 已释放、播放位置变成 0，停在限速等待里的线程也永远出不来。
+     */
+    private volatile int generation = 0;
+    /** 写 PCM 与作废旧一轮互斥：stop() 返回之后，旧一轮一个样本也写不进缓冲区。 */
+    private final Object writeLock = new Object();
 
     // 音频分析完成监听器（用于主界面记录音频耗时）
     private Runnable onCompleteListener = null;
@@ -59,22 +68,20 @@ public class AudioDecoder {
     // 可接受误差范围（毫秒）
     private static final int SEEK_POSITION_TOLERANCE_MS = 200;
 
-    private long lastSeekRealTime = 0;
-
+    /**
+     * 跳到 ms 重新解码：旧一轮作废 → 清掉缓冲区里的旧音频 → 从新位置开始新一轮。
+     * 不再丢弃 1 秒内的第二次 seek：VideoProcessActivity 已经做了 500ms 防抖，丢掉的话解码器会停在上一次的位置
+     * （往回拖时缓冲区里一直没有当前位置的音频）。
+     */
     public void seekTo(int ms) {
-        long now = System.currentTimeMillis();
-        if ((now - lastSeekRealTime) < 1000) {
-            Log.w(TAG, "⚠️ seekTo 频率过快，距上次不足 1000ms，跳过");
-            return;
-        }
-        lastSeekRealTime = now;
-
         // 7.24新增：记录seek时间，供解码线程使用
-        lastSeekTimeInDecoder = now;
+        lastSeekTimeInDecoder = System.currentTimeMillis();
 
         Log.d(TAG, "🔄 AudioDecoder.seekTo() called, new time: " + ms + "ms");
 
         stop();
+        // 旧一轮作废之后再清：从这里起它不会再写缓冲区，旧位置的音频不会混进新的窗口
+        pcmBuffer.reset();
         this.seekToPositionMs = ms;  // 直接seek到当前位置，让限速机制自然控制提前量。
         startDecoding();
         Log.d(TAG, "🚀 seekTo() -> startDecoding(), seekToPositionMs = " + seekToPositionMs);
@@ -107,11 +114,15 @@ public class AudioDecoder {
      * 开始解码音频（在子线程中执行）
      */
     public void startDecoding() {
-        Log.d(TAG, "startDecoding: 创建解码子线程, 准备开始音频解码");
+        final int run;
+        synchronized (writeLock) {
+            run = ++generation;          // 新的一轮；之前那一轮（如果还在跑）随之作废
+        }
+        final int startMs = seekToPositionMs;
+        Log.d(TAG, "startDecoding: 创建解码子线程（第 " + run + " 轮）, 准备开始音频解码");
 
         new Thread(() -> {
             long lastPtsMs = -1;  // ✅ 用于检测 pts 是否回退
-            isDecoding = true;
             boolean sentEos = false;
             boolean outputDone = false;
 
@@ -146,9 +157,9 @@ public class AudioDecoder {
                 MediaFormat format = extractor.getTrackFormat(audioTrackIndex);
 
                 // ✅ 若有 seek 请求，跳转解码器起始位置
-                if (seekToPositionMs >= 0) {
-                    extractor.seekTo(seekToPositionMs * 1000L, MediaExtractor.SEEK_TO_CLOSEST_SYNC);
-                    Log.d(TAG, "🔄 解码器 seekTo: " + seekToPositionMs + "ms");
+                if (startMs >= 0) {
+                    extractor.seekTo(startMs * 1000L, MediaExtractor.SEEK_TO_CLOSEST_SYNC);
+                    Log.d(TAG, "🔄 解码器 seekTo: " + startMs + "ms");
                 }
 
 
@@ -171,7 +182,7 @@ public class AudioDecoder {
                 MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
 
                 outerLoop:
-                while (isDecoding && !(sentEos && outputDone)) {
+                while (generation == run && !(sentEos && outputDone)) {
                     //Log.d(TAG, "🔁 解码循环进行中...");
 
                     int inputIndex = decoder.dequeueInputBuffer(10000);
@@ -194,6 +205,9 @@ public class AudioDecoder {
                     int outputIndex = dequeueOutput(decoder, bufferInfo, 10000, outFmt);
 
                     while (outputIndex >= 0) {
+                        if (generation != run) {
+                            break outerLoop;   // 已被 seek / stop 作废（多半正停在下面的限速等待里）
+                        }
                         long currentPtsMs = bufferInfo.presentationTimeUs / 1000;
 
                         // 7.24 改进的限速逻辑,防止写入太快
@@ -277,8 +291,13 @@ public class AudioDecoder {
                             long first = resampler.outputCount();
                             float[] out = resampler.process(shorts, 0, n / ch);
                             if (out.length > 0) {
-                                pcmBuffer.write(out, resamplerBaseUs / 1000 + first / 16,
-                                        PcmResampler.OUT_RATE);
+                                synchronized (writeLock) {
+                                    if (generation != run) {
+                                        break outerLoop;   // 作废之后一个样本也不再写
+                                    }
+                                    pcmBuffer.write(out, resamplerBaseUs / 1000 + first / 16,
+                                            PcmResampler.OUT_RATE);
+                                }
                             }
                         }
 
@@ -293,21 +312,32 @@ public class AudioDecoder {
 
                 }
 
-                Log.d(TAG, "startDecoding: 解码循环结束, 准备触发 onCompleteListener");
-                isDecodingFinished = true;
-                if (onCompleteListener != null) {
-                    onCompleteListener.run();
+                if (generation == run) {
+                    Log.d(TAG, "startDecoding: 解码循环结束, 准备触发 onCompleteListener");
+                    isDecodingFinished = true;
+                    if (onCompleteListener != null) {
+                        onCompleteListener.run();
+                    }
+                } else {
+                    Log.d(TAG, "startDecoding: 第 " + run + " 轮已被 seek / stop 作废，退出");
                 }
-
-                decoder.stop();
-                decoder.release();
-                extractor.release();
-                Log.d(TAG, "startDecoding: MediaCodec 和 MediaExtractor 已释放");
 
             } catch (IOException e) {
                 Log.e(TAG, "音频解码失败: " + e.getMessage());
+            } finally {
+                // 不管怎么退出都释放解码器（被作废的一轮也不再占着它）
+                if (decoder != null) {
+                    try {
+                        decoder.stop();
+                    } catch (RuntimeException ignored) {
+                        // 没 start 成功或已出错的解码器 stop() 会抛异常，照样 release
+                    }
+                    decoder.release();
+                }
+                extractor.release();
+                Log.d(TAG, "startDecoding: MediaCodec 和 MediaExtractor 已释放");
             }
-        }).start();
+        }, "AudioDecoder-" + run).start();
     }
 
     /**
@@ -328,11 +358,14 @@ public class AudioDecoder {
     }
 
     /**
-     * 停止解码线程
+     * 停止解码线程：当前这一轮作废。返回之后它不会再往缓冲区写任何数据，
+     * 并在下一次检查时（最多一个限速等待周期，约 100ms）退出、释放解码器。
      */
     public void stop() {
         Log.d(TAG, "stop: 请求停止解码线程...");
-        isDecoding = false;
+        synchronized (writeLock) {
+            generation++;
+        }
     }
 
 
