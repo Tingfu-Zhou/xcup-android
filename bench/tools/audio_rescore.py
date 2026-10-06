@@ -466,7 +466,7 @@ def _interpreter_class():
 
 class AudioModel(object):
     """与 AudioInferenceHelper.predict() 相同：YAMNet → 各帧 embedding 平均 → 分类器。
-    另外留下 output 0 的 AudioSet 521 类分数（各帧平均，Java 端 a_ys_* 列同样按帧平均）。"""
+    另外留下 output 0 的 AudioSet 521 类分数（各帧平均），只做离线分析：app 不算这些分数。"""
 
     def __init__(self, yamnet=DEFAULT_YAMNET, classifier=DEFAULT_CLASSIFIER, threads=None):
         _need_numpy()
@@ -1246,7 +1246,7 @@ def cmd_auc(a):
     table('只看分类器已经判"转"的结果（p_sex ≥ 0.5）：还能不能把剧情挑出来',
           cond=lambda x: x['ap'][0] >= 0.5)
     if not have_ys:
-        print('\n  （这批 run 没有 a_ys_* 列：用 rescore 重算，或者用新版 app 重新采集）')
+        print('\n  （这批 run 没有 a_ys_* 列：用 rescore 重算（app 采集的 run 不带这些列））')
 
     for key in [k.strip() for k in (a.scan or '').split(',') if k.strip()]:
         fn = dict((k, f) for k, _, f in feats).get(key)
@@ -1508,7 +1508,7 @@ def selftest():
     with io.open(src, 'w', encoding='utf-8', newline='') as fh:
         fh.write('# xcup-bench-run v1\n# video_name=selftest\n'
                  '# params: AUDIO_DO=0.55 AUDIO_NOISE=0.60\n')
-        base_cols = [c for c in M.RUN_COLS_NEEDED if c not in M.YS_COLS]   # 旧版 dump 没有 a_ys_*
+        base_cols = list(M.RUN_COLS_NEEDED)                             # app 的 dump 没有 a_ys_*
         fh.write(','.join(base_cols) + '\n')
         for k in range(40):
             wall = 1000000 + 500 * k

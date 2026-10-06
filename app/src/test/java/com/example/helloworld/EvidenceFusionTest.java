@@ -221,9 +221,12 @@ public class EvidenceFusionTest {
         EvidenceFusion.Config cfg = EvidenceFusion.Config.fromJson(text);
         assertNotNull(cfg.id);
         if (!EvidenceFusion.MODE_LEGACY.equals(cfg.mode)) {
-            // 离线模式只有修复后的音频
+            // 离线模式只有修复后的音频；两个模型都只给证据融合 3 个概率
             assertEquals("证据表必须在修复后的音频上拟合", "fixed",
                     new JSONObject(text).optString("audio_pipeline"));
+            assertTrue("视频特征权重超过 3 项", cfg.video.weights.length <= 3);
+            assertTrue("音频特征权重超过 3 项（app 不把 YAMNet AudioSet 分数交给证据融合）",
+                    cfg.audio.weights.length <= 3);
         }
     }
 }

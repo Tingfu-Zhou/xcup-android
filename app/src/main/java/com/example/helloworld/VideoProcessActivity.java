@@ -97,26 +97,17 @@ public class VideoProcessActivity extends AppCompatActivity {
     private final AtomicReference<EvidenceFusion.Snapshot> latestVideoSnap = new AtomicReference<>(null);
     private final AtomicReference<AudioSnap> latestAudioSnap = new AtomicReference<>(null);
 
-    private static float[] concat(float[] a, float[] b) {
-        float[] r = new float[a.length + b.length];
-        System.arraycopy(a, 0, r, 0, a.length);
-        System.arraycopy(b, 0, r, a.length, b.length);
-        return r;
-    }
-
     /**
-     * 音频结果快照：snap 给证据融合；winEndPosMs / audioSet 是同一次推理的附带信息，只写评测 CSV
-     * （a_pos / a_ys_* 列）。有了 a_pos，bench/tools/audio_rescore.py 离线重算时能精确还原模型窗口。
+     * 音频结果快照：snap 给证据融合；winEndPosMs 是同一次推理的附带信息，只写评测 CSV（a_pos 列）。
+     * 有了 a_pos，bench/tools/audio_rescore.py 离线重算时能精确还原模型窗口。
      */
     private static final class AudioSnap {
         final EvidenceFusion.Snapshot snap;
         final long winEndPosMs;     // 读 PCM 时的播放位置：模型窗口 = [winEndPosMs-2s, winEndPosMs]
-        final float[] audioSet;     // AudioInferenceHelper.AUDIOSET_LOG_CLASSES 的分数，推理失败时为 null
 
-        AudioSnap(EvidenceFusion.Snapshot snap, long winEndPosMs, float[] audioSet) {
+        AudioSnap(EvidenceFusion.Snapshot snap, long winEndPosMs) {
             this.snap = snap;
             this.winEndPosMs = winEndPosMs;
-            this.audioSet = audioSet;
         }
     }
 
@@ -713,12 +704,9 @@ public class VideoProcessActivity extends AppCompatActivity {
                                 // [证据融合] 原始概率 + 产出时刻打包成快照原子发布（评测 CSV 的 a_p_* 也取自它）
                                 long resultTs = System.currentTimeMillis();
                                 boolean probsOk = result.index >= 0 && result.probs.length >= 3;
-                                // 融合用的向量 = [sex, oral, noise] + AudioSet 类别分数：配置的音频特征可以带上
-                                // Speech 等类（fusion_lab.py --speech）；只用前 3 项的配置不受影响
                                 latestAudioSnap.set(new AudioSnap(
-                                        new EvidenceFusion.Snapshot(probsOk ? concat(result.probs, result.audioSet) : null,
-                                                resultTs),
-                                        currentMs, probsOk ? result.audioSet : null));
+                                        new EvidenceFusion.Snapshot(probsOk ? result.probs.clone() : null, resultTs),
+                                        currentMs));
 
                                 // 原子更新结果
                                 latestAudioAction.set(action);
@@ -885,7 +873,6 @@ public class VideoProcessActivity extends AppCompatActivity {
                             aSnap == null ? Long.MAX_VALUE : currentTime - aSnap.tsMs,
                             aSnap == null ? null : aSnap.probs,
                             aRes == null ? -1 : aRes.winEndPosMs,
-                            aRes == null ? null : aRes.audioSet,
                             Float.isNaN(audioFreq) ? -1 : Math.round(audioFreq),
                             audioFreqConf, audioFreqValid, audioFreqAge,
                             smoothedAction, finalAction, finalFreq,
@@ -1447,6 +1434,11 @@ public class VideoProcessActivity extends AppCompatActivity {
             // 没标明 audio_pipeline=fixed 的配置是在旧的半速音频上拟合的，装上去对不上
             if (!"fixed".equals(new org.json.JSONObject(text).optString("audio_pipeline"))) {
                 throw new IllegalArgumentException("audio_pipeline 不是 fixed：证据表不是在修复后的音频上拟合的");
+            }
+            // 两个模型都只输出 3 个概率；权重更长的特征（例如带 YAMNet Speech 的）在 app 里取不到值，
+            // 每个结果都会被当成无效，证据融合就一直没有证据
+            if (cfg.video.weights.length > 3 || cfg.audio.weights.length > 3) {
+                throw new IllegalArgumentException("特征权重超过 3 项：app 只把模型的 3 个概率交给证据融合");
             }
             evidenceFusion = new EvidenceFusion(cfg);
             evidenceLive = EvidenceFusion.MODE_LIVE.equals(cfg.mode);

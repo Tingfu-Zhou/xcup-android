@@ -125,10 +125,8 @@ def load_run(path):
         t.a = (d.get('a_action') or '').strip()
         t.ac = f32(_fnum(d.get('a_conf')) or 0.0)
         t.a_age = _inum(d.get('a_age'), -1)
+        # 与 app 送进证据融合的音频向量一致：只有 [sex, oral, noise]（rescore 写的 a_ys_* 列只做离线分析）
         t.ap = _probs(d, ('a_p_sex', 'a_p_oral', 'a_p_noise'))
-        ys = _probs(d, M.YS_COLS)
-        if t.ap is not None and ys is not None:
-            t.ap = t.ap + ys            # 与 app 送进证据融合的音频向量一致：[sex, oral, noise] + AudioSet 类别
         t.loud_lv = _inum(d.get('loud_lv'), -1)
         t.loud_conf = f32(_fnum(d.get('loud_conf')) or 0.0)
         t.log = dict((k, (d.get(k) or '').strip()) for k in LOG_COLS)
@@ -947,20 +945,6 @@ EDGES = [0.0, 0.02, 0.05, 0.1, 0.2, 0.35, 0.5, 0.65, 0.8, 0.9, 0.95, 0.98, 1.0]
 VIDEO_FEATURE = ('p_oral+p_sex', [0.0, 1.0, 1.0])            # 视频类目 [plot, oral, sex]
 AUDIO_FEATURES = [('p_sex+p_oral', [1.0, 1.0, 0.0]),        # 音频类目 [sex, oral, noise]
                   ('p_sex', [1.0, 0.0, 0.0])]
-# --speech：再试带 YAMNet AudioSet "Speech" 的特征。音频向量 = [sex, oral, noise] + a_ys_*（metrics.YS_CLASSES
-# 顺序，speech 在第 4 位），特征仍是 Σw·p 裁到 [0,1] 后查表，Java 端 EvidenceFusion 不用改。
-assert M.YS_CLASSES[0][0] == 'speech'
-SPEECH_FEATURES = [('p_sex+p_oral-speech/2', [1.0, 1.0, 0.0, -0.5]),
-                   ('p_sex-speech/2', [1.0, 0.0, 0.0, -0.5])]
-_EXTRA_AUDIO_FEATURES = []       # use_speech_features() 打开
-
-
-def use_speech_features(videos):
-    """--speech：所有片子都得有 a_ys_* 列（audio_rescore.py rescore 的输出，或新版 app 录的 run）。"""
-    lack = [v.vid for v in videos if not any(t.ap is not None and len(t.ap) > 3 for t in v.ticks)]
-    if lack:
-        sys.exit('--speech 需要 a_ys_* 列，这些片子没有: %s（先用 audio_rescore.py rescore 重算）' % lack)
-    _EXTRA_AUDIO_FEATURES[:] = SPEECH_FEATURES
 LLR_CLIP = 3.0       # 单个结果最多贡献的证据，防止某个极端区间的小样本一锤定音
 ALPHA = 0.5          # 每格的平滑伪计数
 
@@ -1116,7 +1100,7 @@ def fit(train, cost, variant='evidence', grid=GRID, exhaustive=False, top_k=10):
     for v in real:
         vs += result_samples(v, 'v', VIDEO_FEATURE[1])
     vt0, vcounts = fit_table(vs)
-    afeats = AUDIO_FEATURES + _EXTRA_AUDIO_FEATURES if variant != 'video_only' else AUDIO_FEATURES[:1]
+    afeats = AUDIO_FEATURES if variant != 'video_only' else AUDIO_FEATURES[:1]
     negs = NEG_SCALES if variant != 'audio_only' else [1.0]
     space = _space(variant, grid)
     atables = {}
@@ -1232,9 +1216,8 @@ POLICIES = [('legacy', '现有融合'), ('always', '一直转'), ('video_only', 
 _W = {}          # 留一拟合的共享数据；并行时每个子进程由 _lovo_init 填一次
 
 
-def _lovo_init(videos, splices, cost, grid, exhaustive, extra_feats):
+def _lovo_init(videos, splices, cost, grid, exhaustive):
     _W.update(videos=videos, splices=splices, cost=cost, grid=grid, exhaustive=exhaustive)
-    _EXTRA_AUDIO_FEATURES[:] = extra_feats        # spawn 出来的子进程不继承 --speech 的设置
 
 
 def _lovo_task(held_vid, var):
@@ -1253,7 +1236,7 @@ def lovo(videos, cost, grid, variants=('video_only', 'audio_only', 'evidence'), 
     各折互相独立，jobs>1 时多进程并行（spawn，Windows/Linux 行为一致），结果与串行完全相同。"""
     splices = dict((v.vid, make_splices(v)) for v in videos)
     tasks = [(held.vid, var) for held in videos for var in variants]
-    init = (videos, splices, cost, grid, exhaustive, list(_EXTRA_AUDIO_FEATURES))
+    init = (videos, splices, cost, grid, exhaustive)
     folds = {}
 
     def done(held_vid, var, best, dt):
@@ -1432,9 +1415,6 @@ def cmd_eval(args):
     videos = load_videos(args.gt_dir, args.runs_dir, args.pair, args.policy)
     if len(videos) < 2:
         sys.exit('留一交叉验证至少要 2 部片')
-    if args.speech:
-        use_speech_features(videos)
-        print('  音频特征候选加上 Speech：%s' % ', '.join(n for n, _ in SPEECH_FEATURES))
     print('\n留一视频交叉验证（每部片只用其余 %d 部拟合）…' % (len(videos) - 1))
     t0 = time.time()
     per, sp, folds, splices = evaluate_all(videos, cost, grid, exhaustive=args.exhaustive, jobs=args.jobs)
@@ -1466,8 +1446,6 @@ def oracle_video(video, which):
                 kw['v'], kw['vc'] = ('do', 1.0) if lab == 'do' else ('Noise', 1.0)
             else:
                 kw['ap'] = (1.0, 0.0, 0.0) if lab == 'do' else (0.0, 0.0, 1.0)
-                if t.ap is not None and len(t.ap) > 3:
-                    kw['ap'] += t.ap[3:]        # AudioSet 类别分数保持原样（只把分类器换成真值）
                 kw['a'], kw['ac'] = ('do', 1.0) if lab == 'do' else ('Noise', 1.0)
         ticks.append(t.copy(**kw))
     return video.with_ticks(ticks)
@@ -1477,8 +1455,6 @@ def cmd_oracle(args):
     cost = Cost.parse(args.cost)
     grid = QUICK_GRID if args.quick else GRID
     videos = load_videos(args.gt_dir, args.runs_dir, args.pair, args.policy)
-    if args.speech:
-        use_speech_features(videos)
     print('\n模态上限：把某个模态的输出换成真值（窗口末端的真值，无感知延迟），看端到端最多能到多少。')
     print('现有融合不用拟合；证据融合按留一视频交叉验证重新拟合。\n')
     scen = [('实际模型', ''), ('视频完美', 'v'), ('音频完美', 'a')]
@@ -1505,8 +1481,6 @@ def cmd_fit(args):
     if pipes[0] != 'fixed':
         sys.exit('音频管线 %s 不是 app 现在喂给模型的音频（离线模式只有 fixed），拟合出的配置装上去对不上。'
                  '请用 audio_rescore.py rescore --pipeline fixed 的结果拟合' % pipes[0])
-    if args.speech:
-        use_speech_features(videos)
     train = list(videos)
     for v in videos:
         train += make_splices(v)
@@ -1750,7 +1724,7 @@ def _write_synth(video, gt_path, run_path, fusion=''):
                    t.loud_lv, '%.4f' % t.loud_conf, 1, 100,
                    lg['smoothed'], lg['gated'], lg['final_freq'], lg['ble_state'], lg['ble_level'],
                    lg['sent'], lg['sent_action'], lg['sent_level'], '', '', '', '']
-            row += [''] * (len(M.RUN_COLS_NEEDED) - len(row))      # 后加的列（a_ys_* 等）留空
+            row += [''] * (len(M.RUN_COLS_NEEDED) - len(row))      # 后加的列（a_pos）留空
             fh.write(','.join(str(x) for x in row) + '\n')
 
 
@@ -1937,52 +1911,26 @@ def selftest():
     check(rc == 0 and '证据融合（selftest-live）' in out.getvalue(),
           'live 模式的 run 应该用证据融合回放并完全一致:\n' + out.getvalue()[-400:])
 
-    # 10. 音频管线标记；带 a_ys_* 的 run 读出来是 [sex, oral, noise] + AudioSet 向量；带 Speech 的特征能拟合、能回放
+    # 10. 音频管线标记；rescore 写的 run 带 a_ys_* 列，读出来的音频向量仍是 [sex, oral, noise]（与 app 一致）；
+    #     fit 只接受 fixed 音频（8b 的合成 run 没有 AUDIO_PIPE，算旧版 app 的 legacy）
     check(audio_pipe_of({'params': 'FUSION=live/x AUDIO_PIPE=fixed'}) == 'fixed'
           and audio_pipe_of({'pipeline': 'phone'}) == 'legacy' and audio_pipe_of({}) == 'legacy'
           and audio_pipe_of({'pipeline': 'clean'}) == 'clean', 'audio_pipe_of 映射不对')
     ypath = os.path.join(tmp, 'ys_run.csv')
+    ycols = M.RUN_COLS_NEEDED + M.YS_COLS
     with io.open(ypath, 'w', encoding='utf-8', newline='\n') as fh:
-        fh.write('# xcup-bench-run v1\n# params: AUDIO_PIPE=fixed\n' + ','.join(M.RUN_COLS_NEEDED) + '\n')
-        row = dict((c, '') for c in M.RUN_COLS_NEEDED)
+        fh.write('# xcup-bench-run v1\n# params: AUDIO_PIPE=fixed\n' + ','.join(ycols) + '\n')
+        row = dict((c, '') for c in ycols)
         row.update({'pos_ms': '1000', 'wall_ms': '5000', 'a_age': '30', 'a_p_sex': '0.6000',
                     'a_p_oral': '0.1000', 'a_p_noise': '0.3000', 'a_pos': '970'})
         row.update(dict((c, '0.2500') for c in M.YS_COLS))
-        fh.write(','.join(row[c] for c in M.RUN_COLS_NEEDED) + '\n')
+        fh.write(','.join(row[c] for c in ycols) + '\n')
     _, yt = load_run(ypath)
-    check(yt[0].ap is not None and len(yt[0].ap) == 3 + len(M.YS_COLS) and yt[0].ap[3] == f32(0.25),
-          '带 a_ys_* 的 run 应读成 %d 维音频向量，实际 %r' % (3 + len(M.YS_COLS), yt[0].ap))
-    sv = loaded[0]
-    rnd2 = random.Random(5)
-    yticks = []
-    for t in sv.ticks:
-        if t.ap is None:
-            yticks.append(t)
-            continue
-        lab = M.bin_of(M.gt_label_at(sv.segs, t.pos), sv.policy)
-        sp = rnd2.uniform(0.6, 1.0) if lab == 'noise' else rnd2.uniform(0.0, 0.3)
-        yticks.append(t.copy(ap=t.ap + (f32(sp),) + (f32(0.1),) * (len(M.YS_COLS) - 1)))
-    spv = sv.with_ticks(yticks)
-    saved = list(_EXTRA_AUDIO_FEATURES)
-    try:
-        use_speech_features([spv])
-        _, scfg, sinfo = fit([spv], Cost(), 'evidence', QUICK_GRID)
-    finally:
-        _EXTRA_AUDIO_FEATURES[:] = saved
-    check(sinfo['audio_feature'] in [n_ for n_, _ in AUDIO_FEATURES + SPEECH_FEATURES],
-          '带 Speech 的拟合结果不对: %r' % sinfo['audio_feature'])
-    sp_cfg = scfg.with_params(*scfg.params())
-    sp_cfg.audio = Modality(SPEECH_FEATURES[0][1], EDGES, [x * 0.1 - 0.5 for x in range(12)],
-                            SPEECH_FEATURES[0][0])
-    lla = [st.ev_llr_a for st in replay_evidence(spv.ticks, sp_cfg, spv.params) if st.ev_llr_a is not None]
-    check(len(lla) > 10, '4 维权重的音频特征回放时应给出证据，实际 %d 个' % len(lla))
-    rt = EvidenceConfig.from_json(sp_cfg.to_json())
-    check(rt.audio.weights == SPEECH_FEATURES[0][1], '带 Speech 的配置 JSON 往返后权重变了')
-
-    # 10b. fit 只接受 fixed 音频（8b 的合成 run 没有 AUDIO_PIPE，算旧版 app 的 legacy）
+    check(yt[0].ap == (f32(0.6), f32(0.1), f32(0.3)),
+          '带 a_ys_* 的 run 应读成 3 维音频向量 [sex, oral, noise]，实际 %r' % (yt[0].ap,))
     fns = argparse.Namespace(gt_dir=os.path.join(ldir, 'gt'), runs_dir=os.path.join(ldir, 'runs'), pair=[],
                              policy='exclude', cost='fp=1,fn=1,stop=3', quick=True, exhaustive=False,
-                             speech=False, out=os.path.join(tmp, 'fit_legacy.json'), mode='shadow')
+                             out=os.path.join(tmp, 'fit_legacy.json'), mode='shadow')
     try:
         with contextlib.redirect_stdout(io.StringIO()):
             cmd_fit(fns)
@@ -2000,6 +1948,8 @@ def selftest():
                 check(c.meta.get('audio_pipeline') == 'fixed',
                       'fusion_config.json 的 audio_pipeline 不是 fixed（app 会回退到原融合）: %r'
                       % c.meta.get('audio_pipeline'))
+                check(len(c.video.weights) <= 3 and len(c.audio.weights) <= 3,
+                      'fusion_config.json 的特征权重超过 3 项（app 只有模型的 3 个概率）')
         except (ValueError, KeyError) as e:
             fails.append('fusion_config.json 解析失败: %s' % e)
 
@@ -2040,9 +1990,6 @@ def main():
                        help='扫全网格（默认先粗后细，快约 10 倍，结果基本一致）')
         p.add_argument('--jobs', type=int, default=0,
                        help='eval/oracle 的留一拟合用几个进程并行（默认 0 = CPU 核数；1 = 串行）')
-        p.add_argument('--speech', action='store_true',
-                       help='音频特征候选里加上 YAMNet Speech（需要 a_ys_* 列）：%s'
-                            % ', '.join(n for n, _ in SPEECH_FEATURES))
         if name == 'fit':
             p.add_argument('--out', default=DEFAULT_CONFIG_OUT)
             p.add_argument('--mode', default='shadow', choices=('legacy', 'shadow', 'live'),

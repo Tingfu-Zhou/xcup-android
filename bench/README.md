@@ -176,10 +176,28 @@ live 模式采集的 run（参数行里 `FUSION=live/<配置 id>`）会自动改
 
 配置里的 `"audio_pipeline"` 记录证据表是在哪种音频上拟合的，由 `fit` 按训练数据自动写入，不要手改。
 离线模式现在只有修复后的音频（`PcmResampler`，见下文"音频解码修复"），旧的半速处理已删除，所以 app 只接受
-`"fixed"` 的配置；没有这一项的旧配置（在半速音频上拟合的）会被拒绝，app 回退到原融合（logcat 里有
-`[证据融合]` 的报错）。`EvidenceFusionTest` 和 `fusion_lab.py --selftest` 也会检查打包的配置。
+`"fixed"` 的配置。没有这一项（在半速音频上拟合的旧配置），或者特征权重超过 3 项（例如以前用 `--speech`
+拟合、带 YAMNet Speech 的配置），app 都会拒绝并回退到原融合（logcat 里有 `[证据融合]` 的报错）。
+`EvidenceFusionTest` 和 `fusion_lab.py --selftest` 也会检查打包的配置。
 
-### 当前结果（2026-10-05，6 部片，留一视频交叉验证）
+### 当前结果（2026-10-06，修复后的音频，6 部片，留一视频交叉验证）
+
+`fusion_lab.py eval bench/gt bench/rescored/fixed`（音频是 `audio_rescore.py` 按修复后的处理离线重算的，
+视频和时序来自 1.2.4 真机录的 run）：
+
+| 策略 | 准确率 | 误转 | 漏转 | 误停/分 | 启动后没转 | 停止后还转 |
+|---|---|---|---|---|---|---|
+| 现有融合 | 89.8% | 37.3% | 0.8% | 0.14 | 0.0s | 18.5s（15 个里 2 个基本不停） |
+| 只用视频 | 85.6% | 31.5% | 8.5% | 0.20 | 0.6s | 16.7s（5 个基本不停） |
+| **只用音频** | **94.3%** | **10.0%** | 4.2% | 0.14 | 2.6s | **4.1s** |
+| 证据融合 | 92.5% | 17.4% | 4.0% | 0.10 | 2.6s | 4.6s（2 个基本不停） |
+
+音频修好后，拟合几乎总是选 `w_v=0`（只用音频）：6 折里 5 折如此，只有留出 v07 那一折选了 `w_v=0.25`，
+v07 从 89.7% 掉到 80.8%，所以"证据融合"一行比"只用音频"差。仓库里的配置 `fit-20261006-074840` 是用全部
+6 部片拟合的（`mode: live`），同样是 `w_v=0`、音频特征 `p_sex+p_oral`，泛化表现看"只用音频"一行。
+剩下的误转主要在 v04（24%）、v07（19%），漏转主要在 v05（15%）。视频模型改进之后重新拟合，视频才会重新参与。
+
+### 旧结果（2026-10-05，旧的半速音频，留一视频交叉验证）
 
 | 策略 | 准确率 | 误转 | 漏转 | 误停/分 | 启动后没转 | 停止后还转 |
 |---|---|---|---|---|---|---|
@@ -188,9 +206,8 @@ live 模式采集的 run（参数行里 `FUSION=live/<配置 id>`）会自动改
 | 只用音频 | 83.3% | 35.3% | 10.4% | 0.04 | 20.0s | 28.2s |
 | **证据融合** | **85.5%** | **31.3%** | 8.7% | **0.14** | 1.1s | **10.5s** |
 
-6 部片逐片都比现有融合好（v01 73.8→75.1，v02 96.8→100，v04 77.8→80.5，v05 85.5→93.4，
-v06 85.2→100，v07 62.6→69.1）。剩下的误转主要在 v04/v07：剧情里有裸露，视频模型自己也判
-"转"，融合层救不了，要靠改视频模型。仓库里的配置是用全部 6 部片拟合的（`mode: live`）。
+当时 6 部片逐片都比现有融合好（v01 73.8→75.1，v02 96.8→100，v04 77.8→80.5，v05 85.5→93.4，
+v06 85.2→100，v07 62.6→69.1），用的配置是 `fit-20261005-060733`（音频特征 `p_sex`，`w_v=1`）。
 
 改了证据融合算法时：Python 和 Java 两边一起改，然后 `fusion_lab.py golden` 重新生成
 `app/src/test/resources/fusion/` 下的对拍数据，`EvidenceFusionTest` 会逐 tick 校验两边一致。
@@ -291,8 +308,7 @@ python bench/tools/audio_rescore.py check --videos D:/xcup/videos
 ```bash
 python bench/tools/audio_rescore.py rescore --videos D:/xcup/videos            # 默认 --pipeline fixed
 python bench/tools/fusion_lab.py eval bench/gt bench/rescored/fixed             # 与 bench/runs 的 eval 对比
-python bench/tools/fusion_lab.py eval bench/gt bench/rescored/fixed --speech    # 加上 Speech 证据是否更好
-python bench/tools/fusion_lab.py fit  bench/gt bench/rescored/fixed --mode live [--speech]
+python bench/tools/fusion_lab.py fit  bench/gt bench/rescored/fixed --mode live
 ```
 
 `fit` 会检查所有 run 是同一种音频（重算头部的 `pipeline=` / app 参数行的 `AUDIO_PIPE=`），写进配置的
@@ -312,7 +328,7 @@ python bench/tools/audio_rescore.py rescore --videos D:/xcup/videos --classifier
 fusion_lab.py 指向这个目录就能用：
 
 - `a_p_*` 换成重算的概率，`a_action` / `a_conf` 按原阈值重判（过期规则同融合循环）；
-- 追加 `a_ys_*`：YAMNet AudioSet 类别分数（见下表）；
+- 追加 `a_ys_*`：YAMNet AudioSet 类别分数（见下表，只做离线分析）；
 - 旁边的 `<run>.yamnet.npz` 存了每个结果的全部 521 类分数，给 `auc --all-classes` 用；
 - 决策列（`smoothed`、`gated`、`ble_*`、`sent*`）仍是原 run 的：端到端指标请用 `fusion_lab.py eval/oracle`
   重放，`fusion_lab.py check` 对重算目录没有意义。
@@ -335,20 +351,21 @@ python bench/tools/metrics.py bench/gt/v01.csv bench/rescored/fixed/v01_base.csv
 2. 只看分类器已经判"转"（`p_sex ≥ 0.5`）的结果：它还能不能把剧情挑出来 —— 这才是"拿它当不转证据、
    压剧情误转"真正需要的。`--scan speech,music` 打印阈值扫描（剧情里命中多少、动作里误伤多少）。
 
-AUC 好看不等于端到端有用：要不要把 Speech 加进融合，以 `fusion_lab.py eval --speech` 的留一结果为准。
-`--speech` 在音频特征候选里加上 `p_sex+p_oral-speech/2`、`p_sex-speech/2`（app 送进证据融合的音频向量是
-`[sex, oral, noise] + a_ys_*`，Java 端不用改），由拟合按代价挑。
+AUC 好看不等于端到端有用。2026-10-06 起 app 不再算 AudioSet 分数（`AudioInferenceHelper` 只取 YAMNet 的
+embedding，与 main 分支一致），证据融合的音频向量只有 `[sex, oral, noise]`，`fusion_lab.py` 的 `--speech`
+也一起撤掉了；`a_ys_*` 现在只用于离线分析。以后要把 AudioSet 类别用进融合，app（`AudioInferenceHelper`
+取 output 0、送进证据融合的向量、`BenchLogger` 的列）和 `fusion_lab.py` 要一起加回来，可参考提交
+`a3efcf5`、`20f08f9`。
 
 ### run CSV 新增的列
 
-新版 app（`BenchLogger`）和 `rescore` 都会写这些列，旧版 dump 没有也不影响其他工具：
+旧版 dump 没有这些列也不影响其他工具：
 
 | 列 | 含义 |
 |---|---|
 | `a_pos` | 该音频结果读 PCM 时的播放位置：模型窗口 = `[a_pos-2s, a_pos]`。有它，`check` 不用再反推窗口位置（只有 app 写） |
-| `a_ys_speech` / `conversation` / `narration` / `music` | AudioSet 0 / 2 / 3 / 132 类，"剧情"候选证据 |
-| `a_ys_silence` / `moan` / `groan` / `breathing` / `pant` / `slap` | AudioSet 494 / 22 / 33 / 36 / 40 / 461 类，"动作"候选 |
+| `a_ys_speech` / `conversation` / `narration` / `music` | AudioSet 0 / 2 / 3 / 132 类，"剧情"候选证据（只有 `rescore` 写） |
+| `a_ys_silence` / `moan` / `groan` / `breathing` / `pant` / `slap` | AudioSet 494 / 22 / 33 / 36 / 40 / 461 类，"动作"候选（只有 `rescore` 写） |
 
 分数是 YAMNet output 0（`[帧, 521]`，sigmoid，多标签）按帧取平均；output 1 才是分类器用的 embedding。
-挑哪几类在 `AudioInferenceHelper.AUDIOSET_LOG_CLASSES` 和 `metrics.YS_CLASSES` 两处，`metrics.py --selftest`
-会核对两边一致。
+挑哪几类在 `metrics.YS_CLASSES`；app 不算这些分数，`BenchLogger` 也不写这些列。
