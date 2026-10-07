@@ -258,6 +258,15 @@ public final class FusionArbiter {
     }
 
     /**
+     * 上一个 tick 交 "do" 是不是有证据撑着（启动 / 维持），而不是在"等结果"（wait_sparse / wait_unclear）。
+     * 暂停时用它决定马达要不要带过暂停：只是在等结果的 "do" 不能带过去。否则网页视频模式下
+     * "静音暂停 → 一声短响恢复（恢复挂起的 do）→ 还在等结果时又静音暂停（又挂起 do）"会让马达跟着每一声短响一直转。
+     */
+    public boolean lastDoHadEvidence() {
+        return reason.startsWith("start_") || reason.startsWith("hold_");
+    }
+
+    /**
      * 每个融合 tick 调一次。
      *
      * @param now     本 tick 的墙钟（与评测 CSV 的 wall_ms 相同）

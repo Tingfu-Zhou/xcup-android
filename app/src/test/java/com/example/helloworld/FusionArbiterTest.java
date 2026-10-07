@@ -185,6 +185,26 @@ public class FusionArbiterTest {
         assertEquals(FusionArbiter.R_START_AUDIO, arb.lastReason());
     }
 
+    /** 暂停时只有"有证据撑着"的 do 才带过暂停：维持 / 启动算，等结果（wait_sparse / wait_unclear）和 reset 之后都不算。 */
+    @Test
+    public void lastDoHadEvidenceOnlyForStartAndHold() {
+        FusionArbiter arb = new FusionArbiter();
+        arb.reset(T);
+        assertTrue(!arb.lastDoHadEvidence());
+        arb.decide(T + 500, "", 0f, -1, "do", 0.95f, T + 400, true);          // 刚 reset，音频只有 1 个结果
+        assertEquals(FusionArbiter.R_WAIT_SPARSE, arb.lastReason());
+        assertTrue(!arb.lastDoHadEvidence());
+        for (int k = 1; k <= 4; k++) {
+            arb.decide(T + 500 + 1000L * k, "", 0f, -1, "do", 0.95f, T + 400 + 1000L * k, true);
+        }
+        assertEquals(FusionArbiter.R_HOLD_AUDIO, arb.lastReason());
+        assertTrue(arb.lastDoHadEvidence());
+        arb.reset(T + 10000);
+        assertTrue(!arb.lastDoHadEvidence());
+        assertEquals("do", arb.decide(T + 10000 + FusionArbiter.UNCLEAR_MAX_MS - 1, "", 0f, -1, "", 0f, -1, true));
+        assertTrue(!arb.lastDoHadEvidence());                                   // wait_sparse / wait_unclear
+    }
+
     @Test
     public void paramsLineCarriesVersion() {
         String p = FusionArbiter.paramsLine();

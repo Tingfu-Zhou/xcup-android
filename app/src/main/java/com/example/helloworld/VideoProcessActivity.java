@@ -1642,10 +1642,23 @@ public class VideoProcessActivity extends AppCompatActivity {
 
         // ★ 新增：挂起当前蓝牙动作并发送停止信号
         if (!currentBluetoothState.isEmpty() && !"Noise".equals(currentBluetoothState)) {
-            suspendedBluetoothState = currentBluetoothState;
-            suspendedLevel = currentLevel;
-            Log.i(TAG, String.format("[暂停] 挂起动作: %s, 档位: %d",
-                    suspendedBluetoothState, suspendedLevel));
+            if (fusionArbiter.lastDoHadEvidence()) {
+                suspendedBluetoothState = currentBluetoothState;
+                suspendedLevel = currentLevel;
+                Log.i(TAG, String.format("[暂停] 挂起动作: %s, 档位: %d",
+                        suspendedBluetoothState, suspendedLevel));
+            } else {
+                // [融合仲裁] 马达此刻只是仲裁器在"等结果"（刚 seek / 恢复后的冷启动，或看不清听不清），没有证据撑着：
+                // 不带过暂停，状态同步成 Noise（下面照常发 Noise），恢复后从头判断。否则网页视频模式下
+                // "静音暂停 → 一声短响恢复 → 还在等结果时又静音暂停"会让马达跟着每一声短响一直转。
+                long now = System.currentTimeMillis();
+                currentBluetoothState = "Noise";
+                currentStateStartTime = now;
+                pendingBluetoothState = "Noise";
+                pendingStateStartTime = now;
+                latestBluetoothAction.set("Noise");
+                Log.i(TAG, "[暂停] 马达没有证据撑着（" + fusionArbiter.lastReason() + "），不挂起，恢复后重新判断");
+            }
         }
         if (BLEManager.globalManager != null && BLEManager.globalManager.isConnected()
                 && !BLEManager.globalManager.isPausedByLocal()) {
