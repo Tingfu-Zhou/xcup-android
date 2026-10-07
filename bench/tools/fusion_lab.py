@@ -7,16 +7,19 @@ run CSV 里已经存了两个模型每个 tick 的原始概率（v_p_* / a_p_*�
 这里把融合层整个搬到 Python 里离线重放：改融合不用再实时重跑视频，几秒一部片。
 
 子命令:
-  check   复刻线上 Java 融合（平滑投票 + 启动仲裁 + 蓝牙状态机），和 run CSV 里记下的
-          逐 tick 输出比对。一致率 >=99% 才说明回放器可信，后面的对比才有意义。
-  eval    留一视频交叉验证：证据融合 vs 现有融合 vs 三条基线（一直转/只用视频/只用音频）。
-          每部片的参数只用其余几部拟合，数字代表"没见过的片子"上的表现。
+  check   复刻线上 Java 融合，和 run CSV 里记下的逐 tick 输出比对。参数行有 ARB=（2026-10-07 起的 app）
+          的 run 用融合仲裁 FusionArbiter 回放（还比对 arb 列），没有的用旧的平滑投票 + 启动仲裁；
+          之后都接蓝牙状态机。一致率 >=99% 才说明回放器可信，后面的对比才有意义。
+  eval    留一视频交叉验证：旧融合 / 融合仲裁 / 证据融合 / 三条基线（一直转/只用视频/只用音频）。
+          证据融合与单模态基线的参数只用其余几部拟合；旧融合与融合仲裁用固定参数。
   oracle  假设某个模态完美（概率换成真值），端到端最多能到多少——决定先改哪个模型。
+  golden  生成 FusionArbiterTest 的对拍数据（改了融合仲裁的规则 / 参数后要重新生成）。
 
 用法:
   python3 bench/tools/fusion_lab.py check  bench/gt bench/runs
   python3 bench/tools/fusion_lab.py eval   bench/gt bench/runs
   python3 bench/tools/fusion_lab.py oracle bench/gt bench/runs
+  python3 bench/tools/fusion_lab.py golden bench/gt bench/runs_fixed
   python3 bench/tools/fusion_lab.py --selftest
 
 真值与 run 的配对：bench/gt/v01.csv 配 bench/runs/ 下以 "v01" 开头的文件（如 v01_base.csv）；
@@ -33,6 +36,7 @@ run CSV 里已经存了两个模型每个 tick 的原始概率（v_p_* / a_p_*�
   每个模态"说话算多少"由统计出来的 LLR 决定，不再手写"音频权重 1.2"。换了模型重新拟合即可。
 """
 import argparse
+import contextlib
 import glob
 import io
 import json
@@ -82,7 +86,7 @@ class Tick(object):
 
 
 LOG_COLS = ('smoothed', 'gated', 'final_freq', 'ble_state', 'ble_level', 'sent',
-            'sent_action', 'sent_level')
+            'sent_action', 'sent_level', 'arb', 'arb_reset')
 
 
 def _fnum(s):
@@ -270,15 +274,23 @@ LEGACY_DEFAULTS = {
 
 
 def parse_params(line):
-    """run CSV 文件头的参数行 -> dict。缺的键用当前 Java 默认值。"""
+    """run CSV 文件头的参数行 -> dict。缺的键用当前 Java 默认值。
+
+    参数行里有 ARB=<版本> 说明这份 run 是 FusionArbiter（融合仲裁）驱动蓝牙的：p['ARB'] 记版本，
+    ARB_* 记它的参数（缺的用 ARB_DEFAULTS）。没有 ARB= 的是旧版（applyDoStartGate）录的 run。"""
     p = dict(LEGACY_DEFAULTS)
+    p.update(ARB_DEFAULTS)
+    p['ARB'] = ''
     for kv in (line or '').split():
         if '=' not in kv:
             continue
         k, v = kv.split('=', 1)
-        if k in p:
+        if k == 'ARB':
+            p['ARB'] = v
+        elif k in p:
+            ref = LEGACY_DEFAULTS.get(k, ARB_DEFAULTS.get(k))
             try:
-                p[k] = int(float(v)) if isinstance(LEGACY_DEFAULTS[k], int) else float(v)
+                p[k] = int(float(v)) if isinstance(ref, int) else float(v)
             except ValueError:
                 pass
     return p
@@ -484,13 +496,233 @@ def final_freq(loud_lv, loud_conf, cur_level):
 Step = namedtuple('Step', 'smoothed gated final_freq ble_state ble_level sent ev_l ev_llr_v ev_llr_a')
 
 
-def replay_legacy(ticks, params, actions=None):
-    """actions: 可选，逐 tick 替换 (v, vc, a, ac)。"""
+# ======================================================================== 融合仲裁（FusionArbiter.java 的逐行移植）
+# 2026-10-07 起 app 用它替代 applyDoStartGate：启动 / 维持 / 停止 分开判断，证据按"新推理结果"计数。
+# 规则与取舍见 FusionArbiter.java 的类注释和 bench/README.md。改这里要同步改 Java，并重新生成对拍数据
+# （python3 bench/tools/fusion_lab.py golden）。
+ARB_DEFAULTS = {
+    'ARB_V_FLOOR': 0.85, 'ARB_A_FLOOR': 0.90,
+    'ARB_C_WIN': 3000, 'ARB_C_V': 2, 'ARB_C_A': 1,
+    'ARB_Z_WIN': 9000, 'ARB_Z_N': 4,
+    'ARB_MA_N': 4, 'ARB_MA_K': 3, 'ARB_MV_N': 4, 'ARB_MV_K': 2, 'ARB_M_MAX': 12000,
+    'ARB_CONS_WIN': 6000, 'ARB_V_CONS': 70,
+    'ARB_NEG_WIN': 4000, 'ARB_UNCLEAR_MAX': 6000, 'ARB_MAX_AGE': 2000, 'ARB_KEEP': 20000,
+    'ARB_COLD': 6000, 'ARB_START_V_CONS': 80, 'ARB_START_MA_K': 4,
+}
+ARB_CAP = 128            # Java 账本的环形缓冲容量（正常用不满：每秒最多约 2 个结果 × 20 秒）
+ARB_VERSIONS = ('v1',)   # 这份移植对应的 FusionArbiter.java 规则版本
+
+
+def _arb_cls(action):
+    return 1 if action == 'do' else (-1 if action == 'Noise' else 0)
+
+
+class ArbLedger(object):
+    """FusionArbiter.Ledger：一个模态的"新结果"账本，按结果时间戳去重。"""
+
+    def __init__(self, max_age=MAX_AGE_MS, keep=20000):
+        self.max_age, self.keep = max_age, keep
+        self.reset(None)
+
+    def reset(self, min_ts):
+        self.items = []          # [(ts, cls, conf)]，旧的在前
+        self.last_ts = None
+        self.min_ts = min_ts
+
+    def feed(self, action, conf, ts, now):
+        if ts is None or ts <= 0 or ts > now or (self.last_ts is not None and ts <= self.last_ts):
+            return False
+        self.last_ts = ts
+        if (self.min_ts is not None and ts < self.min_ts) or now - ts > self.max_age:
+            return False
+        if len(self.items) == ARB_CAP:
+            self.items.pop(0)
+        self.items.append((ts, _arb_cls(action), conf))
+        lim = now - self.keep
+        while self.items and self.items[0][0] <= lim:
+            self.items.pop(0)
+        return True
+
+    def recent(self, now, n, max_win):
+        lo = now - max_win
+        got = 0
+        for ts, _, _ in list(reversed(self.items))[:n]:
+            if ts <= lo:
+                break
+            got += 1
+        return got
+
+    def count(self, now, win, c, floor=0.0):
+        lo = now - win
+        n = 0
+        for ts, k, cf in reversed(self.items):
+            if ts <= lo:
+                break
+            if k == c and cf >= floor:
+                n += 1
+        return n
+
+    def total(self, now, win):
+        lo = now - win
+        n = 0
+        for ts, _, _ in reversed(self.items):
+            if ts <= lo:
+                break
+            n += 1
+        return n
+
+    def last_n_pos(self, now, n, max_win):
+        lo = now - max_win
+        pos = 0
+        for ts, k, _ in list(reversed(self.items))[:n]:
+            if ts <= lo:
+                break
+            if k == 1:
+                pos += 1
+        return pos
+
+
+class FusionArbiter(object):
+    """FusionArbiter.java 的移植。decide() 返回 'do' / 'Noise' / ''，reason 是写进 CSV arb 列的原因。"""
+
+    def __init__(self, params=None):
+        p = dict(ARB_DEFAULTS)
+        for k in ARB_DEFAULTS:
+            if params and k in params:
+                p[k] = params[k]
+        self.p = p
+        self.v_floor = f32(p['ARB_V_FLOOR'])      # Java 里是 float 常量，边界比较按单精度
+        self.a_floor = f32(p['ARB_A_FLOOR'])
+        self.video = ArbLedger(p['ARB_MAX_AGE'], p['ARB_KEEP'])
+        self.audio = ArbLedger(p['ARB_MAX_AGE'], p['ARB_KEEP'])
+        self.last_support = -1
+        self.prev_now = None
+        self.reset_at = None
+        self.reason = ''
+
+    def reset(self, now, warmup=0):
+        self.video.reset(now + warmup)
+        self.audio.reset(now + warmup)
+        self.last_support = -1
+        self.prev_now = None
+        self.reset_at = now
+        self.reason = ''
+
+    def _has_neg(self, now):
+        w = self.p['ARB_NEG_WIN']
+        return self.video.count(now, w, -1) + self.audio.count(now, w, -1) > 0
+
+    def _video_support(self, now, cons_pct):
+        p = self.p
+        if self.video.last_n_pos(now, p['ARB_MV_N'], p['ARB_M_MAX']) < p['ARB_MV_K']:
+            return False
+        n = self.video.total(now, p['ARB_CONS_WIN'])
+        k = self.video.count(now, p['ARB_CONS_WIN'], 1)
+        return n > 0 and k * 100 >= cons_pct * n
+
+    def decide(self, now, v, vc, v_ts, a, ac, a_ts, motor_on):
+        p = self.p
+        if self.prev_now is not None and now < self.prev_now:
+            self.reset(now)                          # 墙钟往回跳
+        self.prev_now = now
+        self.video.feed(v, vc, v_ts, now)
+        self.audio.feed(a, ac, a_ts, now)
+        if not motor_on:
+            self.last_support = -1
+            if self.video.count(now, p['ARB_C_WIN'], 1, self.v_floor) >= p['ARB_C_V'] and \
+                    self.audio.count(now, p['ARB_C_WIN'], 1, self.a_floor) >= p['ARB_C_A'] and \
+                    (self._video_support(now, p['ARB_START_V_CONS'])
+                     or self.audio.last_n_pos(now, p['ARB_MA_N'], p['ARB_M_MAX']) >= p['ARB_START_MA_K']):
+                self.reason = 'start_both'
+                return 'do'
+            n = self.audio.total(now, p['ARB_Z_WIN'])
+            if n >= p['ARB_Z_N'] and self.audio.count(now, p['ARB_Z_WIN'], 1) == n:
+                self.reason = 'start_audio'
+                return 'do'
+            if self._has_neg(now):
+                self.reason = 'off_neg'
+                return 'Noise'
+            self.reason = 'off_wait'
+            return ''
+        if self.last_support < 0:
+            self.last_support = now
+        sa = self.audio.last_n_pos(now, p['ARB_MA_N'], p['ARB_M_MAX']) >= p['ARB_MA_K']
+        sv = self._video_support(now, p['ARB_V_CONS'])
+        if sv or sa:
+            self.last_support = now
+            self.reason = 'hold_both' if (sv and sa) else ('hold_video' if sv else 'hold_audio')
+            return 'do'
+        waiting = now - self.last_support < p['ARB_UNCLEAR_MAX']
+        cold = self.reset_at is not None and now - self.reset_at < p['ARB_COLD']
+        if waiting and cold and (self.audio.recent(now, p['ARB_MA_N'], p['ARB_M_MAX']) < p['ARB_MA_N']
+                                 or self.video.recent(now, p['ARB_MV_N'], p['ARB_M_MAX']) < p['ARB_MV_N']):
+            self.reason = 'wait_sparse'
+            return 'do'
+        if self._has_neg(now):
+            self.reason = 'stop_neg'
+            return 'Noise'
+        if not waiting:
+            self.reason = 'stop_unclear'
+            return 'Noise'
+        self.reason = 'wait_unclear'
+        return 'do'
+
+
+def parse_arb_reset(text):
+    """run CSV 的 arb_reset 列 '<ms>[+<预热ms>][:seek]' -> (ms, warmup, seek)；空串返回 None。"""
+    text = (text or '').strip()
+    if not text:
+        return None
+    m = re.match(r'^(-?\d+)(?:\+(\d+))?(:seek)?$', text)
+    if not m:
+        raise ValueError('arb_reset 列格式不对: %r' % text)
+    return int(m.group(1)), int(m.group(2) or 0), bool(m.group(3))
+
+
+def ble_seek_reset(ble):
+    """seek 时 app 对蓝牙状态机做的清空（VideoProcessActivity 的 seek 处理；发送间隔与上次发出的档位不清）。"""
+    ble.cur = ''
+    ble.cur_start = 0
+    ble.pend = ''
+    ble.pend_start = 0
+    ble.level = 1
+    ble.level_since = 0
+    ble.pend_level = None
+    ble.pend_level_since = 0
+
+
+def _tick_ts(t, which):
+    age = t.v_age if which == 'v' else t.a_age
+    return None if age is None or age < 0 else t.wall - age
+
+
+def replay_legacy(ticks, params, actions=None, arbiter=None, reasons=None):
+    """现有融合的回放。actions: 可选，逐 tick 替换 (v, vc, a, ac)。
+
+    arbiter: None = 按 run 的参数行（有 ARB= 用融合仲裁，否则用旧的 applyDoStartGate）；
+             True / False = 强制用融合仲裁 / 旧启动仲裁（eval 里两者并排比较）。
+    reasons: 可选 list，融合仲裁每个 tick 的原因追加进去（check 比对 arb 列用）。"""
+    use_arb = bool(params.get('ARB')) if arbiter is None else arbiter
+    if use_arb and params.get('ARB') and params['ARB'] not in ARB_VERSIONS:
+        print('⚠ run 的参数行是 ARB=%s，这份回放只实现了 %s：结果可能对不上' % (params['ARB'], '/'.join(ARB_VERSIONS)))
     core, ble, out = LegacyCore(params), Ble(params), []
+    arb = FusionArbiter(params) if use_arb else None
     for i, t in enumerate(ticks):
         v, vc, a, ac = actions[i] if actions else (t.v, t.vc, t.a, t.ac)
+        rs = parse_arb_reset((getattr(t, 'log', None) or {}).get('arb_reset', '')) if arb is not None else None
+        if rs:                                       # app 在这个 tick 之前 reset 过（seek / 恢复播放）
+            ms, warm, seek = rs
+            if seek:                                 # seek 还清空了投票窗和蓝牙状态
+                core = LegacyCore(params)
+                ble_seek_reset(ble)
+            arb.reset(ms, warm)
         sm = core.smoothed(v, a, vc, ac)
-        g = core.gate(sm, v, vc, a, ac, ble.cur)
+        if arb is not None:
+            g = arb.decide(t.wall, v, vc, _tick_ts(t, 'v'), a, ac, _tick_ts(t, 'a'), _is_sex(ble.cur))
+            if reasons is not None:
+                reasons.append(arb.reason)
+        else:
+            g = core.gate(sm, v, vc, a, ac, ble.cur)
         ff = final_freq(t.loud_lv, t.loud_conf, ble.level)
         sent = ble.update(g, ff, t.wall) if g else None
         out.append(Step(sm, g, ff, ble.cur, ble.level, sent, None, None, None))
@@ -1193,7 +1425,9 @@ def fit(train, cost, variant='evidence', grid=GRID, exhaustive=False, top_k=10):
 def run_policy(video, policy, cfg=None):
     """返回 (状态切换点, 逐 tick Step)。"""
     if policy == 'legacy':
-        steps = replay_legacy(video.ticks, video.params)
+        steps = replay_legacy(video.ticks, video.params, arbiter=False)
+    elif policy == 'arbiter':
+        steps = replay_legacy(video.ticks, video.params, arbiter=True)
     elif policy == 'always':
         steps = []
         ble = Ble(video.params)
@@ -1205,7 +1439,7 @@ def run_policy(video, policy, cfg=None):
     return transitions_from_steps(video.ticks, steps), steps
 
 
-POLICIES = [('legacy', '现有融合'), ('always', '一直转'), ('video_only', '只用视频'),
+POLICIES = [('legacy', '旧融合'), ('arbiter', '融合仲裁'), ('always', '一直转'), ('video_only', '只用视频'),
             ('audio_only', '只用音频'), ('evidence', '证据融合')]
 
 
@@ -1275,7 +1509,7 @@ def evaluate_all(videos, cost, grid, log=print, variants=('video_only', 'audio_o
     sp = dict((p, []) for p, _ in POLICIES)       # [(kind, Score, 秒数)]
     for v in videos:
         for p, _ in POLICIES:
-            if p in ('legacy', 'always'):
+            if p in ('legacy', 'arbiter', 'always'):
                 cfg = None
             elif p in variants:
                 cfg = folds[(v.vid, p)][1]
@@ -1351,11 +1585,13 @@ def cmd_check(args):
             steps = replay_evidence(v.ticks, cfg, v.params)
             what = '证据融合（%s）' % cfg.meta.get('id', '?')
         else:
-            steps = replay_legacy(v.ticks, v.params)
-            what = '现有融合'
-        agree = dict((c, 0) for c in cols)
+            reasons = []
+            steps = replay_legacy(v.ticks, v.params, reasons=reasons)
+            what = '融合仲裁（%s）' % v.params['ARB'] if v.params.get('ARB') else '旧融合（applyDoStartGate）'
+        vcols = cols + ('arb',) if v.params.get('ARB') else cols
+        agree = dict((c, 0) for c in vcols)
         divs = []
-        for t, s in zip(v.ticks, steps):
+        for k, (t, s) in enumerate(zip(v.ticks, steps)):
             lg = t.log
             got = {'smoothed': s.smoothed, 'gated': s.gated, 'final_freq': str(s.final_freq),
                    'ble_state': s.ble_state, 'ble_level': str(s.ble_level),
@@ -1363,7 +1599,10 @@ def cmd_check(args):
             want = dict((c, lg.get(c, '')) for c in cols[:-1])
             want['sent'] = ('%s/%s' % (lg.get('sent_action'), lg.get('sent_level'))) \
                 if lg.get('sent') == '1' else ''
-            for c in cols:
+            if 'arb' in vcols:
+                got['arb'] = reasons[k]
+                want['arb'] = lg.get('arb', '')
+            for c in vcols:
                 if got[c] == want[c]:
                     agree[c] += 1
                 elif len(divs) < args.show:
@@ -1377,9 +1616,11 @@ def cmd_check(args):
                 same += M.state_at(tl, i * GRID_MS) == M.state_at(tr, i * GRID_MS)
         tl_agree = same / float(cells) if cells else 1.0
         worst = min(worst, tl_agree, agree['gated'] / n)
+        if 'arb' in vcols:                            # 原因也要对上：输出相同但走的规则不同，说明两边实现已经分叉
+            worst = min(worst, agree['arb'] / n)
         sl, sr = Score.of(v, tl, Cost()), Score.of(v, tr, Cost())
         print('══ %s  %s  回放：%s ══' % (v.vid, os.path.basename(v.run_path), what))
-        print('  逐 tick 一致率  ' + '  '.join('%s %.2f%%' % (c, 100.0 * agree[c] / n) for c in cols))
+        print('  逐 tick 一致率  ' + '  '.join('%s %.2f%%' % (c, 100.0 * agree[c] / n) for c in vcols))
         print('  马达状态时间线一致率 %.2f%%   准确率 实测 %s / 回放 %s'
               % (100.0 * tl_agree, _pct(sl.acc()).strip(), _pct(sr.acc()).strip()))
         for pos, c, w, g in divs:
@@ -1408,7 +1649,9 @@ def cmd_eval(args):
     print('  · 准确率/误转/漏转/误停只算真实片子：误转 = 剧情时长里马达在转的比例，漏转 = 动作时长里马达没转的比例。')
     print('  · 启动后没转 / 停止后还转：拼接样本里，切换点之后马达"该转没转" / "该停还转"的秒数（中位数，括号里是')
     print('    ≥40 秒、基本等于没切过去的个数）。拼接处感知是瞬间切换的，比真实片子乐观约 1~2 秒。')
-    print('  · 代价 = 真实片子 + 拼接样本（误转秒×fp + 漏转秒×fn + 误停次数×stop）。\n')
+    print('  · 代价 = 真实片子 + 拼接样本（误转秒×fp + 漏转秒×fn + 误停次数×stop）。')
+    print('  · 旧融合与融合仲裁不拟合：旧融合是手调的固定参数；融合仲裁的参数是在这几部片上定的（样本内），')
+    print('    它的留一数字看 bench/tools/arbiter_lab.py lovo。\n')
     return 0
 
 
@@ -1439,15 +1682,276 @@ def cmd_oracle(args):
     grid = QUICK_GRID if args.quick else GRID
     videos = load_videos(args.gt_dir, args.runs_dir, args.pair, args.policy)
     print('\n模态上限：把某个模态的输出换成真值（窗口末端的真值，无感知延迟），看端到端最多能到多少。')
-    print('现有融合不用拟合；证据融合按留一视频交叉验证重新拟合。\n')
+    print('旧融合 / 融合仲裁不用拟合；证据融合按留一视频交叉验证重新拟合。\n')
     scen = [('实际模型', ''), ('视频完美', 'v'), ('音频完美', 'a')]
-    pols = [('legacy', '现有融合'), ('evidence', '证据融合')]
+    pols = [('legacy', '旧融合'), ('arbiter', '融合仲裁'), ('evidence', '证据融合')]
     for name, which in scen:
         vs = [oracle_video(v, which) if which else v for v in videos]
         per, sp, _, _ = evaluate_all(vs, cost, grid, log=lambda *a: None, variants=('evidence',),
                                      exhaustive=args.exhaustive, jobs=args.jobs)
         print_table(name, vs, per, sp, pols, show_videos=False)
-    print('  · 如果"视频完美"在现有融合下几乎不涨、在证据融合下大涨，说明现有融合挡住了视频侧的改进。')
+    print('  · 如果"视频完美"在某种融合下几乎不涨，说明这种融合挡住了视频侧的改进（旧融合基本只听音频）。')
+    print('  · 融合仲裁里视频单独就能维持（音频听不到目标声音时靠它），所以"音频完美"也压不住视频在剧情里的长时间误判。')
+    return 0
+
+
+# ======================================================================== 对拍数据（Java 单元测试用）
+GOLDEN_PATH = os.path.join(ROOT, 'app', 'src', 'test', 'resources', 'fusion', 'arbiter_golden.csv')
+GOLDEN_HEADER = 'reset,now,v_action,v_conf,v_ts,a_action,a_conf,a_ts,motor_on,exp_action,exp_reason'
+
+
+def _gf(x):
+    """float 写成 Java Float.parseFloat 能还原成同一个单精度值的十进制串。"""
+    return '%.9g' % f32(x)
+
+
+def _golden_rows_from_video(video, lo, hi):
+    """真实 run 的一段：按 app 的方式回放（融合仲裁 + 蓝牙状态机），逐 tick 记下输入和期望输出。"""
+    arb, ble, rows = FusionArbiter(), Ble(video.params), []
+    first = True
+    for t in video.ticks:
+        if not (lo <= t.pos < hi):
+            continue
+        vts, ats = _tick_ts(t, 'v'), _tick_ts(t, 'a')
+        on = _is_sex(ble.cur)
+        if first:
+            arb.reset(t.wall)        # 这一段从 seek 开始：之前产出的结果不算（Java 端同样先 reset）
+        g = arb.decide(t.wall, t.v, t.vc, vts, t.a, t.ac, ats, on)
+        rows.append((t.wall if first else '', t.wall, t.v, t.vc, -1 if vts is None else vts,
+                     t.a, t.ac, -1 if ats is None else ats, on, g, arb.reason))
+        first = False
+        if g:
+            ble.update(g, final_freq(t.loud_lv, t.loud_conf, ble.level), t.wall)
+    return rows
+
+
+def _golden_rows_synthetic():
+    """边界用例：每一条都让被测的边界真正决定输出（评审用变异测试查过：边界写错一个符号就会对不上）。"""
+    rows = []
+    T = 1700000000000
+    arb = FusionArbiter()
+    W = ARB_DEFAULTS
+
+    def tick(now, v='', vc=0.0, vts=-1, a='', ac=0.0, ats=-1, on=False, reset=None):
+        if reset is not None:
+            ms, warm = (int(x) for x in str(reset).split('+')) if '+' in str(reset) else (int(reset), 0)
+            arb.reset(ms, warm)
+        g = arb.decide(now, v, f32(vc), vts, a, f32(ac), ats, on)
+        rows.append(('' if reset is None else reset, now, v, f32(vc), vts, a, f32(ac), ats, on, g, arb.reason))
+        return g
+
+    # 1) 两路佐证：置信度恰好等于下限（0.85f / 0.90f）算"强"，再低一点不算
+    t = T
+    tick(t, reset=t)
+    for k in range(6):                                       # 先攒够维持条件（视频一致性）
+        tick(t + 500 * (k + 1), 'do', 0.85, t + 500 * (k + 1) - 10)
+    tick(t + 3500, 'do', 0.85, t + 3490, 'do', 0.90, t + 3495)                       # start_both
+    t = T + 50000
+    tick(t, reset=t)
+    for k in range(6):
+        tick(t + 500 * (k + 1), 'do', 0.8499999, t + 500 * (k + 1) - 10)
+    tick(t + 3500, 'do', 0.8499999, t + 3490, 'do', 0.90, t + 3495)                  # 视频不够强：不启动
+    # 2) 窗口边界：ts == now - win 不在窗口内（NEG_WIN）
+    t = T + 100000
+    tick(t, reset=t)
+    tick(t + 200, 'Noise', 0.9, t + 100)                                             # off_neg
+    tick(t + 100 + W['ARB_NEG_WIN'] - 1, 'Noise', 0.9, t + 100)                      # 还在窗口内
+    tick(t + 100 + W['ARB_NEG_WIN'], 'Noise', 0.9, t + 100)                          # 恰好出窗：off_wait
+    # 3) 过期边界：产出 2000ms 的结果还记，2001ms 的不记
+    for age, base in ((W['ARB_MAX_AGE'], T + 150000), (W['ARB_MAX_AGE'] + 1, T + 160000)):
+        tick(base, reset=base)
+        tick(base + 10 + age, 'Noise', 0.9, base + 10)
+    # 4) reset 边界：产出时刻 == reset 时刻的结果算，早 1ms 的不算
+    for off, base in ((0, T + 170000), (-1, T + 180000)):
+        tick(base + 100, 'Noise', 0.9, base + off, reset=base)
+    # 5) 同一个结果重复出现只算一次：一个音频结果撑不起"4 个里 3 个"
+    t = T + 200000
+    tick(t, on=True, reset=t)
+    for k in range(6):
+        tick(t + 500 * (k + 1), a='do', ac=0.95, ats=t + 100, on=True)
+    # 6) 音频兜底：9 秒内 >=4 个结果全是"转"才启动；夹一个 unclear 就要等它滑出窗口
+    t = T + 300000
+    tick(t, reset=t)
+    seq = ['do', 'do', '', 'do', 'do', 'do', 'do', 'do', 'do', 'do', 'do', 'do', 'do', 'do']
+    for i, x in enumerate(seq):
+        now = t + 1000 * (i + 1)
+        tick(now, 'Noise', 0.99, now - 300, x, 0.80 if x else 0.0, now - 50)
+    # 7) 维持：音频 4 个里 3 个"转"撑得住，2 个撑不住；有"不转"就停，看不清有上限
+    t = T + 400000
+    tick(t, on=True, reset=t)
+    pattern = ['do', 'do', 'do', 'do', 'Noise', 'do', 'Noise', 'Noise', '', '', '', '', '', '', '', '', '']
+    for i, x in enumerate(pattern):
+        now = t + 1000 * (i + 1)
+        for d in (0, 500):
+            tick(now + d, 'Noise', 0.9, now + d - 100, x, 0.9 if x else 0.0, now - 100, True)
+    # 8) 维持·视频一致性：恰好 70%（7/10）算支持，6/10 不算
+    for pos_n in (7, 6):
+        t = T + 500000 + pos_n * 100000
+        tick(t, on=True, reset=t)
+        for i in range(10):
+            now = t + 500 * (i + 1)
+            x = 'do' if i >= 10 - pos_n else 'Noise'
+            tick(now, x, 0.9, now - 50, 'do', 0.9, now - 30 if i % 2 == 0 else now - 530, True)
+    # 9) 刚恢复（reset 后马达仍在转）：音频结果还不够 4 个时，视频一个"剧情"不能把马达停掉
+    t = T + 1300000
+    tick(t, on=True, reset=t)
+    for k in range(12):
+        now = t + 500 * (k + 1)
+        tick(now, 'Noise', 0.9, now - 100, 'do', 0.95, t + 1000 * (k // 2) + 900 if k >= 2 else -1, True)
+    # 10) 两路都是"转""不转"交替的强证据：不满足维持条件就不启动（防止每 2 秒开关一次）
+    t = T + 1400000
+    tick(t, reset=t)
+    for k in range(20):
+        now = t + 500 * (k + 1)
+        tick(now, 'do' if k % 2 else 'Noise', 0.95, now - 50, 'do' if (k // 2) % 2 else 'Noise', 0.95,
+             now - 100 if k % 2 == 0 else now - 600)
+    # 11) 停转后不转（马达不转时 lastSupport 必须清零）：再转起来时从头计"看不清"的等待
+    t = T + 1500000
+    tick(t, on=True, reset=t)
+    for k in range(4):
+        tick(t + 1000 * (k + 1), a='do', ac=0.95, ats=t + 1000 * (k + 1) - 10, on=True)
+    for k in range(20):
+        tick(t + 5000 + 500 * k)
+    tick(t + 15500, on=True)
+    tick(t + 16000, on=True)
+    # 12) 墙钟往回跳：自动 reset；"未来"的旧结果不记，也不挡住之后的新结果
+    t = T + 1600000
+    tick(t, on=True, reset=t)
+    for k in range(4):
+        tick(t + 1000 * (k + 1), a='do', ac=0.95, ats=t + 1000 * (k + 1) - 10, on=True)
+    back = t + 4000 - 60000
+    tick(back, a='do', ac=0.95, ats=t + 3990, on=True)
+    for k in range(4):
+        tick(back + 1000 * (k + 1), 'Noise', 0.9, back + 1000 * (k + 1) - 20, 'Noise', 0.9,
+             back + 1000 * (k + 1) - 10, True)
+    # 14) 两路都只有 unclear：结果够了但判断不出，最多再转 UNCLEAR_MAX 然后停
+    t = T + 1650000
+    tick(t, on=True, reset=t)
+    for k in range(16):
+        now = t + 500 * (k + 1)
+        tick(now, '', 0.0, now - 20, '', 0.0, t + 1000 * (k // 2) + 400, True)
+    # 15) 置信度比下限低 1 ulp：视频 / 音频都不算"强"（各自只差这一点，就启动不了）
+    def below(x):
+        return struct.unpack('<f', struct.pack('<I', struct.unpack('<I', struct.pack('<f', x))[0] - 1))[0]
+    for vfl, afl, base in ((below(f32(0.85)), 0.95, T + 2000000), (0.95, below(f32(0.90)), T + 2010000),
+                           (f32(0.85), f32(0.90), T + 2020000)):
+        tick(base, reset=base)
+        for k in range(10):
+            tick(base + 400 * (k + 1), 'do', vfl, base + 400 * (k + 1) - 5, 'Noise', 0.9, base + 400 * (k + 1) - 300)
+        tick(base + 4400, 'do', vfl, base + 4395, 'do', afl, base + 4390)
+    # 16) 音频兜底窗口的下沿：9 秒前那个"不转"恰好出窗才启动
+    for edge, base in ((1, T + 2100000), (0, T + 2120000)):
+        tick(base, reset=base)
+        tick(base + 10, a='Noise', ac=0.9, ats=base)
+        for k in range(1, 9):
+            tick(base + 1000 * k + 10, a='do', ac=0.7, ats=base + 1000 * k)
+        tick(base + W['ARB_Z_WIN'] - edge, a='do', ac=0.7, ats=base + 8000)
+    # 17) 环形缓冲容量 128：一个"不转"之后又来了 127 个"转"时它还在，第 128 个"转"把它挤掉才启动
+    base = T + 2200000
+    tick(base, reset=base)
+    tick(base + 1, a='Noise', ac=0.9, ats=base + 1)
+    for k in range(ARB_CAP):
+        tick(base + 2 + k, a='do', ac=0.7, ats=base + 2 + k)
+    # 18) reset 之后不能沿用 reset 之前的"上一个 now"去判断墙钟往回跳
+    base = T + 2300000
+    tick(base + 5000, reset=base + 4000)
+    tick(base + 3000, 'Noise', 0.9, base + 2500, reset=base)
+    # 19) 静音恢复的预热：reset(T, 2000) 之后，T+2000 之前产出的结果不算
+    for off, base in ((1999, T + 2400000), (2000, T + 2410000)):
+        tick(base, reset='%d+%d' % (base, 2000))
+        tick(base + off + 100, 'Noise', 0.9, base + off)
+    # 19b) 预热对音频同样生效
+    for off, base in ((1999, T + 2420000), (2000, T + 2430000)):
+        tick(base, reset='%d+%d' % (base, 2000))
+        tick(base + off + 100, a='Noise', ac=0.9, ats=base + off)
+    # 19c) 冷启动窗口从 reset 时刻算，不从预热结束算：预热 2 秒，6.2 秒时已经不等了
+    base = T + 2440000
+    tick(base, on=True, reset='%d+%d' % (base, 2000))
+    for k, (x, ts) in enumerate((('do', 2100), ('do', 3100), ('do', 4100), ('Noise', 5100), ('Noise', 6100))):
+        tick(base + ts + 100, a=x, ac=0.9, ats=base + ts, on=True)
+    # 20) 冷启动窗口的上沿：reset 后 6 秒内结果不够判断的一路可以让马达先等，6 秒整就不等了
+    base = T + 2500000
+    tick(base, on=True, reset=base)
+    for k in range(1, 12):
+        tick(base + 500 * k, 'Noise', 0.9, base + 500 * k - 10, '', 0.0, -1, True)
+    tick(base + W['ARB_COLD'] - 1, 'Noise', 0.9, base + 5490, '', 0.0, -1, True)
+    tick(base + W['ARB_COLD'], 'Noise', 0.9, base + 5490, '', 0.0, -1, True)
+    # 21) 启动迟滞：两路佐证要视频"转"占比 >= 80%（维持只要 70%），或音频最近 4 个全是"转"（维持只要 3 个）
+    for vpos, apat, base in ((8, 'NDDD', T + 2600000), (7, 'NDDD', T + 2610000), (5, 'DDDD', T + 2620000),
+                             (5, 'NDDD', T + 2630000)):
+        tick(base, reset=base)
+        for k in range(10):
+            now = base + 500 * (k + 1)
+            vv = 'do' if k >= 10 - vpos else 'Noise'
+            aa = {'N': 'Noise', 'D': 'do'}[apat[(k - 6) // 1]] if k >= 6 else ''
+            tick(now, vv, 0.95, now - 5, aa, 0.95 if aa else 0.0, now - 10 if aa else -1)
+    # 13) 两路佐证的窗口边界：第二个强视频结果恰好 C_WIN 前产出就不算
+    for edge, base in ((0, T + 1700000), (1, T + 1710000)):
+        tick(base, reset=base)
+        for k in range(8):
+            tick(base + 400 * (k + 1), 'do', 0.95, base + 400 * (k + 1) - 5)
+        last = base + 3200 - 5
+        tick(last - 400 + W['ARB_C_WIN'] - edge, 'do', 0.5, last - 400 + W['ARB_C_WIN'] - edge - 1,
+             'do', 0.95, last - 400 + W['ARB_C_WIN'] - edge - 1)
+    return rows
+
+
+def _golden_rows_random(seed=20261007, n=3000):
+    """固定种子的随机序列：间隔、重复 / 倒序 / 过期时间戳、恰好在下限上的置信度、马达状态翻转、中途 reset。"""
+    import random
+    rnd = random.Random(seed)
+    arb, rows = FusionArbiter(), []
+    now = 1750000000000
+    on = False
+    last = {'v': None, 'a': None}
+    confs = [0.5, 0.849999, 0.85, 0.850001, 0.899999, 0.9, 0.900001, 0.95, 0.99, 1.0]
+    acts = ['do', 'do', 'do', 'Noise', 'Noise', '']
+    reset = now
+    arb.reset(now)
+    for i in range(n):
+        now += rnd.choice([0, 1, 499, 500, 500, 500, 501, 999, 1000, 2000, 2001, 7000])
+        if rnd.random() < 0.01:
+            reset = now - rnd.choice([0, 1, 500])
+            arb.reset(reset)
+        else:
+            reset = ''
+        for m in ('v', 'a'):
+            r = rnd.random()
+            if r < 0.45 or last[m] is None:
+                last[m] = (rnd.choice(acts), f32(rnd.choice(confs)), now - rnd.choice([0, 1, 50, 300, 1999, 2000, 2001, 2500]))
+            elif r < 0.5:
+                last[m] = (last[m][0], last[m][1], last[m][2] - rnd.choice([1, 100]))      # 倒序时间戳
+        if rnd.random() < 0.08:
+            on = not on
+        v, a = last['v'], last['a']
+        g = arb.decide(now, v[0], v[1], v[2], a[0], a[1], a[2], on)
+        rows.append((reset, now, v[0], v[1], v[2], a[0], a[1], a[2], on, g, arb.reason))
+    return rows
+
+
+def cmd_golden(args):
+    """生成 FusionArbiterTest 的对拍数据：真实 run 的几段 + 合成边界用例。"""
+    videos = load_videos(args.gt_dir, args.runs_dir, args.pair, args.policy, quiet=True)
+    rows = []
+    for v in videos:
+        if v.vid not in ('v01', 'v03', 'v04', 'v07'):
+            continue
+        trans = [s for s, e, lab in v.segs[1:]]
+        for c in trans[:3]:
+            rows += _golden_rows_from_video(v, max(0, c - 60000), c + 60000)
+    rows += _golden_rows_synthetic()
+    rows += _golden_rows_random()
+    os.makedirs(os.path.dirname(args.out), exist_ok=True)
+    with io.open(args.out, 'w', encoding='utf-8', newline='\n') as fh:
+        fh.write(GOLDEN_HEADER + '\n')
+        for r in rows:
+            reset, now, v, vc, vts, a, ac, ats, on, g, why = r
+            fh.write(','.join([str(reset), str(now), v, _gf(vc), str(vts), a, _gf(ac), str(ats),
+                               '1' if on else '0', g, why]) + '\n')
+    reasons = {}
+    for r in rows:
+        reasons[r[-1]] = reasons.get(r[-1], 0) + 1
+    print('写入 %s：%d 行；原因覆盖 %s' % (args.out, len(rows), sorted(reasons.items())))
     return 0
 
 
@@ -1526,27 +2030,29 @@ def _synth_video(seed, layout, vid='syn', policy='exclude'):
     return Video(vid, segs, dur, ticks, p, policy=policy)
 
 
-def _write_synth(video, gt_path, run_path, fusion=''):
+def _write_synth(video, gt_path, run_path, fusion='', extra_params='', corrupt_arb_every=0):
     with io.open(gt_path, 'w', encoding='utf-8', newline='\n') as fh:
         fh.write('# xcup-gt spec_version=1\n# video_id=%s\n# duration_ms=%d\n' % (video.vid, video.dur))
         fh.write('start_ms,end_ms,label,note\n')
         for s, e, l in video.segs:
             fh.write('%d,%d,%s,\n' % (s, e, l))
     with io.open(run_path, 'w', encoding='utf-8', newline='\n') as fh:
-        fh.write('# xcup-bench-run v1\n# video_name=%s\n# params: %s%s\n' % (
+        fh.write('# xcup-bench-run v1\n# video_name=%s\n# params: %s%s%s\n' % (
             video.vid, ' '.join('%s=%s' % kv for kv in sorted(LEGACY_DEFAULTS.items())),
-            (' FUSION=' + fusion) if fusion else ''))
+            (' FUSION=' + fusion) if fusion else '', (' ' + extra_params) if extra_params else ''))
         fh.write(','.join(M.RUN_COLS_NEEDED) + '\n')
-        for t in video.ticks:
+        for k, t in enumerate(video.ticks):
             def pr(ps, i):
                 return '' if ps is None else '%.4f' % ps[i]
             lg = t.log
-            row = [t.pos, t.wall, t.v, '%.4f' % t.vc, t.v_age, pr(t.vp, 0), pr(t.vp, 1), pr(t.vp, 2),
-                   t.a, '%.4f' % t.ac, t.a_age, pr(t.ap, 0), pr(t.ap, 1), pr(t.ap, 2),
+            row = [t.pos, t.wall, t.v, '%.6f' % t.vc, t.v_age, pr(t.vp, 0), pr(t.vp, 1), pr(t.vp, 2),
+                   t.a, '%.6f' % t.ac, t.a_age, pr(t.ap, 0), pr(t.ap, 1), pr(t.ap, 2),
                    t.loud_lv, '%.4f' % t.loud_conf, 1, 100,
                    lg['smoothed'], lg['gated'], lg['final_freq'], lg['ble_state'], lg['ble_level'],
-                   lg['sent'], lg['sent_action'], lg['sent_level']]
-            row += [''] * (len(M.RUN_COLS_NEEDED) - len(row))      # 后加的列（a_pos）留空
+                   lg['sent'], lg['sent_action'], lg['sent_level'], -1,
+                   'bogus' if corrupt_arb_every and k % corrupt_arb_every == 0 else lg.get('arb', ''),
+                   lg.get('arb_reset', '')]
+            row += [''] * (len(M.RUN_COLS_NEEDED) - len(row))
             fh.write(','.join(str(x) for x in row) + '\n')
 
 
@@ -1746,6 +2252,80 @@ def selftest():
     check(yt[0].ap == (f32(0.6), f32(0.1), f32(0.3)),
           '带 a_ys_* 的 run 应读成 3 维音频向量 [sex, oral, noise]，实际 %r' % (yt[0].ap,))
 
+    # 10. 维持时交 'do' 会取消状态机里没执行的停转计时；交 '' 不会（旧计时保留，下一次 Noise 立刻停）
+    params0 = dict(LEGACY_DEFAULTS)
+    T0 = 100000
+    for hold, want_stop_at in (('do', T0 + 4500), ('', T0 + 3500)):
+        ble = Ble(params0)
+        check(ble.update('do', 1, T0) is not None, '状态机应在 T0 启动')
+        ble.update('Noise', 1, T0 + 2500)            # 出现 Noise，开始停转计时（需稳定 1 秒）
+        if hold:
+            ble.update(hold, 1, T0 + 3000)           # 维持仲裁交 'do'；交 '' 时融合循环根本不调状态机
+        stops = [t for t in (T0 + 3500, T0 + 4000, T0 + 4500) if ble.update('Noise', 1, t) is not None]
+        check(stops[:1] == [want_stop_at], '维持时交 %r：期望 %dms 停转，实际 %r' % (hold, want_stop_at, stops))
+    # 11. 融合仲裁：参数行解析 + 按 ARB= 自动切换回放方式 + 同一结果不重复计数
+    pp = parse_params('VIDEO_DO=0.65 AUDIO_PIPE=fixed ' + 'ARB=v1 ARB_V_FLOOR=0.85 ARB_Z_WIN=9000 ARB_MV_N=4')
+    check(pp['ARB'] == 'v1' and pp['ARB_V_FLOOR'] == 0.85 and pp['ARB_Z_WIN'] == 9000
+          and isinstance(pp['ARB_Z_WIN'], int) and parse_params('VIDEO_DO=0.65')['ARB'] == '',
+          'ARB 参数行解析不对: %r' % ({k: pp[k] for k in pp if k.startswith('ARB')},))
+    arb = FusionArbiter()
+    arb.reset(1000)
+    for k in range(6):                               # 同一个音频结果在 6 个 tick 里重复出现
+        g = arb.decide(1500 + 500 * k, '', 0.0, None, 'do', f32(0.95), 1400, True)
+    check(g == 'do' and arb.reason == 'wait_sparse',
+          '同一个结果只该算一次（1 个结果不构成支持、音频还判断不了），实际 %r/%r' % (g, arb.reason))
+
+    # 11b. 提交进仓库的 Java 对拍数据，Python 移植逐行重放也必须一致（只改 Python 不改 Java 时这里会报）
+    if os.path.exists(GOLDEN_PATH):
+        ga = FusionArbiter()
+        bad = []
+        with io.open(GOLDEN_PATH, encoding='utf-8') as fh:
+            head = fh.readline().strip()
+            check(head == GOLDEN_HEADER, '对拍数据表头不对: %r' % head)
+            for ln, line in enumerate(fh, 2):
+                f = line.rstrip('\n').split(',')
+                if f[0]:
+                    ms, _, warm = f[0].partition('+')
+                    ga.reset(int(ms), int(warm or 0))
+                g = ga.decide(int(f[1]), f[2], f32(float(f[3])), int(f[4]), f[5], f32(float(f[6])), int(f[7]),
+                              f[8] == '1')
+                if (g, ga.reason) != (f[9], f[10]) and len(bad) < 3:
+                    bad.append('第 %d 行 期望 %s/%s 实际 %s/%s' % (ln, f[9], f[10], g, ga.reason))
+        check(not bad, 'Python 移植重放 %s 对不上（改了规则就重新 golden）: %s' % (GOLDEN_PATH, bad))
+
+    # 12. 新格式 run（ARB=v1 + arb / arb_reset 列，中途 reset 过）：check 逐 tick 对得上；原因列错 5% 时 check 判不可信
+    arb_params = 'ARB=v1 ' + ' '.join('%s=%s' % kv for kv in sorted(ARB_DEFAULTS.items()))
+    v0 = syn[0]
+    phone = [t.copy(log=dict(t.log)) for t in v0.ticks]
+    for i in (len(phone) // 3, 2 * len(phone) // 3):
+        phone[i].log['arb_reset'] = str(phone[i].wall - 200)
+    pp = parse_params(' '.join('%s=%s' % kv for kv in sorted(LEGACY_DEFAULTS.items())) + ' ' + arb_params)
+    why = []
+    for t, st in zip(phone, replay_legacy(phone, pp, reasons=why)):
+        t.log.update({'smoothed': st.smoothed, 'gated': st.gated, 'final_freq': str(st.final_freq),
+                      'ble_state': st.ble_state, 'ble_level': str(st.ble_level),
+                      'sent': '1' if st.sent else '0', 'sent_action': st.sent[0] if st.sent else '',
+                      'sent_level': str(st.sent[1]) if st.sent else '-1'})
+    for t, r in zip(phone, why):
+        t.log['arb'] = r
+    adir = os.path.join(tmp, 'arb')
+    os.makedirs(os.path.join(adir, 'gt'))
+    os.makedirs(os.path.join(adir, 'runs'))
+    for corrupt in (0, 20):
+        _write_synth(v0.with_ticks(phone), os.path.join(adir, 'gt', v0.vid + '.csv'),
+                     os.path.join(adir, 'runs', v0.vid + '_base.csv'), extra_params=arb_params,
+                     corrupt_arb_every=corrupt)
+        ns = argparse.Namespace(gt_dir=os.path.join(adir, 'gt'), runs_dir=os.path.join(adir, 'runs'), pair=[],
+                                policy='exclude', show=0, config=None)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            rc = cmd_check(ns)
+        txt = out.getvalue()
+        if corrupt:
+            check(rc == 1, '原因列 5%% 对不上时 check 应判不可信:\n%s' % txt)
+        else:
+            check(rc == 0 and 'arb 100.00%' in txt and 'gated 100.00%' in txt,
+                  '新格式 run（含 reset 记号）回放应逐 tick 一致:\n%s' % txt)
+
     for f in fails:
         print('  FAIL ' + f)
     print('selftest: %s' % ('FAILED (%d)' % len(fails) if fails else 'ALL PASS'))
@@ -1783,10 +2363,15 @@ def main():
         p.add_argument('--jobs', type=int, default=0,
                        help='留一拟合用几个进程并行（默认 0 = CPU 核数；1 = 串行）')
 
+    p = sub.add_parser('golden', help='生成 FusionArbiterTest 的对拍数据（改了融合仲裁的规则/参数后要重新生成）')
+    common(p)
+    p.set_defaults(runs_dir=os.path.join(ROOT, 'bench', 'runs_fixed'))
+    p.add_argument('--out', default=GOLDEN_PATH)
+
     a = ap.parse_args()
     if a.selftest:
         sys.exit(selftest())
-    fn = {'check': cmd_check, 'eval': cmd_eval, 'oracle': cmd_oracle}.get(a.cmd)
+    fn = {'check': cmd_check, 'eval': cmd_eval, 'oracle': cmd_oracle, 'golden': cmd_golden}.get(a.cmd)
     if fn is None:
         ap.print_help()
         sys.exit(2)

@@ -72,33 +72,29 @@ public class VideoProcessActivity extends AppCompatActivity {
     private int originalWidth = 0;       // UI新增
     private int originalHeight = 0;      // UI新增
 
-    // 使用原子引用来安全地在线程间共享结果
-    private final AtomicReference<String> latestAudioAction = new AtomicReference<>("");
-    private final AtomicReference<String> latestVideoAction = new AtomicReference<>("");
-    private final AtomicReference<Float> latestAudioConfidence = new AtomicReference<>(0f);
-    private final AtomicReference<Float> latestVideoConfidence = new AtomicReference<>(0f);
     // 显示蓝牙发送的动作
     private final AtomicReference<String> latestBluetoothAction = new AtomicReference<>("");
-    // 添加时间戳记录
-    private final AtomicReference<Long> latestVideoTimestamp = new AtomicReference<>(0L);
-    private final AtomicReference<Long> latestAudioTimestamp = new AtomicReference<>(0L);
 
-    // [评测] 模型结果快照（原始概率 + 产出时刻）作为一个对象原子发布，只写评测 CSV、不参与判定：
-    // CSV 里的概率和 v_age/a_age 必须来自同一个结果，不能是"新概率配旧时间戳"
+    // 模型结果快照：判定（动作串 + 置信度）、原始概率、产出时刻作为<b>一个</b>对象原子发布，融合线程只读这一个对象。
+    // 融合仲裁按产出时刻去重，动作和时间戳必须来自同一次推理；评测 CSV 的概率和 v_age/a_age 也取自它。
     private final AtomicReference<ResultSnap> latestVideoSnap = new AtomicReference<>(null);
     private final AtomicReference<ResultSnap> latestAudioSnap = new AtomicReference<>(null);
 
     /**
-     * [评测] 一次模型推理的结果快照。probs 为 null 表示推理失败。
+     * 一次模型推理的结果快照。action 是分组概率判定（"do"/"Noise"/"" unclear），probs 为 null 表示推理失败。
      * winEndPosMs 只有音频有（视频为 -1）：读 PCM 时的播放位置，写进评测 CSV 的 a_pos 列，
      * bench/tools/audio_rescore.py 离线重算时靠它精确还原模型窗口。
      */
     private static final class ResultSnap {
+        final String action;
+        final float conf;
         final float[] probs;
         final long tsMs;            // 结果产出时刻（墙钟）
         final long winEndPosMs;     // 模型窗口 = [winEndPosMs-2s, winEndPosMs]
 
-        ResultSnap(float[] probs, long tsMs, long winEndPosMs) {
+        ResultSnap(String action, float conf, float[] probs, long tsMs, long winEndPosMs) {
+            this.action = action;
+            this.conf = conf;
             this.probs = probs;
             this.tsMs = tsMs;
             this.winEndPosMs = winEndPosMs;
@@ -109,27 +105,16 @@ public class VideoProcessActivity extends AppCompatActivity {
     // [延迟优化] 窗口从 10 收缩到 6：融合循环现为 500ms 一次，6 条记录约覆盖 3 秒。
     // 稳定性保护统一交给 updateBluetoothState 的状态机（最短持续/发送间隔/停转确认），
     // 平滑窗口只负责压制单次抖动，不再叠加长时间惯性。
+    // [2026-10-07] 平滑投票不再参与决策（由 FusionArbiter 决定），只写进评测 CSV 的 smoothed 列作对照。
     private static final int SMOOTH_WINDOW_SIZE = 6;
     // 动作在窗口内至少出现的次数（音视频各计一次），低于该次数不参与投票
     private static final int SMOOTH_MIN_COUNT = 3;
     // [快通道] 音视频同一 tick 给出相同动作且双双高置信度时，绕过投票直接输出该动作。
-    // 停转方向的安全性由蓝牙状态机兜底（do->Noise 仍需稳定 1000ms + 最短持续 2000ms）。
     private static final float FUSION_FASTPATH_VIDEO_CONF = 0.70f;
     private static final float FUSION_FASTPATH_AUDIO_CONF = 0.70f;
-    // [启动仲裁] 实测音频模型准确度高于视频模型，因此视频不对启动拥有否决权，
-    // 只在“视频剧情证据明显强于音频 do 证据”时短暂延迟启动（有硬上限，绝不永久阻塞）。
-    // 冲突判定：videoAction==Noise 且 videoConf >= VIDEO_PLOT_CONFLICT_CONF
-    //           且 (videoConf - audioDoConf) >= FUSION_CONFLICT_MARGIN
-    private static final float VIDEO_PLOT_CONFLICT_CONF = 0.80f;
-    private static final float FUSION_CONFLICT_MARGIN = 0.15f;
-    // 冲突延迟上限：连续冲突超过该 tick 数后仍放行，避免视频误判把音频永久锁死
-    private static final int CONFLICT_MAX_HOLD_TICKS = 4;
-    // 强音频直通：音频 do 置信度达到该值时无需视频背书，直接允许启动
-    private static final float AUDIO_STRONG_START_CONF = 0.75f;
-    // 弱证据兜底：音频 do 但置信度不高、且窗口内无视频 do 证据时，需连续这么多 tick 才启动
-    private static final int AUDIO_ONLY_START_TICKS = 2;
-    private int audioOnlyDoStreak = 0;  // 连续纯音频 do 的融合 tick 计数（仅主线程融合循环访问）
-    private int conflictHoldTicks = 0;  // 连续音视频强冲突的 tick 计数（仅主线程融合循环访问）
+    // [融合仲裁] 启动 / 维持 / 停止 分开判断，替代原来的 applyDoStartGate（规则见 FusionArbiter）。
+    // 只在融合线程（主线程）访问；seek / 恢复分析时 reset。
+    private final FusionArbiter fusionArbiter = new FusionArbiter();
     private final LinkedList<ActionRecord> actionHistory = new LinkedList<>();
     private final Object historyLock = new Object(); // 用于同步访问actionHistory
 
@@ -411,7 +396,7 @@ public class VideoProcessActivity extends AppCompatActivity {
                     boolean isPlayingNow = videoView.isPlaying();
                     if (isPlayingNow != lastPlayingState) {
                         if (isPlayingNow) {
-                            resumeAnalysis();
+                            resumeAnalysis(false);
                         } else {
                             pauseAnalysis();
                         }
@@ -581,17 +566,12 @@ public class VideoProcessActivity extends AppCompatActivity {
             }
         }
 
-        // [评测] 原始概率 + 产出时刻打包成快照原子发布（评测 CSV 的 v_p_* / v_age 取自它），
-        // 推理失败时 probs 为 null
+        // 判定 + 原始概率 + 产出时刻打包成一个快照原子发布（推理失败时 probs 为 null）
         long resultTs = System.currentTimeMillis();
         boolean probsOk = result != null && result.index >= 0
                 && result.probs != null && result.probs.length >= 3;
-        latestVideoSnap.set(new ResultSnap(probsOk ? result.probs.clone() : null, resultTs, -1));
-
-        // 原子更新结果
-        latestVideoAction.set(actionClass);
-        latestVideoConfidence.set(confidence);
-        latestVideoTimestamp.set(resultTs);
+        latestVideoSnap.set(new ResultSnap(actionClass, confidence,
+                probsOk ? result.probs.clone() : null, resultTs, -1));
 
         final String displayText = actionClass.isEmpty()
                 ? "V: unclear"
@@ -692,17 +672,12 @@ public class VideoProcessActivity extends AppCompatActivity {
                                     }
                                 }
 
-                                // [评测] 原始概率 + 产出时刻 + 读窗位置打包成快照原子发布
+                                // 判定 + 原始概率 + 产出时刻 + 读窗位置打包成一个快照原子发布
                                 // （评测 CSV 的 a_p_* / a_age / a_pos 取自它）
                                 long resultTs = System.currentTimeMillis();
                                 boolean probsOk = result.index >= 0 && result.probs.length >= 3;
-                                latestAudioSnap.set(new ResultSnap(
+                                latestAudioSnap.set(new ResultSnap(action, confidence,
                                         probsOk ? result.probs.clone() : null, resultTs, currentMs));
-
-                                // 原子更新结果
-                                latestAudioAction.set(action);
-                                latestAudioConfidence.set(confidence);
-                                latestAudioTimestamp.set(resultTs);
 
                                 // UI更新
                                 final String displayText = action.isEmpty()
@@ -761,16 +736,15 @@ public class VideoProcessActivity extends AppCompatActivity {
                 }
                 long t0 = System.currentTimeMillis();
 
-                // 读取最新的分析结果（原子操作，线程安全）
-                String videoAction = latestVideoAction.get();
-                String audioAction = latestAudioAction.get();
-                float videoConf = latestVideoConfidence.get();
-                float audioConf = latestAudioConfidence.get();
-                long videoTime = latestVideoTimestamp.get();
-                long audioTime = latestAudioTimestamp.get();
-                // [评测] 模型结果快照，只写评测 CSV（与上面的动作串最多差一个推理周期，各自内部一致）
+                // 读取最新的分析结果：每个模态只读一个快照对象，动作、置信度、产出时刻保证来自同一次推理
                 ResultSnap vSnap = latestVideoSnap.get();
                 ResultSnap aSnap = latestAudioSnap.get();
+                String videoAction = vSnap == null ? "" : vSnap.action;
+                String audioAction = aSnap == null ? "" : aSnap.action;
+                float videoConf = vSnap == null ? 0f : vSnap.conf;
+                float audioConf = aSnap == null ? 0f : aSnap.conf;
+                long videoTime = vSnap == null ? 0L : vSnap.tsMs;
+                long audioTime = aSnap == null ? 0L : aSnap.tsMs;
 
                 // 音频节奏
                 boolean audioFreqValid = latestAudioLoudValid.get();
@@ -815,13 +789,15 @@ public class VideoProcessActivity extends AppCompatActivity {
                 // 注：oral/sex 的归并已在各分析线程内完成（applyVideoResult / 音频循环
                 // 的分组概率决策只输出 "do"/"Noise"/""），此处无需再做 oral->do 归一化。
 
-                // 7.19 修改：使用平滑融合替代原有的简单融合逻辑
-                String finalAction = smoothedFusion(videoAction, audioAction, videoConf, audioConf);
-                // [评测] 留存平滑级输出，dump 时才能把融合延迟和仲裁延迟分开看
-                final String smoothedAction = finalAction;
+                // 旧的平滑投票：不再参与决策，只写进评测 CSV 的 smoothed 列，便于同一份 run 新旧对照
+                final String smoothedAction = smoothedFusion(videoAction, audioAction, videoConf, audioConf);
 
-                // [启动仲裁] 音视频强冲突时短暂延迟启动（有上限）；音频足够自信则直接启动
-                finalAction = applyDoStartGate(finalAction, videoAction, videoConf, audioAction, audioConf);
+                // [融合仲裁] 启动 / 维持 / 停止 分开判断，证据按"新推理结果"计数（按快照的产出时刻去重；
+                // 与评测 CSV 的 v_age/a_age 同源，离线回放才能逐 tick 复现）
+                String finalAction = fusionArbiter.decide(currentTime,
+                        videoAction, videoConf, videoTime > 0 ? videoTime : -1,
+                        audioAction, audioConf, audioTime > 0 ? audioTime : -1,
+                        isSexAction(currentBluetoothState));
                 // 临时采用音频节律作为最终节律
                 // 将“最终节律计算”封装为独立方法，便于后续替换为音视频融合节律
                 int finalFreq = computeFinalFreq(audioFreq, audioFreqConf);
@@ -854,7 +830,8 @@ public class VideoProcessActivity extends AppCompatActivity {
                             Float.isNaN(audioFreq) ? -1 : Math.round(audioFreq),
                             audioFreqConf, audioFreqValid, audioFreqAge,
                             smoothedAction, finalAction, finalFreq,
-                            currentBluetoothState, currentLevel);
+                            currentBluetoothState, currentLevel,
+                            fusionArbiter.lastReason());
                 }
 
                 // 更新UI, 显示蓝牙实际发送的动作
@@ -1027,91 +1004,6 @@ public class VideoProcessActivity extends AppCompatActivity {
 
             return bestAction;
         }
-    }
-
-    /**
-     * [启动仲裁] 对融合结果为 "do" 的<b>启动</b>过程做冲突仲裁；仅影响“从非 do 状态启动 do”，
-     * 已处于 do 状态时（维持阶段）音频可以单独维持，不做任何限制。
-     *
-     * <p>设计前提：实测音频模型准确度高于视频模型，因此视频<b>不</b>拥有否决权，只能在
-     * 与音频强烈冲突时把启动短暂推迟，且推迟有硬上限。规则按序：</p>
-     * <ol>
-     *   <li><b>强冲突延迟</b>：视频判剧情且置信度 ≥ {@link #VIDEO_PLOT_CONFLICT_CONF}，
-     *       同时比音频的 do 置信度高出 {@link #FUSION_CONFLICT_MARGIN} 以上 -> 本 tick 不启动；
-     *       但连续冲突超过 {@link #CONFLICT_MAX_HOLD_TICKS} 个 tick 后强制放行，
-     *       避免视频持续误判（暗光/特写/非常规机位）把正确的音频永久锁死。</li>
-     *   <li><b>强音频直通</b>：音频 do 置信度 ≥ {@link #AUDIO_STRONG_START_CONF} -> 立即放行，
-     *       不需要视频背书。</li>
-     *   <li><b>视频证据放行</b>：平滑窗口内存在任一条视频 "do" -> 放行。</li>
-     *   <li><b>弱证据兜底</b>：以上都不满足（音频 do 但置信度不高、视频也没有证据）时，
-     *       要求连续 {@link #AUDIO_ONLY_START_TICKS} 个 tick 才启动。</li>
-     * </ol>
-     *
-     * <p>被拦下时返回 ""（本 tick 不驱动蓝牙状态机，维持现状），不主动发送 Noise。
-     * 最坏情况下的启动延迟为 CONFLICT_MAX_HOLD_TICKS + AUDIO_ONLY_START_TICKS = 6 tick（约 3 秒）。</p>
-     */
-    private String applyDoStartGate(String finalAction, String videoAction, float videoConf,
-                                    String audioAction, float audioConf) {
-        if (!"do".equals(finalAction)) {
-            audioOnlyDoStreak = 0;
-            conflictHoldTicks = 0;
-            return finalAction;
-        }
-        // 维持阶段：当前蓝牙状态已是 do，音频单独维持即可
-        if (isSexAction(currentBluetoothState)) {
-            audioOnlyDoStreak = 0;
-            conflictHoldTicks = 0;
-            return finalAction;
-        }
-
-        // 音频本 tick 支持 do 时的置信度；音频不支持 do 则记为 0
-        float audioDoConf = "do".equals(audioAction) ? audioConf : 0f;
-
-        // 规则 1：强冲突延迟（有上限，绝不永久阻塞）
-        boolean strongConflict = "Noise".equals(videoAction)
-                && videoConf >= VIDEO_PLOT_CONFLICT_CONF
-                && (videoConf - audioDoConf) >= FUSION_CONFLICT_MARGIN;
-        if (strongConflict) {
-            conflictHoldTicks++;
-            if (conflictHoldTicks <= CONFLICT_MAX_HOLD_TICKS) {
-                Log.d(TAG, String.format(
-                        "[启动仲裁] 音视频强冲突(V:Noise %.2f vs A:do %.2f)，延迟启动 (%d/%d tick)",
-                        videoConf, audioDoConf, conflictHoldTicks, CONFLICT_MAX_HOLD_TICKS));
-                return "";
-            }
-            // 冲突持续超过上限：视频可能在系统性误判，按“音频更可信”放行
-            Log.d(TAG, String.format(
-                    "[启动仲裁] 强冲突已持续 %d tick 超过上限，按音频优先放行启动", conflictHoldTicks));
-        } else {
-            conflictHoldTicks = 0;
-        }
-
-        // 规则 2：强音频直通
-        if (audioDoConf >= AUDIO_STRONG_START_CONF) {
-            audioOnlyDoStreak = 0;
-            Log.d(TAG, String.format("[启动仲裁] 音频 do 置信度 %.2f 达直通门槛，放行启动", audioDoConf));
-            return finalAction;
-        }
-
-        // 规则 3：窗口内有视频 do 证据 -> 放行
-        synchronized (historyLock) {
-            for (ActionRecord record : actionHistory) {
-                if ("do".equals(record.videoAction)) {
-                    audioOnlyDoStreak = 0;
-                    return finalAction;
-                }
-            }
-        }
-
-        // 规则 4：弱证据兜底，需要连续多个 tick 支持
-        audioOnlyDoStreak++;
-        if (audioOnlyDoStreak >= AUDIO_ONLY_START_TICKS) {
-            Log.d(TAG, "[启动仲裁] 弱证据 do 已连续 " + audioOnlyDoStreak + " tick，放行启动");
-            return finalAction;
-        }
-        Log.d(TAG, String.format("[启动仲裁] 弱证据 do (%d/%d tick)，暂不启动",
-                audioOnlyDoStreak, AUDIO_ONLY_START_TICKS));
-        return "";
     }
 
     // 简单的动作选择逻辑（用于历史记录不足时）
@@ -1398,23 +1290,32 @@ public class VideoProcessActivity extends AppCompatActivity {
         return String.format(Locale.US,
                 "VIDEO_DO=%.2f VIDEO_PLOT=%.2f AUDIO_DO=%.2f AUDIO_NOISE=%.2f "
                         + "SMOOTH_WIN=%d SMOOTH_MIN=%d FASTPATH_V=%.2f FASTPATH_A=%.2f "
-                        + "PLOT_CONFLICT=%.2f CONFLICT_MARGIN=%.2f CONFLICT_HOLD=%d "
-                        + "AUDIO_STRONG=%.2f AUDIO_ONLY_TICKS=%d "
                         + "BLE_MIN_DUR=%d BLE_GAP=%d LEVEL_STABLE=%d LEVEL_MIN_DUR=%d "
-                        + "FUSION_TICK=%d VIDEO_INFER=%d AUDIO_INFER=%d AUDIO_PIPE=%s",
+                        + "FUSION_TICK=%d VIDEO_INFER=%d AUDIO_INFER=%d AUDIO_PIPE=%s ",
                 VIDEO_DO_PROB_THRESHOLD, VIDEO_PLOT_PROB_THRESHOLD,
                 AUDIO_DO_PROB_THRESHOLD, AUDIO_NOISE_PROB_THRESHOLD,
                 SMOOTH_WINDOW_SIZE, SMOOTH_MIN_COUNT,
                 FUSION_FASTPATH_VIDEO_CONF, FUSION_FASTPATH_AUDIO_CONF,
-                VIDEO_PLOT_CONFLICT_CONF, FUSION_CONFLICT_MARGIN, CONFLICT_MAX_HOLD_TICKS,
-                AUDIO_STRONG_START_CONF, AUDIO_ONLY_START_TICKS,
                 BLUETOOTH_MIN_DURATION, BLUETOOTH_SEND_INTERVAL,
                 LEVEL_STABLE_MS, LEVEL_MIN_DUR_MS,
                 MAIN_FUSION_INTERVAL, VIDEO_INFERENCE_INTERVAL, AUDIO_INFERENCE_INTERVAL,
-                isWebVideoMode ? "web" : "fixed");
+                isWebVideoMode ? "web" : "fixed")
+                + FusionArbiter.paramsLine();
     }
 
 
+
+    /**
+     * 清空融合仲裁的证据（seek / 恢复播放），并在评测 CSV 里留下 reset 记号，离线回放才能同样处理。
+     *
+     * @param seek     这次是 seek（调用方还会清空蓝牙状态和投票窗，回放时一并清）
+     * @param warmupMs 再丢掉 reset 后这么久内产出的结果（静音暂停后恢复时用）
+     */
+    private void resetFusionArbiter(boolean seek, long warmupMs) {
+        long now = System.currentTimeMillis();
+        fusionArbiter.reset(now, warmupMs);
+        BenchLogger.get().noteArbReset(now, warmupMs, seek);
+    }
 
     /**
      * 处理视频seek完成
@@ -1446,9 +1347,8 @@ public class VideoProcessActivity extends AppCompatActivity {
                 actionHistory.clear();
                 Log.d(TAG, "[平滑融合] 清空历史记录（因为seek操作）");
             }
-            // [启动仲裁] seek 后重置启动计数
-            audioOnlyDoStreak = 0;
-            conflictHoldTicks = 0;
+            // [融合仲裁] seek 后清空证据：seek 之前产出的结果一律不算
+            resetFusionArbiter(true, 0);
 
             // 重置提取器, 通知视频帧抽取器：从当前时间开始解码
             videoFrameExtractor.seekTo(currentMs * 1000);
@@ -1457,14 +1357,6 @@ public class VideoProcessActivity extends AppCompatActivity {
             Log.d(TAG, "🎯 audioDecoder.seekTo() 调用，当前视频播放时间: " + currentMs);
             audioStartTime = currentMs;
 
-            // 如果之前已经播到结尾，清零标记并恢复分析
-            if (isVideoCompleted) {
-                isVideoCompleted = false;
-                // 只有当前已经在播放，才立刻恢复分析；否则继续保持暂停
-                if (videoView.isPlaying()) {
-                    resumeAnalysis();
-                }
-            }
             // 清空蓝牙控制动作缓存
             currentBluetoothState = "";
             pendingBluetoothState = "";
@@ -1480,6 +1372,16 @@ public class VideoProcessActivity extends AppCompatActivity {
             // ★ 新增：清空挂起状态（seek后旧动作已无意义）
             suspendedBluetoothState = "";
             suspendedLevel = 0;
+
+            // 如果之前已经播到结尾，清零标记并恢复分析。放在清空蓝牙状态 / 挂起动作之后：
+            // 否则 resumeAnalysis 会先把播完前挂起的旧动作发出去，紧接着状态又被清成 ""，app 和设备就对不上了。
+            if (isVideoCompleted) {
+                isVideoCompleted = false;
+                // 只有当前已经在播放，才立刻恢复分析；否则继续保持暂停
+                if (videoView.isPlaying()) {
+                    resumeAnalysis(false);
+                }
+            }
 
             // [12.30] reset loudness estimator
             loudnessEstimator.reset();
@@ -1616,9 +1518,8 @@ public class VideoProcessActivity extends AppCompatActivity {
         synchronized (historyLock) {
             actionHistory.clear();
         }
-        // [启动仲裁] 重置启动计数
-        audioOnlyDoStreak = 0;
-        conflictHoldTicks = 0;
+        // [融合仲裁] seek 后清空证据：seek 之前产出的结果一律不算
+        resetFusionArbiter(true, 0);
 
         audioStartTime = newPositionMs;
 
@@ -1722,7 +1623,7 @@ public class VideoProcessActivity extends AppCompatActivity {
             if (!webVadActive) {
                 webVadActive = true;
                 Log.i(TAG, "[网页VAD] 检测到音频活动，恢复分析");
-                mainHandler.post(VideoProcessActivity.this::resumeAnalysis);
+                mainHandler.post(() -> resumeAnalysis(true));
             }
         } else {
             webVadConsecutiveSilentTicks++;
@@ -1755,8 +1656,15 @@ public class VideoProcessActivity extends AppCompatActivity {
         Log.i(TAG, "暂停分析");
     }
 
-    private void resumeAnalysis() {
+    /**
+     * @param afterSilence 网页视频模式 VAD 因静音暂停后、声音回来时恢复：模型窗口里还混着暂停前的静音，
+     *                     融合仲裁先丢掉恢复后 2 秒内产出的结果
+     */
+    private void resumeAnalysis(boolean afterSilence) {
         isAnalysisPaused.set(false);
+        // [融合仲裁] 暂停前的证据已经过时，清空重来。恢复后马达若仍在转，仲裁会先等两路攒够新结果
+        // （wait_sparse，最多 6 秒），不会因为某一路刚出的一个"不转"就停。
+        resetFusionArbiter(false, afterSilence ? FusionArbiter.SILENCE_RESUME_WARMUP_MS : 0);
 
         // ★ 新增：恢复挂起的蓝牙动作
         if (!suspendedBluetoothState.isEmpty()) {

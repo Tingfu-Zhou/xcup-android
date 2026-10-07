@@ -125,6 +125,8 @@ def read_run(path):
             'ble_state': _norm(d.get('ble_state')), 'ble_level': i('ble_level'),
             'sent': i('sent') == 1, 'sent_action': _norm(d.get('sent_action')),
             'sent_level': i('sent_level', -1),
+            # FusionArbiter 的输出原因（2026-10-07 起的 run 才有；旧 run 为空）
+            'arb': (d.get('arb') or '').strip(),
         })
     rows.sort(key=lambda r: r['pos'])
     return meta, rows
@@ -305,18 +307,18 @@ def report_errors(segs, rows, policy, strans, top):
 
 def report_at(rows, t, half=5000):
     print('══ pos %s 附近的逐 tick 原始数据 ══' % sec(t))
-    print('  %-9s %-22s %-7s %-24s %-7s %-6s %-6s %-6s %s'
+    print('  %-9s %-22s %-7s %-24s %-7s %-6s %-6s %-13s %-6s %s'
           % ('pos', '视频 probs[plot,oral,sex]', 'V判定', '音频 probs[sex,oral,noise]',
-             'A判定', '平滑', '仲裁', '蓝牙', '发送'))
+             'A判定', '平滑', '仲裁', '仲裁原因', '蓝牙', '发送'))
     for r in rows:
         if not (t - half <= r['pos'] <= t + half):
             continue
         vp = '[%s]' % ','.join('%.2f' % x if x >= 0 else ' -- ' for x in r['vp'])
         ap = '[%s]' % ','.join('%.2f' % x if x >= 0 else ' -- ' for x in r['ap'])
-        print('  %-9s %-22s %-7s %-24s %-7s %-6s %-6s %-6s %s'
+        print('  %-9s %-22s %-7s %-24s %-7s %-6s %-6s %-13s %-6s %s'
               % (sec(r['pos']), vp, (r['v'] or 'unclear') + ('%.2f' % r['v_conf'] if r['v'] else ''),
                  ap, (r['a'] or 'unclear') + ('%.2f' % r['a_conf'] if r['a'] else ''),
-                 r['smoothed'] or '-', r['gated'] or '-',
+                 r['smoothed'] or '-', r['gated'] or '-', r['arb'] or '-',
                  '%s/%d' % (r['ble_state'] or '-', r['ble_level']),
                  ('→ %s lv%d' % (r['sent_action'], r['sent_level'])) if r['sent'] else ''))
     print()
@@ -544,7 +546,11 @@ RUN_COLS_NEEDED = ['pos_ms', 'wall_ms',
                    'smoothed', 'gated', 'final_freq',
                    'ble_state', 'ble_level', 'sent', 'sent_action', 'sent_level',
                    # 音频窗口结尾的播放位置，给 audio_rescore.py 还原模型窗口用
-                   'a_pos']
+                   'a_pos',
+                   # FusionArbiter 本 tick 的输出原因（start_both / hold_audio / stop_neg …）
+                   'arb',
+                   # 这一行之前 FusionArbiter reset 的时刻（seek / 恢复播放；没有为空），回放时同样 reset
+                   'arb_reset']
 
 
 def _java_header():
@@ -593,7 +599,7 @@ def _write_run_csv(path, rows):
                         r['smoothed'], r['gated'], r['ble_level'],
                         r['ble_state'], r['ble_level'],
                         1 if r['sent'] else 0, r['sent_action'], r['sent_level'],
-                        -1])
+                        -1, '', ''])
 
 
 def selftest():

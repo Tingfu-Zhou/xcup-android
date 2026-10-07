@@ -60,14 +60,11 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
     private final Object videoLock = new Object();
     private final Object audioLock = new Object();
 
-    // 使用原子引用来安全地在线程间共享结果
-    private final AtomicReference<String> latestAudioAction = new AtomicReference<>("");
-    private final AtomicReference<String> latestVideoAction = new AtomicReference<>("");
-    private final AtomicReference<Float> latestAudioConfidence = new AtomicReference<>(0f);
-    private final AtomicReference<Float> latestVideoConfidence = new AtomicReference<>(0f);
+    // 模型结果：动作串 + 置信度 + 产出时刻作为一个对象原子发布，融合线程只读这一个对象
+    // （融合仲裁按产出时刻去重，三者必须来自同一次推理）
+    private final AtomicReference<FusionArbiter.Result> latestVideoResult = new AtomicReference<>(null);
+    private final AtomicReference<FusionArbiter.Result> latestAudioResult = new AtomicReference<>(null);
     private final AtomicReference<String> latestBluetoothAction = new AtomicReference<>("");
-    private final AtomicReference<Long> latestVideoTimestamp = new AtomicReference<>(0L);
-    private final AtomicReference<Long> latestAudioTimestamp = new AtomicReference<>(0L);
 
     // 帧缓存环形缓冲：最近 3 秒、间隔 250ms 采样的 12 帧
     private final ArrayDeque<Bitmap> frameWindow = new ArrayDeque<>();
@@ -103,15 +100,9 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
     // [快通道] 音视频同一 tick 一致且双双高置信度时，绕过投票直接输出
     private static final float FUSION_FASTPATH_VIDEO_CONF = 0.70f;
     private static final float FUSION_FASTPATH_AUDIO_CONF = 0.70f;
-    // [启动仲裁] 实测音频模型准确度高于视频模型，视频不对启动拥有否决权，
-    // 只在“视频剧情证据明显强于音频 do 证据”时短暂延迟启动（参数与离线模式一致）
-    private static final float VIDEO_PLOT_CONFLICT_CONF = 0.80f;
-    private static final float FUSION_CONFLICT_MARGIN = 0.15f;
-    private static final int CONFLICT_MAX_HOLD_TICKS = 4;
-    private static final float AUDIO_STRONG_START_CONF = 0.75f;
-    private static final int AUDIO_ONLY_START_TICKS = 2;
-    private int audioOnlyDoStreak = 0;  // 连续纯音频 do 的融合 tick 计数（仅主线程融合循环访问）
-    private int conflictHoldTicks = 0;  // 连续音视频强冲突的 tick 计数（仅主线程融合循环访问）
+    // [融合仲裁] 启动 / 维持 / 停止 分开判断，替代原来的 applyDoStartGate（规则见 FusionArbiter，与离线模式共用）。
+    // 只在融合线程（主线程）访问；静音重置 / 恢复分析时 reset。平滑投票不再参与决策，只打日志作对照。
+    private final FusionArbiter fusionArbiter = new FusionArbiter();
     private final LinkedList<ActionRecord> actionHistory = new LinkedList<>();
     private final Object historyLock = new Object();
 
@@ -485,9 +476,7 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
         }
 
         // 原子更新结果
-        latestVideoAction.set(actionClass);
-        latestVideoConfidence.set(confidence);
-        latestVideoTimestamp.set(System.currentTimeMillis());
+        latestVideoResult.set(new FusionArbiter.Result(actionClass, confidence, System.currentTimeMillis()));
 
         String displayText = actionClass.isEmpty()
                 ? "V: unclear"
@@ -570,9 +559,7 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                                 }
                             }
 
-                            latestAudioAction.set(action);
-                            latestAudioConfidence.set(confidence);
-                            latestAudioTimestamp.set(System.currentTimeMillis());
+                            latestAudioResult.set(new FusionArbiter.Result(action, confidence, System.currentTimeMillis()));
 
                             final String displayText = action.isEmpty()
                                     ? "A: unclear"
@@ -613,12 +600,14 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                     // 仍然进行分析但不发送蓝牙命令
                 }
 
-                String videoAction = latestVideoAction.get();
-                String audioAction = latestAudioAction.get();
-                float videoConf = latestVideoConfidence.get();
-                float audioConf = latestAudioConfidence.get();
-                long videoTime = latestVideoTimestamp.get();
-                long audioTime = latestAudioTimestamp.get();
+                FusionArbiter.Result vRes = latestVideoResult.get();
+                FusionArbiter.Result aRes = latestAudioResult.get();
+                String videoAction = vRes == null ? "" : vRes.action;
+                String audioAction = aRes == null ? "" : aRes.action;
+                float videoConf = vRes == null ? 0f : vRes.conf;
+                float audioConf = aRes == null ? 0f : aRes.conf;
+                long videoTime = vRes == null ? 0L : vRes.tsMs;
+                long audioTime = aRes == null ? 0L : aRes.tsMs;
 
                 // 音频节奏
                 boolean audioFreqValid = latestAudioLoudValid.get();
@@ -659,10 +648,16 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                 // 注：oral/sex 的归并已在各分析线程内完成（分组概率决策只输出 "do"/"Noise"/""），
                 // 此处无需再做 oral->do 归一化。
 
-                String finalAction = smoothedFusion(videoAction, audioAction, videoConf, audioConf);
+                // 旧的平滑投票：不再参与决策，只打日志作对照
+                String smoothedAction = smoothedFusion(videoAction, audioAction, videoConf, audioConf);
 
-                // [启动仲裁] 音视频强冲突时短暂延迟启动（有上限）；音频足够自信则直接启动
-                finalAction = applyDoStartGate(finalAction, videoAction, videoConf, audioAction, audioConf);
+                // [融合仲裁] 启动 / 维持 / 停止 分开判断，证据按"新推理结果"计数（结果时间戳去重）
+                String finalAction = fusionArbiter.decide(currentTime,
+                        videoAction, videoConf, videoTime > 0 ? videoTime : -1,
+                        audioAction, audioConf, audioTime > 0 ? audioTime : -1,
+                        isSexAction(currentBluetoothState));
+                Log.d(TAG, String.format("[融合仲裁] %s -> %s（旧投票 %s）",
+                        fusionArbiter.lastReason(), finalAction, smoothedAction));
                 // 临时采用音频节律作为最终节律
                 // 将“最终节律计算”封装为独立方法，便于后续替换为音视频融合节律
                 int finalFreq = computeFinalFreq(audioFreq, audioFreqConf);
@@ -820,80 +815,6 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
 
             return bestAction;
         }
-    }
-
-    /**
-     * [启动仲裁] 对融合结果为 "do" 的<b>启动</b>过程做冲突仲裁；仅影响“从非 do 状态启动 do”，
-     * 已处于 do 状态时（维持阶段）音频可以单独维持，不做任何限制。
-     * 规则与离线模式 VideoProcessActivity#applyDoStartGate 完全一致：
-     * 1. 强冲突延迟：视频判剧情且置信度 ≥ 0.80 并比音频 do 置信度高出 0.15 以上 -> 本 tick 不启动；
-     *    连续冲突超过 CONFLICT_MAX_HOLD_TICKS 后强制放行，避免视频误判永久锁死音频；
-     * 2. 强音频直通：音频 do 置信度 ≥ AUDIO_STRONG_START_CONF -> 立即放行；
-     * 3. 视频证据放行：平滑窗口内存在任一条视频 "do" -> 放行；
-     * 4. 弱证据兜底：以上都不满足时需连续 AUDIO_ONLY_START_TICKS 个 tick 才启动；
-     * 被拦下时返回 ""（本 tick 不驱动蓝牙状态机，维持现状）。
-     */
-    private String applyDoStartGate(String finalAction, String videoAction, float videoConf,
-                                    String audioAction, float audioConf) {
-        if (!"do".equals(finalAction)) {
-            audioOnlyDoStreak = 0;
-            conflictHoldTicks = 0;
-            return finalAction;
-        }
-        // 维持阶段：当前蓝牙状态已是 do，音频单独维持即可
-        if (isSexAction(currentBluetoothState)) {
-            audioOnlyDoStreak = 0;
-            conflictHoldTicks = 0;
-            return finalAction;
-        }
-
-        // 音频本 tick 支持 do 时的置信度；音频不支持 do 则记为 0
-        float audioDoConf = "do".equals(audioAction) ? audioConf : 0f;
-
-        // 规则 1：强冲突延迟（有上限，绝不永久阻塞）
-        boolean strongConflict = "Noise".equals(videoAction)
-                && videoConf >= VIDEO_PLOT_CONFLICT_CONF
-                && (videoConf - audioDoConf) >= FUSION_CONFLICT_MARGIN;
-        if (strongConflict) {
-            conflictHoldTicks++;
-            if (conflictHoldTicks <= CONFLICT_MAX_HOLD_TICKS) {
-                Log.d(TAG, String.format(
-                        "[启动仲裁] 音视频强冲突(V:Noise %.2f vs A:do %.2f)，延迟启动 (%d/%d tick)",
-                        videoConf, audioDoConf, conflictHoldTicks, CONFLICT_MAX_HOLD_TICKS));
-                return "";
-            }
-            Log.d(TAG, String.format(
-                    "[启动仲裁] 强冲突已持续 %d tick 超过上限，按音频优先放行启动", conflictHoldTicks));
-        } else {
-            conflictHoldTicks = 0;
-        }
-
-        // 规则 2：强音频直通
-        if (audioDoConf >= AUDIO_STRONG_START_CONF) {
-            audioOnlyDoStreak = 0;
-            Log.d(TAG, String.format("[启动仲裁] 音频 do 置信度 %.2f 达直通门槛，放行启动", audioDoConf));
-            return finalAction;
-        }
-
-        // 规则 3：窗口内有视频 do 证据 -> 放行
-        synchronized (historyLock) {
-            for (ActionRecord record : actionHistory) {
-                if ("do".equals(record.videoAction)) {
-                    audioOnlyDoStreak = 0;
-                    return finalAction;
-                }
-            }
-        }
-
-        // 规则 4：弱证据兜底，需要连续多个 tick 支持
-        audioOnlyDoStreak++;
-        if (audioOnlyDoStreak >= AUDIO_ONLY_START_TICKS) {
-            Log.d(TAG, "[启动仲裁] 弱证据 do 已连续 " + audioOnlyDoStreak + " tick，放行启动");
-            return finalAction;
-        }
-        Log.d(TAG, String.format("[启动仲裁] 弱证据 do (%d/%d tick)，暂不启动",
-                audioOnlyDoStreak, AUDIO_ONLY_START_TICKS));
-        return "";
     }
 
     private String selectBestAction(String videoAction, String audioAction, float videoConf, float audioConf) {
@@ -1159,11 +1080,33 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
 
     private void pauseAnalysis() {
         isAnalysisPaused.set(true);
+        // 在线模式只在静音时暂停，而 OnlineAnalysisService 判定静音的同时已经直接给设备发了 Noise。
+        // 这里把蓝牙状态同步成 Noise：否则恢复后 app 以为马达还在转，维持时重申的 "do" 不会真正发出去，
+        // 马达就一直停着（表现为声音回来了杯子却不转）。
+        // 服务是在音频线程里发的 Noise，主线程这边可能紧接着又发出一个 "do"（比如档位重发），
+        // 所以这里在主线程再补发一次 Noise（重复发没有副作用），保证设备上最后一条是 Noise。
+        if (isSexAction(currentBluetoothState)) {
+            if (BLEManager.globalManager != null && BLEManager.globalManager.isConnected()
+                    && !BLEManager.globalManager.isPausedByLocal()) {
+                BLEManager.globalManager.sendAction("Noise", 0);
+            }
+            long now = System.currentTimeMillis();
+            currentBluetoothState = "Noise";
+            currentStateStartTime = now;
+            pendingBluetoothState = "Noise";
+            pendingStateStartTime = now;
+            lastBluetoothSendTime = now;
+            lastSentLevel = 0;
+            latestBluetoothAction.set("Noise");
+        }
         Log.i(TAG, "暂停分析");
     }
 
     private void resumeAnalysis() {
         isAnalysisPaused.set(false);
+        // [融合仲裁] 暂停前的证据已经过时，清空重来。在线模式只在静音时暂停，恢复后的头一两个结果的模型窗口里
+        // 还混着静音，一并丢掉（音频兜底启动要求窗口内全是"转"，一个陈旧的"不转"就会把启动拖后 9 秒）。
+        fusionArbiter.reset(System.currentTimeMillis(), FusionArbiter.SILENCE_RESUME_WARMUP_MS);
         Log.i(TAG, "恢复分析");
     }
 
@@ -1182,9 +1125,8 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
         synchronized (historyLock) {
             actionHistory.clear();
         }
-        // [启动仲裁] 重置启动计数
-        audioOnlyDoStreak = 0;
-        conflictHoldTicks = 0;
+        // [融合仲裁] 清空证据：重置之前产出的结果一律不算
+        fusionArbiter.reset(System.currentTimeMillis());
 
         // 清空蓝牙控制动作缓存
         currentBluetoothState = "";

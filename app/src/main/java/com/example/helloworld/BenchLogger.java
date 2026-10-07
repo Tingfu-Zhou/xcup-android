@@ -71,6 +71,11 @@ public final class BenchLogger {
     private boolean sent = false;
     private String sentAction = "";
     private int sentLevel = -1;
+    // FusionArbiter 上次 reset 的时刻 / 预热时长 / 是否 seek（seek 还会清空蓝牙状态与投票窗），
+    // 写进下一行的 arb_reset 列后清零。只在主线程访问。
+    private long arbResetMs = -1;
+    private long arbResetWarmupMs = 0;
+    private boolean arbResetSeek = false;
 
     /** 在 onCreate 里调一次。enabled=false 时后面所有调用都是空操作。 */
     public void init(Context ctx, Uri videoUri, String paramsLine) {
@@ -80,6 +85,9 @@ public final class BenchLogger {
         this.sent = false;
         this.sentAction = "";
         this.sentLevel = -1;
+        this.arbResetMs = -1;
+        this.arbResetWarmupMs = 0;
+        this.arbResetSeek = false;
         this.rowCount = 0;
         this.dropped = 0;
         this.failed = false;
@@ -105,6 +113,18 @@ public final class BenchLogger {
     }
 
     /**
+     * FusionArbiter.reset(ms, warmupMs) 时调一次。seek=true 表示这次是 seek：app 同时清空了蓝牙状态和投票窗。
+     * 离线回放（fusion_lab.py）看到 arb_reset 列有值，就在这一行之前同样处理，否则这样的 run 回放会和真机对不上。
+     * 列格式：{@code <ms>[+<warmupMs>][:seek]}。同一个 tick 之前多次 reset 时记最后一次，seek 标记保留。
+     */
+    public void noteArbReset(long ms, long warmupMs, boolean seek) {
+        if (!enabled) return;
+        arbResetMs = ms;
+        arbResetWarmupMs = warmupMs;
+        arbResetSeek |= seek;
+    }
+
+    /**
      * 每个融合 tick 末尾调一次，一行一个 tick。
      *
      * <p>vProbs/vAgeMs（及音频的）必须来自同一个模型结果快照：离线回放靠 wall_ms - age 还原
@@ -112,6 +132,7 @@ public final class BenchLogger {
      *
      * @param aPosMs     该音频结果读 PCM 时的播放位置（模型窗口 = [aPosMs-2s, aPosMs]），没有结果时 -1。
      *                   bench/tools/audio_rescore.py 靠它离线还原模型输入，不用再从出结果时刻反推
+     * @param arbReason  FusionArbiter 本 tick 的输出原因（start_both / hold_audio / stop_neg …）
      */
     public void tick(long posMs, long wallMs,
                      String vAction, float vConf, long vAgeMs, float[] vProbs,
@@ -119,16 +140,16 @@ public final class BenchLogger {
                      long aPosMs,
                      int loudLevel, float loudConf, boolean loudValid, long loudAgeMs,
                      String smoothed, String gated, int finalFreq,
-                     String bleState, int bleLevel) {
+                     String bleState, int bleLevel, String arbReason) {
         if (!enabled || failed) return;
         if (out == null && !open()) return;
 
         float[] vp = vProbs, ap = aProbs;
         StringBuilder sb = new StringBuilder(260);
         sb.append(posMs).append(',').append(wallMs).append(',');
-        sb.append(csv(vAction)).append(',').append(f(vConf)).append(',').append(age(vAgeMs)).append(',');
+        sb.append(csv(vAction)).append(',').append(f6(vConf)).append(',').append(age(vAgeMs)).append(',');
         sb.append(p(vp, 0)).append(',').append(p(vp, 1)).append(',').append(p(vp, 2)).append(',');
-        sb.append(csv(aAction)).append(',').append(f(aConf)).append(',').append(age(aAgeMs)).append(',');
+        sb.append(csv(aAction)).append(',').append(f6(aConf)).append(',').append(age(aAgeMs)).append(',');
         sb.append(p(ap, 0)).append(',').append(p(ap, 1)).append(',').append(p(ap, 2)).append(',');
         sb.append(loudLevel).append(',').append(f(loudConf)).append(',')
           .append(loudValid ? 1 : 0).append(',').append(age(loudAgeMs)).append(',');
@@ -136,6 +157,14 @@ public final class BenchLogger {
         sb.append(csv(bleState)).append(',').append(bleLevel).append(',')
           .append(sent ? 1 : 0).append(',').append(csv(sentAction)).append(',').append(sentLevel);
         sb.append(',').append(aPosMs < 0 ? -1 : aPosMs);
+        sb.append(',').append(csv(arbReason));
+        if (arbResetMs >= 0) {
+            sb.append(',').append(arbResetMs);
+            if (arbResetWarmupMs > 0) sb.append('+').append(arbResetWarmupMs);
+            if (arbResetSeek) sb.append(":seek");
+        } else {
+            sb.append(',');
+        }
 
         if (queue.offer(sb.toString())) {
             rowCount++;
@@ -146,6 +175,9 @@ public final class BenchLogger {
         sent = false;
         sentAction = "";
         sentLevel = -1;
+        arbResetMs = -1;
+        arbResetWarmupMs = 0;
+        arbResetSeek = false;
     }
 
     /** 在 onDestroy 里调用：排空队列、落盘、提示文件路径。 */
@@ -220,8 +252,9 @@ public final class BenchLogger {
                     + "loud_lv,loud_conf,loud_valid,loud_age,"
                     + "smoothed,gated,final_freq,"
                     + "ble_state,ble_level,sent,sent_action,sent_level,"
-                    // a_pos：音频窗口结尾的播放位置
-                    + "a_pos\n");
+                    // a_pos：音频窗口结尾的播放位置；arb：FusionArbiter 的输出原因；
+                    // arb_reset：这一行之前 FusionArbiter reset 的记号 <ms>[+<预热ms>][:seek]（没有为空）
+                    + "a_pos,arb,arb_reset\n");
             out.flush();
             writerThread = new Thread(this::drain, "BenchLoggerWriter");
             writerThread.setDaemon(true);
@@ -301,6 +334,14 @@ public final class BenchLogger {
 
     private static String f(float v) {
         return Float.isNaN(v) ? "" : String.format(Locale.US, "%.4f", v);
+    }
+
+    /**
+     * 置信度写成能精确还原的最短十进制（Float.toString）：FusionArbiter 拿它和 0.85 / 0.90 比，
+     * 少写几位的话，恰好在下限附近的值回放时会翻转。
+     */
+    private static String f6(float v) {
+        return Float.isNaN(v) ? "" : Float.toString(v);
     }
 
     /** 过期时长可能是 Long.MAX_VALUE（从未出结果），统一写 -1。 */
