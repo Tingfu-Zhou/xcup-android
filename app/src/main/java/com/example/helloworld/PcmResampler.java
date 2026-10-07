@@ -5,7 +5,7 @@ package com.example.helloworld;
  *
  * <p>早先的 AudioDecoder（已删除）没看声道数，把交错立体声（L R L R …）当单声道，每 4 秒块只用前一半：
  * 双声道片源送进模型的是 0.5 倍速、低八度的音频（bench/tools/audio_rescore.py check 在 6 部片上
- * 证实了这一点，见 bench/README.md）。这里做正确的处理：</p>
+ * 证实了这一点，见提交 20f08f9 里 bench/README.md 的"音频解码修复"一节）。这里做正确的处理：</p>
  * <ol>
  *   <li>下混：各声道取平均。</li>
  *   <li>重采样：Blackman 窗 sinc 低通插值，截止 {@value #CUTOFF_HZ}Hz（YAMNet 的 mel 上限是 7500Hz），

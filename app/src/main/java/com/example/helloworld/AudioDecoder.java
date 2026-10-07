@@ -20,7 +20,7 @@ import java.util.function.Supplier;
  * AudioDecoder只负责实时解码并把 PCM 数据送入 PcmCircularBuffer。
  * 每个解码 buffer 交给 {@link PcmResampler}（按声道下混 + 抗混叠重采样到 16kHz），连续写入、不丢样本，
  * 模型窗口就是真正的 [T-2s, T]。原来把交错立体声当单声道、送进模型的是 0.5 倍速音频的处理已删除
- * （见 bench/README.md 的"音频解码修复"）。
+ * （证据和分析见提交 20f08f9 里 bench/README.md 的"音频解码修复"一节）。
  */
 public class AudioDecoder {
 
