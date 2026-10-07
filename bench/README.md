@@ -60,7 +60,8 @@ python3 bench/tools/metrics.py bench/gt/v01.csv bench/runs_fixed/v01_base.csv --
 
 `FusionArbiter.java`（纯 Java），离线 / 网页视频 / 在线三种模式共用。融合循环每 500ms 调一次 `decide()`：输入是两个
 分析线程判出的动作（`"do"` / `"Noise"` / `""`）、置信度和结果产出时刻，输出交给 `updateBluetoothState`（蓝牙状态机没有改）。
-旧的投票窗 `smoothedFusion` 还在算，但只写进 `smoothed` 列作对照。证据按"新推理结果"计数：同一个结果在几个 tick 里
+旧融合（投票窗 `smoothedFusion` + 快通道 + `selectBestAction`、启动仲裁 `applyDoStartGate`）已从 app 删除，
+`fusion_lab.py` 里留有 Python 版，作"旧融合"对照、回放旧 run。证据按"新推理结果"计数：同一个结果在几个 tick 里
 重复出现只算一次，产出超过 2 秒的不记。
 
 | 阶段 | 规则 |
@@ -205,8 +206,8 @@ node bench/tools/test_labeler.js
 | 列 | 含义 |
 |---|---|
 | `a_pos` | 该音频结果读 PCM 时的播放位置，模型窗口 = `[a_pos-2s, a_pos]` |
-| `arb` | 融合仲裁本 tick 的原因（见第 3 节）。`gated` 是融合仲裁的输出，`smoothed` 是旧投票（只作对照） |
-| `arb_reset` | 这一行之前的 reset：`<ms>[+<预热ms>][:seek]`。回放时同样 reset，带 `:seek` 的还清空蓝牙状态和旧投票窗 |
+| `arb` | 融合仲裁本 tick 的原因（见第 3 节）。`gated` 是融合仲裁的输出。旧融合时期的 run 还有 `smoothed` 列（投票窗），新 run 没有 |
+| `arb_reset` | 这一行之前的 reset：`<ms>[+<预热ms>][:seek]`。回放时同样 reset，带 `:seek` 的还清空蓝牙状态（旧融合回放时也清空投票窗） |
 | `a_ys_*` | AudioSet 类别分数（Speech、Music、Moan 等，见 `metrics.YS_CLASSES`），只有 `rescore` 写 |
 
 ## 时间线
@@ -214,4 +215,5 @@ node bench/tools/test_labeler.js
 - 2026-10-05：发现离线模式喂给音频模型的是半速音频（`AudioDecoder` 没按声道下混），用 `PcmResampler` 修复；之前录的 run 的音频结论作废。
   证据（6 部片的复现误差、修复前后的 AUC）见提交 `20f08f9` 里本文件的"音频解码修复"一节。
 - 2026-10-06：删除证据融合 `EvidenceFusion`，app 回到旧融合；`fusion_lab.py` 里保留作离线参照。
-- 2026-10-07：`applyDoStartGate` 换成融合仲裁 `FusionArbiter`。当前基线是 app 1.2.5 录的 `runs_fixed`（旧融合）。
+- 2026-10-07：旧融合（投票窗 + `applyDoStartGate`）换成融合仲裁 `FusionArbiter`，旧代码从 app 删除；run CSV 不再有 `smoothed` 列。
+  当前基线是 app 1.2.5 录的 `runs_fixed`（旧融合）。

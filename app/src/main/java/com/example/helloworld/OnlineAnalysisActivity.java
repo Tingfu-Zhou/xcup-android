@@ -27,9 +27,6 @@ import androidx.core.content.ContextCompat;
 import com.google.android.material.appbar.MaterialToolbar;
 
 import java.util.ArrayDeque;
-import java.util.HashMap;
-import java.util.LinkedList;
-import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -91,20 +88,9 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
     private Bitmap latestFrame = null;
     private final Object frameLock = new Object();
 
-    // 时间窗口平滑相关变量
-    // [延迟优化] 窗口从 10 收缩到 6：融合循环现为 500ms 一次，6 条记录约覆盖 3 秒。
-    // 稳定性保护统一交给 updateBluetoothState 的状态机（与离线模式一致）。
-    private static final int SMOOTH_WINDOW_SIZE = 6;
-    // 动作在窗口内至少出现的次数（音视频各计一次），低于该次数不参与投票
-    private static final int SMOOTH_MIN_COUNT = 3;
-    // [快通道] 音视频同一 tick 一致且双双高置信度时，绕过投票直接输出
-    private static final float FUSION_FASTPATH_VIDEO_CONF = 0.70f;
-    private static final float FUSION_FASTPATH_AUDIO_CONF = 0.70f;
-    // [融合仲裁] 启动 / 维持 / 停止 分开判断，替代原来的 applyDoStartGate（规则见 FusionArbiter，与离线模式共用）。
-    // 只在融合线程（主线程）访问；静音重置 / 恢复分析时 reset。平滑投票不再参与决策，只打日志作对照。
+    // [融合仲裁] 启动 / 维持 / 停止 分开判断（规则见 FusionArbiter，与离线模式共用）。2026-10-07 起替代原来的平滑投票
+    // smoothedFusion 和启动仲裁 applyDoStartGate（都已删除）。只在融合线程（主线程）访问；静音重置 / 恢复分析时 reset。
     private final FusionArbiter fusionArbiter = new FusionArbiter();
-    private final LinkedList<ActionRecord> actionHistory = new LinkedList<>();
-    private final Object historyLock = new Object();
 
     // 蓝牙发送状态管理器变量
     private static final long BLUETOOTH_MIN_DURATION = 2000;
@@ -153,22 +139,6 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
 
     // MediaProjection相关
     private MediaProjectionManager projectionManager;
-
-    private static class ActionRecord {
-        String videoAction;
-        String audioAction;
-        float videoConfidence;
-        float audioConfidence;
-        long timestamp;
-
-        ActionRecord(String vAction, String aAction, float vConf, float aConf) {
-            this.videoAction = vAction != null ? vAction : "";
-            this.audioAction = aAction != null ? aAction : "";
-            this.videoConfidence = vConf;
-            this.audioConfidence = aConf;
-            this.timestamp = System.currentTimeMillis();
-        }
-    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -648,16 +618,12 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                 // 注：oral/sex 的归并已在各分析线程内完成（分组概率决策只输出 "do"/"Noise"/""），
                 // 此处无需再做 oral->do 归一化。
 
-                // 旧的平滑投票：不再参与决策，只打日志作对照
-                String smoothedAction = smoothedFusion(videoAction, audioAction, videoConf, audioConf);
-
                 // [融合仲裁] 启动 / 维持 / 停止 分开判断，证据按"新推理结果"计数（结果时间戳去重）
                 String finalAction = fusionArbiter.decide(currentTime,
                         videoAction, videoConf, videoTime > 0 ? videoTime : -1,
                         audioAction, audioConf, audioTime > 0 ? audioTime : -1,
                         isSexAction(currentBluetoothState));
-                Log.d(TAG, String.format("[融合仲裁] %s -> %s（旧投票 %s）",
-                        fusionArbiter.lastReason(), finalAction, smoothedAction));
+                Log.d(TAG, String.format("[融合仲裁] %s -> %s", fusionArbiter.lastReason(), finalAction));
                 // 临时采用音频节律作为最终节律
                 // 将“最终节律计算”封装为独立方法，便于后续替换为音视频融合节律
                 int finalFreq = computeFinalFreq(audioFreq, audioFreqConf);
@@ -739,102 +705,6 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
         }
 
         return finalFreq;
-    }
-
-    private String smoothedFusion(String videoAction, String audioAction, float videoConf, float audioConf) {
-        synchronized (historyLock) {
-            actionHistory.add(new ActionRecord(videoAction, audioAction, videoConf, audioConf));
-
-            while (actionHistory.size() > SMOOTH_WINDOW_SIZE) {
-                actionHistory.poll();
-            }
-
-            // [快通道] 音视频本 tick 一致且双双高置信度 -> 绕过投票直接输出。
-            // 停转方向仍有蓝牙状态机兜底（稳定 1000ms + 最短持续 2000ms）。
-            if (!videoAction.isEmpty() && videoAction.equals(audioAction)
-                    && videoConf >= FUSION_FASTPATH_VIDEO_CONF
-                    && audioConf >= FUSION_FASTPATH_AUDIO_CONF) {
-                Log.d(TAG, String.format("[平滑融合] 快通道命中: %s (V:%.2f, A:%.2f)",
-                        videoAction, videoConf, audioConf));
-                return videoAction;
-            }
-
-            if (actionHistory.size() < 3) {
-                return selectBestAction(videoAction, audioAction, videoConf, audioConf);
-            }
-
-            Map<String, Float> actionScores = new HashMap<>();
-            Map<String, Integer> actionCounts = new HashMap<>();
-
-            int index = 0;
-            for (ActionRecord record : actionHistory) {
-                float weight = (float)(index + 1) / actionHistory.size();
-
-                if (!record.videoAction.isEmpty() && !record.videoAction.equals("Background")) {
-                    String videoKey = record.videoAction;
-                    float score = actionScores.getOrDefault(videoKey, 0f);
-                    score += record.videoConfidence * weight * 0.7f;
-                    actionScores.put(videoKey, score);
-
-                    int count = actionCounts.getOrDefault(videoKey, 0);
-                    actionCounts.put(videoKey, count + 1);
-                }
-
-                if (!record.audioAction.isEmpty()) {
-                    String audioKey = record.audioAction;
-                    float score = actionScores.getOrDefault(audioKey, 0f);
-                    score += record.audioConfidence * weight * 1.2f;
-                    actionScores.put(audioKey, score);
-
-                    int count = actionCounts.getOrDefault(audioKey, 0);
-                    actionCounts.put(audioKey, count + 1);
-                }
-
-                index++;
-            }
-
-            String bestAction = "";
-            float bestScore = 0;
-
-            for (Map.Entry<String, Float> entry : actionScores.entrySet()) {
-                String action = entry.getKey();
-                float score = entry.getValue();
-                int count = actionCounts.getOrDefault(action, 0);
-
-                if (count >= SMOOTH_MIN_COUNT && score > bestScore) {
-                    bestScore = score;
-                    bestAction = action;
-                }
-            }
-
-            if (bestAction.isEmpty()) {
-                ActionRecord latest = actionHistory.getLast();
-                bestAction = selectBestAction(latest.videoAction, latest.audioAction,
-                        latest.videoConfidence, latest.audioConfidence);
-            }
-
-            return bestAction;
-        }
-    }
-
-    private String selectBestAction(String videoAction, String audioAction, float videoConf, float audioConf) {
-        if (!audioAction.isEmpty()) {
-            if (!audioAction.equals("Noise") || audioConf > 0.7f) {
-                return audioAction;
-            }
-        }
-
-        if (!videoAction.isEmpty() && !videoAction.equals("Background")) {
-            if (!videoAction.equals("Noise") || videoConf > 0.7f) {
-                return videoAction;
-            }
-        }
-
-        if ("Noise".equals(audioAction) || "Noise".equals(videoAction)) {
-            return "Noise";
-        }
-
-        return "";
     }
 
     // 蓝牙发送状态管理器
@@ -1121,10 +991,6 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
             pcmBuffer.reset();
         }
 
-        // 清空动作历史记录
-        synchronized (historyLock) {
-            actionHistory.clear();
-        }
         // [融合仲裁] 清空证据：重置之前产出的结果一律不算
         fusionArbiter.reset(System.currentTimeMillis());
 

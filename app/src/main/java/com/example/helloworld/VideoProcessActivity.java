@@ -19,7 +19,6 @@ import java.io.IOException;
 import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.HashMap;
-import java.util.LinkedList;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
@@ -101,39 +100,9 @@ public class VideoProcessActivity extends AppCompatActivity {
         }
     }
 
-    // 7.19 新增：时间窗口平滑相关变量
-    // [延迟优化] 窗口从 10 收缩到 6：融合循环现为 500ms 一次，6 条记录约覆盖 3 秒。
-    // 稳定性保护统一交给 updateBluetoothState 的状态机（最短持续/发送间隔/停转确认），
-    // 平滑窗口只负责压制单次抖动，不再叠加长时间惯性。
-    // [2026-10-07] 平滑投票不再参与决策（由 FusionArbiter 决定），只写进评测 CSV 的 smoothed 列作对照。
-    private static final int SMOOTH_WINDOW_SIZE = 6;
-    // 动作在窗口内至少出现的次数（音视频各计一次），低于该次数不参与投票
-    private static final int SMOOTH_MIN_COUNT = 3;
-    // [快通道] 音视频同一 tick 给出相同动作且双双高置信度时，绕过投票直接输出该动作。
-    private static final float FUSION_FASTPATH_VIDEO_CONF = 0.70f;
-    private static final float FUSION_FASTPATH_AUDIO_CONF = 0.70f;
-    // [融合仲裁] 启动 / 维持 / 停止 分开判断，替代原来的 applyDoStartGate（规则见 FusionArbiter）。
-    // 只在融合线程（主线程）访问；seek / 恢复分析时 reset。
+    // [融合仲裁] 启动 / 维持 / 停止 分开判断（规则见 FusionArbiter）。2026-10-07 起替代原来的平滑投票 smoothedFusion
+    // 和启动仲裁 applyDoStartGate（都已删除）。只在融合线程（主线程）访问；seek / 恢复分析时 reset。
     private final FusionArbiter fusionArbiter = new FusionArbiter();
-    private final LinkedList<ActionRecord> actionHistory = new LinkedList<>();
-    private final Object historyLock = new Object(); // 用于同步访问actionHistory
-
-    // 7.19 新增：内部类定义动作记录
-    private static class ActionRecord {
-        String videoAction;
-        String audioAction;
-        float videoConfidence;
-        float audioConfidence;
-        long timestamp;
-
-        ActionRecord(String vAction, String aAction, float vConf, float aConf) {
-            this.videoAction = vAction != null ? vAction : "";
-            this.audioAction = aAction != null ? aAction : "";
-            this.videoConfidence = vConf;
-            this.audioConfidence = aConf;
-            this.timestamp = System.currentTimeMillis();
-        }
-    }
 
     // 蓝牙发送状态管理器变量部分
     private static final long BLUETOOTH_MIN_DURATION = 2000; // 蓝牙动作最小持续时间2秒
@@ -789,9 +758,6 @@ public class VideoProcessActivity extends AppCompatActivity {
                 // 注：oral/sex 的归并已在各分析线程内完成（applyVideoResult / 音频循环
                 // 的分组概率决策只输出 "do"/"Noise"/""），此处无需再做 oral->do 归一化。
 
-                // 旧的平滑投票：不再参与决策，只写进评测 CSV 的 smoothed 列，便于同一份 run 新旧对照
-                final String smoothedAction = smoothedFusion(videoAction, audioAction, videoConf, audioConf);
-
                 // [融合仲裁] 启动 / 维持 / 停止 分开判断，证据按"新推理结果"计数（按快照的产出时刻去重；
                 // 与评测 CSV 的 v_age/a_age 同源，离线回放才能逐 tick 复现）
                 String finalAction = fusionArbiter.decide(currentTime,
@@ -829,7 +795,7 @@ public class VideoProcessActivity extends AppCompatActivity {
                             aSnap == null ? -1 : aSnap.winEndPosMs,
                             Float.isNaN(audioFreq) ? -1 : Math.round(audioFreq),
                             audioFreqConf, audioFreqValid, audioFreqAge,
-                            smoothedAction, finalAction, finalFreq,
+                            finalAction, finalFreq,
                             currentBluetoothState, currentLevel,
                             fusionArbiter.lastReason());
                 }
@@ -911,125 +877,6 @@ public class VideoProcessActivity extends AppCompatActivity {
         return lv;
     }
 
-
-    // 7.19 新增：时间窗口平滑融合方法
-    private String smoothedFusion(String videoAction, String audioAction, float videoConf, float audioConf) {
-        synchronized (historyLock) {
-            // 添加当前记录到历史
-            actionHistory.add(new ActionRecord(videoAction, audioAction, videoConf, audioConf));
-
-            // 保持窗口大小
-            while (actionHistory.size() > SMOOTH_WINDOW_SIZE) {
-                actionHistory.poll();
-            }
-
-            // [快通道] 音视频本 tick 一致且双双高置信度 -> 绕过投票直接输出。
-            // 平滑窗口的意义是压制单模态抖动；两个模态同时高置信度一致时没有抖动嫌疑，
-            // 不必再等窗口攒票。停转方向仍有蓝牙状态机兜底（稳定 1000ms + 最短持续 2000ms）。
-            if (!videoAction.isEmpty() && videoAction.equals(audioAction)
-                    && videoConf >= FUSION_FASTPATH_VIDEO_CONF
-                    && audioConf >= FUSION_FASTPATH_AUDIO_CONF) {
-                Log.d(TAG, String.format("[平滑融合] 快通道命中: %s (V:%.2f, A:%.2f)",
-                        videoAction, videoConf, audioConf));
-                return videoAction;
-            }
-
-            // 如果历史记录太少，使用原始逻辑
-            if (actionHistory.size() < 3) {
-                return selectBestAction(videoAction, audioAction, videoConf, audioConf);
-            }
-
-            // 统计各动作的加权得分
-            Map<String, Float> actionScores = new HashMap<>();
-            Map<String, Integer> actionCounts = new HashMap<>();
-
-            // 给最近的记录更高的权重
-            int index = 0;
-            for (ActionRecord record : actionHistory) {
-                float weight = (float)(index + 1) / actionHistory.size(); // 时间权重，越新权重越高
-
-                // 处理视频动作
-                if (!record.videoAction.isEmpty() && !record.videoAction.equals("Background")) {
-                    // 包括Noise在内的所有动作都参与评分
-                    String videoKey = record.videoAction;
-                    float score = actionScores.getOrDefault(videoKey, 0f);
-                    score += record.videoConfidence * weight * 0.8f; // 视频权重0.8
-                    actionScores.put(videoKey, score);
-
-                    int count = actionCounts.getOrDefault(videoKey, 0);
-                    actionCounts.put(videoKey, count + 1);
-                }
-
-                // 处理音频动作
-                if (!record.audioAction.isEmpty()) {
-                    // 包括Noise在内的所有动作都参与评分
-                    String audioKey = record.audioAction;
-                    float score = actionScores.getOrDefault(audioKey, 0f);
-                    score += record.audioConfidence * weight * 1.2f; // 音频权重1.2
-                    actionScores.put(audioKey, score);
-
-                    int count = actionCounts.getOrDefault(audioKey, 0);
-                    actionCounts.put(audioKey, count + 1);
-                }
-
-                index++;
-            }
-
-            // 选择得分最高的动作
-            String bestAction = "";
-            float bestScore = 0;
-
-            for (Map.Entry<String, Float> entry : actionScores.entrySet()) {
-                String action = entry.getKey();
-                float score = entry.getValue();
-                int count = actionCounts.getOrDefault(action, 0);
-
-                // 需要至少出现 SMOOTH_MIN_COUNT 次才考虑（避免偶然噪声）
-                if (count >= SMOOTH_MIN_COUNT && score > bestScore) {
-                    bestScore = score;
-                    bestAction = action;
-                }
-            }
-
-            // 如果没有找到合适的动作，使用最新的高置信度结果
-            if (bestAction.isEmpty()) {
-                ActionRecord latest = actionHistory.getLast();
-                bestAction = selectBestAction(latest.videoAction, latest.audioAction,
-                        latest.videoConfidence, latest.audioConfidence);
-            }
-
-            // 记录平滑结果
-            Log.d(TAG, String.format("[平滑融合] 窗口大小:%d, 选择动作:%s (得分:%.2f)",
-                    actionHistory.size(), bestAction, bestScore));
-
-            return bestAction;
-        }
-    }
-
-    // 简单的动作选择逻辑（用于历史记录不足时）
-    private String selectBestAction(String videoAction, String audioAction, float videoConf, float audioConf) {
-        // 使用置信度来决定，而不是排除Noise
-        // 音频优先策略
-        if (!audioAction.isEmpty()) {
-            // 如果音频是有效动作（非Noise）或音频置信度很高，使用音频
-            if (!audioAction.equals("Noise") || audioConf > 0.7f) {
-                return audioAction;
-            }
-        }
-        // 视频作为备选
-        if (!videoAction.isEmpty() && !videoAction.equals("Background")) {
-            // 如果视频是有效动作（非Noise）或视频置信度很高，使用视频
-            if (!videoAction.equals("Noise") || videoConf > 0.7f) {
-                return videoAction;
-            }
-        }
-        // 如果音视频都是Noise，返回Noise（而不是空字符串）
-        if ("Noise".equals(audioAction) || "Noise".equals(videoAction)) {
-            return "Noise";
-        }
-
-        return "";
-    }
 
 
     // 蓝牙发送状态管理器
@@ -1289,13 +1136,10 @@ public class VideoProcessActivity extends AppCompatActivity {
     private String benchParamsLine() {
         return String.format(Locale.US,
                 "VIDEO_DO=%.2f VIDEO_PLOT=%.2f AUDIO_DO=%.2f AUDIO_NOISE=%.2f "
-                        + "SMOOTH_WIN=%d SMOOTH_MIN=%d FASTPATH_V=%.2f FASTPATH_A=%.2f "
                         + "BLE_MIN_DUR=%d BLE_GAP=%d LEVEL_STABLE=%d LEVEL_MIN_DUR=%d "
                         + "FUSION_TICK=%d VIDEO_INFER=%d AUDIO_INFER=%d AUDIO_PIPE=%s ",
                 VIDEO_DO_PROB_THRESHOLD, VIDEO_PLOT_PROB_THRESHOLD,
                 AUDIO_DO_PROB_THRESHOLD, AUDIO_NOISE_PROB_THRESHOLD,
-                SMOOTH_WINDOW_SIZE, SMOOTH_MIN_COUNT,
-                FUSION_FASTPATH_VIDEO_CONF, FUSION_FASTPATH_AUDIO_CONF,
                 BLUETOOTH_MIN_DURATION, BLUETOOTH_SEND_INTERVAL,
                 LEVEL_STABLE_MS, LEVEL_MIN_DUR_MS,
                 MAIN_FUSION_INTERVAL, VIDEO_INFERENCE_INTERVAL, AUDIO_INFERENCE_INTERVAL,
@@ -1342,11 +1186,6 @@ public class VideoProcessActivity extends AppCompatActivity {
                 pcmBuffer.reset();
             }
 
-            // 7.19新增：清空动作历史记录
-            synchronized (historyLock) {
-                actionHistory.clear();
-                Log.d(TAG, "[平滑融合] 清空历史记录（因为seek操作）");
-            }
             // [融合仲裁] seek 后清空证据：seek 之前产出的结果一律不算
             resetFusionArbiter(true, 0);
 
@@ -1514,9 +1353,6 @@ public class VideoProcessActivity extends AppCompatActivity {
         }
         synchronized (audioLock) {
             pcmBuffer.reset();
-        }
-        synchronized (historyLock) {
-            actionHistory.clear();
         }
         // [融合仲裁] seek 后清空证据：seek 之前产出的结果一律不算
         resetFusionArbiter(true, 0);

@@ -1025,7 +1025,7 @@ def write_rescored(run_path, out_path, computed, note):
         for c in comments:
             fh.write(c + '\n')
         fh.write('# ' + note + '\n')
-        fh.write('# 注意：a_p_* / a_action / a_conf / a_ys_* 是离线重算的；smoothed、gated、ble_*、sent* '
+        fh.write('# 注意：a_p_* / a_action / a_conf / a_ys_* 是离线重算的；gated、arb、ble_*、sent* 等决策列 '
                  '仍是原 run 的。端到端指标请用 fusion_lab.py eval/oracle 重放\n')
         fh.write(','.join(cols) + '\n')
         w = csv.writer(fh, lineterminator='\n')

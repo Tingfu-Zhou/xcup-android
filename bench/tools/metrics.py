@@ -121,7 +121,7 @@ def read_run(path):
             'ap': [f('a_p_sex', -1), f('a_p_oral', -1), f('a_p_noise', -1)],
             'ys': [f(c, -1) for c in YS_COLS],          # app 的 dump 没有这些列（只有 rescore 写）：全是 -1
             'loud_lv': i('loud_lv', -1), 'loud_conf': f('loud_conf'),
-            'smoothed': _norm(d.get('smoothed')), 'gated': _norm(d.get('gated')),
+            'gated': _norm(d.get('gated')),
             'ble_state': _norm(d.get('ble_state')), 'ble_level': i('ble_level'),
             'sent': i('sent') == 1, 'sent_action': _norm(d.get('sent_action')),
             'sent_level': i('sent_level', -1),
@@ -307,18 +307,18 @@ def report_errors(segs, rows, policy, strans, top):
 
 def report_at(rows, t, half=5000):
     print('══ pos %s 附近的逐 tick 原始数据 ══' % sec(t))
-    print('  %-9s %-22s %-7s %-24s %-7s %-6s %-6s %-13s %-6s %s'
+    print('  %-9s %-22s %-7s %-24s %-7s %-6s %-13s %-6s %s'
           % ('pos', '视频 probs[plot,oral,sex]', 'V判定', '音频 probs[sex,oral,noise]',
-             'A判定', '平滑', '仲裁', '仲裁原因', '蓝牙', '发送'))
+             'A判定', '决策', '仲裁原因', '蓝牙', '发送'))
     for r in rows:
         if not (t - half <= r['pos'] <= t + half):
             continue
         vp = '[%s]' % ','.join('%.2f' % x if x >= 0 else ' -- ' for x in r['vp'])
         ap = '[%s]' % ','.join('%.2f' % x if x >= 0 else ' -- ' for x in r['ap'])
-        print('  %-9s %-22s %-7s %-24s %-7s %-6s %-6s %-13s %-6s %s'
+        print('  %-9s %-22s %-7s %-24s %-7s %-6s %-13s %-6s %s'
               % (sec(r['pos']), vp, (r['v'] or 'unclear') + ('%.2f' % r['v_conf'] if r['v'] else ''),
                  ap, (r['a'] or 'unclear') + ('%.2f' % r['a_conf'] if r['a'] else ''),
-                 r['smoothed'] or '-', r['gated'] or '-', r['arb'] or '-',
+                 r['gated'] or '-', r['arb'] or '-',
                  '%s/%d' % (r['ble_state'] or '-', r['ble_level']),
                  ('→ %s lv%d' % (r['sent_action'], r['sent_level'])) if r['sent'] else ''))
     print()
@@ -543,7 +543,7 @@ RUN_COLS_NEEDED = ['pos_ms', 'wall_ms',
                    'v_action', 'v_conf', 'v_age', 'v_p_plot', 'v_p_oral', 'v_p_sex',
                    'a_action', 'a_conf', 'a_age', 'a_p_sex', 'a_p_oral', 'a_p_noise',
                    'loud_lv', 'loud_conf', 'loud_valid', 'loud_age',
-                   'smoothed', 'gated', 'final_freq',
+                   'gated', 'final_freq',
                    'ble_state', 'ble_level', 'sent', 'sent_action', 'sent_level',
                    # 音频窗口结尾的播放位置，给 audio_rescore.py 还原模型窗口用
                    'a_pos',
@@ -596,7 +596,7 @@ def _write_run_csv(path, rows):
                         r['v'], '%.4f' % r['v_conf'], r['v_age'], '0.1000', '0.4000', '0.5000',
                         r['a'], '%.4f' % r['a_conf'], r['a_age'], '0.5000', '0.3000', '0.2000',
                         r['ble_level'], '0.8000', 1, 300,
-                        r['smoothed'], r['gated'], r['ble_level'],
+                        r['gated'], r['ble_level'],
                         r['ble_state'], r['ble_level'],
                         1 if r['sent'] else 0, r['sent_action'], r['sent_level'],
                         -1, '', ''])
@@ -628,7 +628,7 @@ def selftest():
             if sent:
                 cur = want
             rows.append({'pos': pos, 'wall': pos, 'v': want, 'v_conf': .9, 'v_age': 300,
-                         'a': want, 'a_conf': .9, 'a_age': 300, 'smoothed': want,
+                         'a': want, 'a_conf': .9, 'a_age': 300,
                          'gated': want, 'ble_state': cur, 'ble_level': 4,
                          'sent': sent, 'sent_action': want if sent else '', 'sent_level': 4})
         return rows
@@ -684,7 +684,7 @@ def selftest():
     if len(rr) != len(base):
         fails.append('CSV 往返行数不一致: %d vs %d' % (len(rr), len(base)))
     else:
-        for k in ('pos', 'v', 'a', 'smoothed', 'gated', 'sent', 'sent_action'):
+        for k in ('pos', 'v', 'a', 'gated', 'sent', 'sent_action'):
             if [x[k] for x in rr] != [x[k] for x in base]:
                 fails.append('CSV 往返列 %s 不一致' % k)
         if any(x['ys'] != [-1] * len(YS_COLS) for x in rr):

@@ -139,7 +139,7 @@ public final class BenchLogger {
                      String aAction, float aConf, long aAgeMs, float[] aProbs,
                      long aPosMs,
                      int loudLevel, float loudConf, boolean loudValid, long loudAgeMs,
-                     String smoothed, String gated, int finalFreq,
+                     String gated, int finalFreq,
                      String bleState, int bleLevel, String arbReason) {
         if (!enabled || failed) return;
         if (out == null && !open()) return;
@@ -153,7 +153,7 @@ public final class BenchLogger {
         sb.append(p(ap, 0)).append(',').append(p(ap, 1)).append(',').append(p(ap, 2)).append(',');
         sb.append(loudLevel).append(',').append(f(loudConf)).append(',')
           .append(loudValid ? 1 : 0).append(',').append(age(loudAgeMs)).append(',');
-        sb.append(csv(smoothed)).append(',').append(csv(gated)).append(',').append(finalFreq).append(',');
+        sb.append(csv(gated)).append(',').append(finalFreq).append(',');
         sb.append(csv(bleState)).append(',').append(bleLevel).append(',')
           .append(sent ? 1 : 0).append(',').append(csv(sentAction)).append(',').append(sentLevel);
         sb.append(',').append(aPosMs < 0 ? -1 : aPosMs);
@@ -250,7 +250,7 @@ public final class BenchLogger {
                     + "v_action,v_conf,v_age,v_p_plot,v_p_oral,v_p_sex,"
                     + "a_action,a_conf,a_age,a_p_sex,a_p_oral,a_p_noise,"
                     + "loud_lv,loud_conf,loud_valid,loud_age,"
-                    + "smoothed,gated,final_freq,"
+                    + "gated,final_freq,"
                     + "ble_state,ble_level,sent,sent_action,sent_level,"
                     // a_pos：音频窗口结尾的播放位置；arb：FusionArbiter 的输出原因；
                     // arb_reset：这一行之前 FusionArbiter reset 的记号 <ms>[+<预热ms>][:seek]（没有为空）

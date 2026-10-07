@@ -316,7 +316,8 @@ def _java_hashmap_order(keys):
 
 
 class LegacyCore(object):
-    """VideoProcessActivity 的 smoothedFusion + applyDoStartGate + selectBestAction（float 语义）。"""
+    """旧融合：原 VideoProcessActivity 的 smoothedFusion + applyDoStartGate + selectBestAction（float 语义）。
+    app 里 2026-10-07 已删除，这里留作"旧融合"对照，并用来回放旧 run（runs_fixed 等）。"""
 
     def __init__(self, p):
         self.win = p['SMOOTH_WIN']
@@ -717,7 +718,7 @@ def replay_legacy(ticks, params, actions=None, arbiter=None, reasons=None):
                 ble_seek_reset(ble)
             if arb is not None:
                 arb.reset(ms, warm)
-        sm = core.smoothed(v, a, vc, ac)
+        sm = core.smoothed(v, a, vc, ac) if arb is None else ''
         if arb is not None:
             g = arb.decide(t.wall, v, vc, _tick_ts(t, 'v'), a, ac, _tick_ts(t, 'a'), _is_sex(ble.cur))
             if reasons is not None:
@@ -1573,7 +1574,7 @@ def cmd_check(args):
     if any(v.rescored for v in videos):
         print('⚠ 这里有 audio_rescore.py 离线重算的 run：它们的决策列还是原 run 的，check 对不上是正常的。\n')
     cfg = _load_cfg(args.config) if args.config else None
-    cols = ('smoothed', 'gated', 'final_freq', 'ble_state', 'ble_level', 'sent')
+    cols = ('gated', 'final_freq', 'ble_state', 'ble_level', 'sent')
     worst = 1.0
     for v in videos:
         # live 模式的 run（app 带证据融合那几版、由它驱动蓝牙时录的）要用证据融合回放来对；配置 id 记在参数行里
@@ -1589,7 +1590,8 @@ def cmd_check(args):
             reasons = []
             steps = replay_legacy(v.ticks, v.params, reasons=reasons)
             what = '融合仲裁（%s）' % v.params['ARB'] if v.params.get('ARB') else '旧融合（applyDoStartGate）'
-        vcols = cols + ('arb',) if v.params.get('ARB') else cols
+        # 融合仲裁的 run 比对原因列 arb；旧融合的 run 还有投票窗的 smoothed 列（2026-10-07 起 app 不再写）
+        vcols = cols + ('arb',) if v.params.get('ARB') else ('smoothed',) + cols
         agree = dict((c, 0) for c in vcols)
         divs = []
         for k, (t, s) in enumerate(zip(v.ticks, steps)):
@@ -1597,7 +1599,7 @@ def cmd_check(args):
             got = {'smoothed': s.smoothed, 'gated': s.gated, 'final_freq': str(s.final_freq),
                    'ble_state': s.ble_state, 'ble_level': str(s.ble_level),
                    'sent': ('%s/%d' % s.sent) if s.sent else ''}
-            want = dict((c, lg.get(c, '')) for c in cols[:-1])
+            want = dict((c, lg.get(c, '')) for c in vcols if c not in ('sent', 'arb'))
             want['sent'] = ('%s/%s' % (lg.get('sent_action'), lg.get('sent_level'))) \
                 if lg.get('sent') == '1' else ''
             if 'arb' in vcols:
@@ -2041,20 +2043,26 @@ def _write_synth(video, gt_path, run_path, fusion='', extra_params='', corrupt_a
         fh.write('# xcup-bench-run v1\n# video_name=%s\n# params: %s%s%s\n' % (
             video.vid, ' '.join('%s=%s' % kv for kv in sorted(LEGACY_DEFAULTS.items())),
             (' FUSION=' + fusion) if fusion else '', (' ' + extra_params) if extra_params else ''))
-        fh.write(','.join(M.RUN_COLS_NEEDED) + '\n')
+        cols = list(M.RUN_COLS_NEEDED)
+        if 'ARB=' not in extra_params:              # 旧融合的 run（2026-10-07 之前的 app）还有投票窗的 smoothed 列
+            cols.insert(cols.index('gated'), 'smoothed')
+        fh.write(','.join(cols) + '\n')
         for k, t in enumerate(video.ticks):
             def pr(ps, i):
                 return '' if ps is None else '%.4f' % ps[i]
             lg = t.log
-            row = [t.pos, t.wall, t.v, '%.6f' % t.vc, t.v_age, pr(t.vp, 0), pr(t.vp, 1), pr(t.vp, 2),
-                   t.a, '%.6f' % t.ac, t.a_age, pr(t.ap, 0), pr(t.ap, 1), pr(t.ap, 2),
-                   t.loud_lv, '%.4f' % t.loud_conf, 1, 100,
-                   lg['smoothed'], lg['gated'], lg['final_freq'], lg['ble_state'], lg['ble_level'],
-                   lg['sent'], lg['sent_action'], lg['sent_level'], -1,
-                   'bogus' if corrupt_arb_every and k % corrupt_arb_every == 0 else lg.get('arb', ''),
-                   lg.get('arb_reset', '')]
-            row += [''] * (len(M.RUN_COLS_NEEDED) - len(row))
-            fh.write(','.join(str(x) for x in row) + '\n')
+            val = {'pos_ms': t.pos, 'wall_ms': t.wall,
+                   'v_action': t.v, 'v_conf': '%.6f' % t.vc, 'v_age': t.v_age,
+                   'v_p_plot': pr(t.vp, 0), 'v_p_oral': pr(t.vp, 1), 'v_p_sex': pr(t.vp, 2),
+                   'a_action': t.a, 'a_conf': '%.6f' % t.ac, 'a_age': t.a_age,
+                   'a_p_sex': pr(t.ap, 0), 'a_p_oral': pr(t.ap, 1), 'a_p_noise': pr(t.ap, 2),
+                   'loud_lv': t.loud_lv, 'loud_conf': '%.4f' % t.loud_conf, 'loud_valid': 1, 'loud_age': 100,
+                   'smoothed': lg.get('smoothed', ''), 'gated': lg['gated'], 'final_freq': lg['final_freq'],
+                   'ble_state': lg['ble_state'], 'ble_level': lg['ble_level'], 'sent': lg['sent'],
+                   'sent_action': lg['sent_action'], 'sent_level': lg['sent_level'], 'a_pos': -1,
+                   'arb': 'bogus' if corrupt_arb_every and k % corrupt_arb_every == 0 else lg.get('arb', ''),
+                   'arb_reset': lg.get('arb_reset', '')}
+            fh.write(','.join(str(val.get(c, '')) for c in cols) + '\n')
 
 
 def selftest():
@@ -2303,7 +2311,7 @@ def selftest():
     pp = parse_params(' '.join('%s=%s' % kv for kv in sorted(LEGACY_DEFAULTS.items())) + ' ' + arb_params)
     why = []
     for t, st in zip(phone, replay_legacy(phone, pp, reasons=why)):
-        t.log.update({'smoothed': st.smoothed, 'gated': st.gated, 'final_freq': str(st.final_freq),
+        t.log.update({'gated': st.gated, 'final_freq': str(st.final_freq),
                       'ble_state': st.ble_state, 'ble_level': str(st.ble_level),
                       'sent': '1' if st.sent else '0', 'sent_action': st.sent[0] if st.sent else '',
                       'sent_level': str(st.sent[1]) if st.sent else '-1'})
