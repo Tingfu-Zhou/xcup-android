@@ -709,13 +709,14 @@ def replay_legacy(ticks, params, actions=None, arbiter=None, reasons=None):
     arb = FusionArbiter(params) if use_arb else None
     for i, t in enumerate(ticks):
         v, vc, a, ac = actions[i] if actions else (t.v, t.vc, t.a, t.ac)
-        rs = parse_arb_reset((getattr(t, 'log', None) or {}).get('arb_reset', '')) if arb is not None else None
+        rs = parse_arb_reset((getattr(t, 'log', None) or {}).get('arb_reset', ''))
         if rs:                                       # app 在这个 tick 之前 reset 过（seek / 恢复播放）
             ms, warm, seek = rs
-            if seek:                                 # seek 还清空了投票窗和蓝牙状态
+            if seek:                                 # seek 还清空了投票窗和蓝牙状态（旧融合回放也一样，与 arbiter_lab 一致）
                 core = LegacyCore(params)
                 ble_seek_reset(ble)
-            arb.reset(ms, warm)
+            if arb is not None:
+                arb.reset(ms, warm)
         sm = core.smoothed(v, a, vc, ac)
         if arb is not None:
             g = arb.decide(t.wall, v, vc, _tick_ts(t, 'v'), a, ac, _tick_ts(t, 'a'), _is_sex(ble.cur))
