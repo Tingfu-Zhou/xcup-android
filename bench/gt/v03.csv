@@ -1,0 +1,27 @@
+# xcup-gt spec_version=1
+# video_id=视频3
+# file_name=视频3.mp4
+# file_size=679349959
+# duration_ms=900971
+# frame_rate=30
+# annotator=
+# split=dev
+# created_at=2026-10-07
+# segments=16 do_noise_transitions=6
+start_ms,end_ms,label,note
+0,1453,exclude,
+1453,66579,plot,
+66579,328570,other_adult,
+328570,386440,sex,
+386440,407582,plot,
+407582,415198,other_adult,
+415198,484035,oral,
+484035,515839,other_adult,
+515839,600073,sex,
+600073,614416,plot,
+614416,645174,other_adult,
+645174,654122,plot,
+654122,704024,other_adult,
+704024,764279,sex,
+764279,768784,exclude,
+768784,900971,plot,
