@@ -74,14 +74,15 @@ F01, F07, F08, F12 = f32(0.1), f32(0.7), f32(0.8), f32(1.2)
 
 # ======================================================================== 读数据
 class Tick(object):
-    """run CSV 的一行。v/a 是融合循环实际用到的动作串（已过新鲜度过滤），vp/ap 是原始概率。"""
+    """run CSV 的一行。v/a 是融合循环实际用到的动作串（已过新鲜度过滤），vp/ap 是原始概率。
+    ays：这一行的音频结果对应的 YAMNet AudioSet 分组分数（cue_lab.py 接上去的，见那里的 FEAT_*），没有为 None。"""
     __slots__ = ('pos', 'wall', 'v', 'vc', 'v_age', 'vp', 'a', 'ac', 'a_age', 'ap',
-                 'loud_lv', 'loud_conf', 'log')
+                 'loud_lv', 'loud_conf', 'log', 'ays')
 
     def copy(self, **kw):
         t = Tick()
         for k in Tick.__slots__:
-            setattr(t, k, kw[k] if k in kw else getattr(self, k))
+            setattr(t, k, kw[k] if k in kw else getattr(self, k, None))
         return t
 
 
@@ -130,6 +131,7 @@ def load_run(path):
         t.loud_lv = _inum(d.get('loud_lv'), -1)
         t.loud_conf = f32(_fnum(d.get('loud_conf')) or 0.0)
         t.log = dict((k, (d.get(k) or '').strip()) for k in LOG_COLS)
+        t.ays = None
         ticks.append(t)
     return meta, ticks       # 保持文件顺序（= 时间顺序），回放必须按真实先后
 

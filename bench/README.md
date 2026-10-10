@@ -19,6 +19,7 @@ bench/
     fusion_lab.py         融合层回放：check（复现真机）、eval（策略对比）、oracle（模态上限）、golden（Java 对拍数据）
     arbiter_lab.py        融合仲裁评测：逐片最差情况、seek 模拟、压力场景、慢手机、留一选参
     audio_rescore.py      音频离线重算：换音频模型不用上真机
+    cue_lab.py            YAMNet 线索实验（第 6 节）：线索统计、误判归因、压力场景、留一视频选规则
     test_labeler.js       标注器测试：node bench/tools/test_labeler.js
     yamnet_class_map.csv  YAMNet 的 AudioSet 521 类名（来自 tensorflow/models，Apache-2.0）
 ```
@@ -203,6 +204,7 @@ python3 bench/tools/audio_rescore.py auc bench/gt bench/rescored/audio_old [--al
 python3 bench/tools/fusion_lab.py --selftest
 python3 bench/tools/metrics.py --selftest      # 含与 BenchLogger 的 CSV 列名契约检查
 python3 bench/tools/audio_rescore.py --selftest
+python3 bench/tools/cue_lab.py --selftest      # 开关全关时与 v1 逐 tick 一致、对拍数据、线索接上的比例
 node bench/tools/test_labeler.js
 ```
 
@@ -215,6 +217,58 @@ node bench/tools/test_labeler.js
 | `arb_reset` | 这一行之前的 reset：`<ms>[+<预热ms>][:seek]`。回放时同样 reset，带 `:seek` 的还清空蓝牙状态（旧融合回放时也清空投票窗） |
 | `a_ys_*` | AudioSet 类别分数（Speech、Music、Moan 等，见 `metrics.YS_CLASSES`），只有 `rescore` 写 |
 
+## 6. YAMNet 线索（cue_lab.py，离线实验，app 还没用）
+
+YAMNet 的第 0 个输出（AudioSet 521 类分数）app 目前没读。`cue_lab.py` 把 `rescored/audio_old/*.yamnet.npz` 按结果时间戳
+接到 `runs_initial` 的每个音频结果上（7 部片 100% 接上），给每个结果判一个"线索"，再在融合仲裁上加开关，看能不能改进。
+开关全关、或者线索未知时与 v1 逐 tick 一致（`--selftest` 校验，含 FusionArbiterTest 的对拍数据）。
+
+| 线索 | 判定（4 帧平均的分数） |
+|---|---|
+| 对白 | 人声组 < 0.01 且 Speech ≥ 0.7 |
+| 音乐 | 人声组 < 0.05、撞击/口腔声 < 0.1，Music ≥ 0.3 且不低于 Speech（带人声的歌也算） |
+| 安静 / 听不出 | 人声组 < 0.05、Speech < 0.2、撞击/口腔声 < 0.1；其中 Silence ≥ 0.3 的是安静 |
+| 人声 / 拍打 | 人声组 ≥ 0.3 / 撞击/口腔声 ≥ 0.2 |
+
+人声组 = 尖叫 11、笑 13/15~18、哭 19、呜咽 21、呻吟 22、叹气 23、哼 33、咕哝 34、呼吸 36、倒吸气 39、喘 40；
+撞击/口腔声 = 咀嚼 49、敲 353、轻敲 354、挤压水声 441、拍打 461、重击 462（下标见 `yamnet_class_map.csv`）。
+
+**基线的误判落在哪**（`cue_lab.py blame`）：
+- 漏转 104 秒，v03 占 70 秒：435~454 秒视频判转、音频被背景音乐盖住（分类头判不转），线索能救；416~434 秒两路都判剧情、
+  473~483 秒和 559~568 秒视频特写判剧情，线索救不了。
+- 误转 249 秒：对白 104 秒（v07 76、v04 29），但其中 82 秒视频也判转（多是视频在维持）；安静 42 秒（v04、v06：Silence≈1 时分类头判转）；
+  其余主要是两路同时判错。
+- 动作中误停 4 次：v03 两次（音乐 + 视频特写）、v05 一次（对白）、v07 一次（特写，拍打声里夹了一个不转）。
+
+**规则和留一视频**（`cue_lab.py lovo`，13859 组全组合；约束：压力场景全过、训练片误停最多 +1、训练片漏转不升、
+seek 启动不变慢；基线留一代价 996）：
+
+| 规则 | 做什么 | 留一视频 | 结论 |
+|---|---|---|---|
+| A1 | 音频最近 4 个都听不出时，视频（3 秒内强转 ≥3、6 秒内占比 ≥90%）单独启动 | 只有 v03 有这种情况，留出 v03 时选不出来；其余 6 部完全不变 | 候选 `a1` |
+| A2 | 听不出时音频的"不转"不算结束证据 | 违反"视频断了、音频时有时无的支持不能一直转"的压力场景 | 不要 |
+| A3 | 听不出（含安静）时音频的"转"不算启动证据 | 989；漏转 3.0→3.6%，seek 启动变慢 | 不要 |
+| B=start | 对白时分类头的"转"不算启动证据，维持不受影响 | 891；7 折都选同一组阈值 | 候选 `bstart` |
+| B=all、B2 | 对白时的"转"也不算维持证据 / 对白时视频不能单独维持 | 908；v01 口交时口腔声被判成 Speech，多一次误停 | 不要 |
+| P1、P2 | 人声 / 拍打确认的"转"启动更快、维持时多容忍一个不转 | 1010；动作结束后停得慢（v06） | 不要 |
+
+候选在 7 部片上（固定参数，`cue_lab.py eval --preset <名字>`；敏感曲线 `sens` 显示阈值前后挪一档结果几乎不变）：
+
+| | 代价 | 准确率 | 误转 | 漏转 | 误停 | 最差片漏转 / 最长连续漏转 | seek 进特写/低声音 p90、没启动 | 逐片代价变化 |
+|---|---|---|---|---|---|---|---|---|
+| v1（现在） | 985 | 92.6% | 18.7% | 3.0% | 4 | 26.5% / 51.1s | 9.0s，2/81 | |
+| `a1` | 910 | 93.0% | 18.7% | 2.5% | 5 | 19.8% / 23.5s | 7.0s，0/81 | 只有 v03 变：−75 |
+| `bstart` | 891 | 93.4% | 16.1% | 3.0% | 4 | 26.5% / 51.1s | 11.5s，2/81 | v04 −88、v07 −22、v01 +14、v05 +1 |
+| `a1b` | 815 | 93.7% | 16.1% | 2.5% | 5 | 19.8% / 23.5s | 7.0s，0/81 | v03 −75、v04 −88、v07 −22、v01 +14、v05 +1 |
+
+- 按 2026-10-10 定的验收线（留一代价降 ≥5%、最多 1 部变差且 ≤5%、误停 ≤6、seek 启动不变慢、漏转不升）：`a1` 全过，但收益只来自
+  v03 一部片，留一验证不了；`bstart` 和 `a1b` 卡在 v01 变差（+14，全在"剧情 → 口交"的拼接样本里：口交的口腔声被 YAMNet 判成
+  Speech，启动晚了几秒），`bstart` 还让 seek 进特写的 p90 从 9.0 秒变成 11.5 秒。YAMNet 的 521 类里找不到能把口腔声和真对白
+  分开的类（两边 Speech 0.85 / 0.87，其余接近 0）。
+- 新片验证：标注 + 真机录 run（第 1、2 节），放进单独的目录（如 `bench/runs_test/`，不参与调参），用
+  `audio_rescore.py check / rescore --runs bench/runs_test --tag test_audio_old` 算出 `.yamnet.npz`，然后
+  `python3 bench/tools/cue_lab.py eval bench/gt bench/runs_test --npz bench/rescored/test_audio_old --preset a1b`。
+
 ## 时间线
 
 - 2026-10-05：发现离线模式喂给音频模型的是半速音频（`AudioDecoder` 没按声道下混），用 `PcmResampler` 修复；之前录的 run 的音频结论作废。
@@ -225,3 +279,6 @@ node bench/tools/test_labeler.js
 - 2026-10-09：评估新音频分类头（训练数据更平衡）。转 vs 剧情 AUC 0.888 → 0.921，剧情判对 59% → 82%，但动作中有对白或
   背景音乐时更容易判成剧情；融合参数各自重调后代价只低约 5%（7 部片里 4 部好、3 部差），不显著，暂不采用，数据留在
   `rescored/audio_new`。`rescored` 下 10 月 5 日排查解码时的 `clean` / `fixed` / `phone` 删除（git 历史里可找回）。
+- 2026-10-10：YAMNet 线索离线实验（第 6 节，`cue_lab.py`）。A2、A3、B=all、B2、P 不成立；剩下候选 `a1`、`bstart`、`a1b`，
+  app 还没改，等新片验证后再定上哪条。`fusion_lab.Tick` 多了 `ays`（音频结果的 YAMNet 分组分数），`arbiter_lab` 的 seek /
+  慢手机 / 合成场景会把它带上；没有分数时一切照旧。

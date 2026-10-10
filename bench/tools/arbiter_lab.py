@@ -35,8 +35,9 @@ GRID_MS = F.GRID_MS
 
 # ======================================================================== 数据
 class Prep(object):
-    """一部片（或拼接样本 / seek 片段）的逐 tick 输入。"""
-    __slots__ = ('video', 'pos', 'wall', 'v', 'vc', 'vts', 'a', 'ac', 'ats', 'loud_lv', 'loud_conf', 'reset')
+    """一部片（或拼接样本 / seek 片段）的逐 tick 输入。aext：音频结果的 YAMNet 分组分数（Tick.ays，cue_lab.py 用）。"""
+    __slots__ = ('video', 'pos', 'wall', 'v', 'vc', 'vts', 'a', 'ac', 'ats', 'aext', 'loud_lv', 'loud_conf',
+                 'reset')
 
 
 def prepare(video, mask=None):
@@ -47,7 +48,7 @@ def prepare(video, mask=None):
     n = len(video.ticks)
     p.pos, p.wall = [0] * n, [0] * n
     p.v, p.vc, p.vts = [''] * n, [0.0] * n, [None] * n
-    p.a, p.ac, p.ats = [''] * n, [0.0] * n, [None] * n
+    p.a, p.ac, p.ats, p.aext = [''] * n, [0.0] * n, [None] * n, [None] * n
     p.loud_lv, p.loud_conf = [0] * n, [0.0] * n
     p.reset = [None] * n                      # app 在这个 tick 之前 reset 过：(ms, 预热 ms, 是否 seek)
     for i, t in enumerate(video.ticks):
@@ -55,15 +56,16 @@ def prepare(video, mask=None):
             p.reset[i] = F.parse_arb_reset((getattr(t, 'log', None) or {}).get('arb_reset', ''))
         v, vc, a, ac = t.v, t.vc, t.a, t.ac
         vts, ats = F._tick_ts(t, 'v'), F._tick_ts(t, 'a')
+        aext = getattr(t, 'ays', None)
         if mask is not None:
             sw, vr, ar = mask
             if vts is None or vts < sw + vr:
                 v, vc, vts = '', 0.0, None
             if ats is None or ats < sw + ar:
-                a, ac, ats = '', 0.0, None
+                a, ac, ats, aext = '', 0.0, None, None
         p.pos[i], p.wall[i] = t.pos, t.wall
         p.v[i], p.vc[i], p.vts[i] = v, vc, vts
-        p.a[i], p.ac[i], p.ats[i] = a, ac, ats
+        p.a[i], p.ac[i], p.ats[i], p.aext[i] = a, ac, ats, aext
         p.loud_lv[i], p.loud_conf[i] = t.loud_lv, t.loud_conf
     return p
 
@@ -295,7 +297,8 @@ def print_report(rep, title):
 
 # ======================================================================== 压力测试
 def _synth_ticks(vfun, afun, dur_ms, v_period=625, a_period=1000):
-    """vfun/afun(t) -> (动作, 置信度) 或 None（这一刻不出新结果，用来造"结果过期"）。"""
+    """vfun/afun(t) -> (动作, 置信度) 或 None（这一刻不出新结果，用来造"结果过期"）。
+    afun 也可以返回 (动作, 置信度, YAMNet 分组分数)，分数写进 Tick.ays（cue_lab.py 的压力场景用）。"""
     T0, ticks, last_v, last_a = 1700000000000, [], None, None
     tv, ta, t = 300, 700, 0
     while t < dur_ms:
@@ -307,16 +310,19 @@ def _synth_ticks(vfun, afun, dur_ms, v_period=625, a_period=1000):
         while ta <= t:
             r = afun(ta)
             if r is not None:
-                last_a = (T0 + ta, r[0], r[1])
+                last_a = (T0 + ta, r[0], r[1], r[2] if len(r) > 2 else None)
             ta += a_period
         k = F.Tick()
         k.pos, k.wall = t, T0 + t
+        k.ays = None
         for which, last in (('v', last_v), ('a', last_a)):
             if last is None:
                 act, conf, age = '', 0.0, -1
             else:
                 age = k.wall - last[0]
                 act, conf = (last[1], F.f32(last[2])) if age <= F.MAX_AGE_MS else ('', 0.0)
+                if which == 'a' and age <= F.MAX_AGE_MS:
+                    k.ays = last[3]
             setattr(k, which, act)
             setattr(k, which + 'c', conf)
             setattr(k, which + '_age', age)
@@ -414,7 +420,7 @@ def decimate(video, keep_every, which):
         if ts is not None and ts != last_seen:
             last_seen = ts
             if n % keep_every == 0:
-                kept = (ts, t.v if which == 'v' else t.a, t.vc if which == 'v' else t.ac)
+                kept = (ts, t.v if which == 'v' else t.a, t.vc if which == 'v' else t.ac, getattr(t, 'ays', None))
             n += 1
         if kept is None:
             kw = {which: '', which + 'c': 0.0, which + '_age': -1}
@@ -422,6 +428,8 @@ def decimate(video, keep_every, which):
             ag = t.wall - kept[0]
             kw = ({which: '', which + 'c': 0.0, which + '_age': ag} if ag > F.MAX_AGE_MS
                   else {which: kept[1], which + 'c': kept[2], which + '_age': ag})
+        if which == 'a':                       # YAMNet 分数跟着保留下来的那个音频结果走
+            kw['ays'] = kept[3] if kept is not None and kw['a_age'] <= F.MAX_AGE_MS else None
         ticks.append(t.copy(**kw))
     nv = video.with_ticks(ticks)
     nv.splice = video.splice
