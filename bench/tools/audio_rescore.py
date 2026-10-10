@@ -26,7 +26,7 @@ run CSV 记下了真机每个音频结果"是哪一刻出的"（wall_ms - a_age�
   python3 bench/tools/audio_rescore.py check   --videos D:/xcup/videos
   python3 bench/tools/audio_rescore.py rescore --videos D:/xcup/videos               # fixed
   python3 bench/tools/audio_rescore.py rescore --videos D:/xcup/videos --pipeline phone
-  python3 bench/tools/audio_rescore.py auc bench/gt bench/rescored/fixed
+  python3 bench/tools/audio_rescore.py auc bench/gt bench/rescored/audio_old
   python3 bench/tools/audio_rescore.py golden       # 改了 PcmResampler 后重新生成 Java 对拍数据
   python3 bench/tools/audio_rescore.py --selftest
 

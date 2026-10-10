@@ -14,7 +14,7 @@ fusion_lab.py 的 eval 只给总准确率 / 误转 / 漏转 / 误停和拼接样
   python3 bench/tools/arbiter_lab.py report [gt_dir] [runs_dir]   # 旧融合 vs 融合仲裁，逐片 + 拼接 + seek
   python3 bench/tools/arbiter_lab.py stress [gt_dir] [runs_dir]   # 合成压力场景 + 模拟慢手机
   python3 bench/tools/arbiter_lab.py lovo   [gt_dir] [runs_dir]   # 留一视频选参（--wide 连音频兜底窗口一起搜）
-默认 gt_dir = bench/gt，runs_dir = bench/runs_fixed。
+默认 gt_dir = bench/gt，runs_dir = bench/runs_initial。
 """
 import argparse
 import contextlib
@@ -539,7 +539,7 @@ def main():
                       ('lovo', '留一视频选参')):
         p = sub.add_parser(name, help=hlp)
         p.add_argument('gt_dir', nargs='?', default=os.path.join(ROOT, 'bench', 'gt'))
-        p.add_argument('runs_dir', nargs='?', default=os.path.join(ROOT, 'bench', 'runs_fixed'))
+        p.add_argument('runs_dir', nargs='?', default=os.path.join(ROOT, 'bench', 'runs_initial'))
         if name == 'lovo':
             p.add_argument('--wide', action='store_true', help='连音频兜底窗口 ARB_Z_WIN 一起搜')
     a = ap.parse_args()

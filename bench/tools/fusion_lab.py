@@ -19,7 +19,7 @@ run CSV 里已经存了两个模型每个 tick 的原始概率（v_p_* / a_p_*�
   python3 bench/tools/fusion_lab.py check  bench/gt bench/runs
   python3 bench/tools/fusion_lab.py eval   bench/gt bench/runs
   python3 bench/tools/fusion_lab.py oracle bench/gt bench/runs
-  python3 bench/tools/fusion_lab.py golden bench/gt bench/runs_fixed
+  python3 bench/tools/fusion_lab.py golden bench/gt bench/runs_initial
   python3 bench/tools/fusion_lab.py --selftest
 
 真值与 run 的配对：bench/gt/v01.csv 配 bench/runs/ 下以 "v01" 开头的文件（如 v01_base.csv）；
@@ -317,7 +317,7 @@ def _java_hashmap_order(keys):
 
 class LegacyCore(object):
     """旧融合：原 VideoProcessActivity 的 smoothedFusion + applyDoStartGate + selectBestAction（float 语义）。
-    app 里 2026-10-07 已删除，这里留作"旧融合"对照，并用来回放旧 run（runs_fixed 等）。"""
+    app 里 2026-10-07 已删除，这里留作"旧融合"对照，并用来回放旧融合时期录的 run。"""
 
     def __init__(self, p):
         self.win = p['SMOOTH_WIN']
@@ -2374,7 +2374,7 @@ def main():
 
     p = sub.add_parser('golden', help='生成 FusionArbiterTest 的对拍数据（改了融合仲裁的规则/参数后要重新生成）')
     common(p)
-    p.set_defaults(runs_dir=os.path.join(ROOT, 'bench', 'runs_fixed'))
+    p.set_defaults(runs_dir=os.path.join(ROOT, 'bench', 'runs_initial'))
     p.add_argument('--out', default=GOLDEN_PATH)
 
     a = ap.parse_args()
