@@ -197,6 +197,9 @@ python3 bench/tools/audio_rescore.py auc bench/gt bench/rescored/audio_old [--al
   `clean` = 训练数据的处理方式。
 - 视频按真值文件头的 `file_name` 在 `--videos`（默认 `bench/videos/`）里找，或 `--pair v01=D:/xcup/视频1.mp4`；`--only v01,v04`
   只跑几部。
+- 音轨时间戳不连续的片子（多半是分片下载再拼起来的；表现是 run 里播放位置比墙钟快 0.5% 以上，`check` 报"✗ 没能确认：两种管线
+  差不多"）：手机的 `AudioDecoder` 按每帧的 pts 打时间戳、偏差超过 100ms 就重新起头，`fixed` 管线现在用 ffprobe 读每帧 pts
+  照做（时间戳连续的片子结果逐位不变）。2026-10-11 之前 rescore 的这类片子要重跑 `check` 和 `rescore`。
 
 ### 自检
 
@@ -265,6 +268,9 @@ seek 启动不变慢；基线留一代价 996）：
   v03 一部片，留一验证不了；`bstart` 和 `a1b` 卡在 v01 变差（+14，全在"剧情 → 口交"的拼接样本里：口交的口腔声被 YAMNet 判成
   Speech，启动晚了几秒），`bstart` 还让 seek 进特写的 p90 从 9.0 秒变成 11.5 秒。YAMNet 的 521 类里找不到能把口腔声和真对白
   分开的类（两边 Speech 0.85 / 0.87，其余接近 0）。
+- 2026-10-11 新加 v08~v13（`runs_test`，不参与调参）。v08、v09、v11 上（候选事先定好）：`a1` 没有作用；`bstart` / `a1b`
+  误转 9.1%→1.9%，但 v11（边打电话边口交）漏转 22→43 秒，不能用。事后加的 `bvid`（对白的"转"只在视频最近 4 个结果都是
+  ≥0.9 的剧情时才不算启动证据）：误转 9.1%→1.9%、漏转 3.5%→3.6%，原 7 部基本不变（985→988）；要靠 v10/v12/v13 检验。
 - 新片验证：标注 + 真机录 run（第 1、2 节），放进单独的目录（如 `bench/runs_test/`，不参与调参），用
   `audio_rescore.py check / rescore --runs bench/runs_test --tag test_audio_old` 算出 `.yamnet.npz`，然后
   `python3 bench/tools/cue_lab.py eval bench/gt bench/runs_test --npz bench/rescored/test_audio_old --preset a1b`。
@@ -282,3 +288,5 @@ seek 启动不变慢；基线留一代价 996）：
 - 2026-10-10：YAMNet 线索离线实验（第 6 节，`cue_lab.py`）。A2、A3、B=all、B2、P 不成立；剩下候选 `a1`、`bstart`、`a1b`，
   app 还没改，等新片验证后再定上哪条。`fusion_lab.Tick` 多了 `ays`（音频结果的 YAMNet 分组分数），`arbiter_lab` 的 seek /
   慢手机 / 合成场景会把它带上；没有分数时一切照旧。
+- 2026-10-11：加新片 v08~v13（`runs_test`）。v10/v12/v13 的音轨时间戳比样本数快 0.5~0.9%，离线重算越播越偏（到片尾差约 6 秒），
+  `audio_rescore.py` 的 `fixed` 管线改成按每帧 pts 分段（与手机 `AudioDecoder` 一致）。`cue_lab.py` 加 `--only` 和候选 `bvid`。

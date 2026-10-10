@@ -294,34 +294,135 @@ def downmix(pcm, ch):
     return pcm.astype(np.float32) / np.float32(ch * 32768)
 
 
+DISCONTINUITY_US = 100000     # AudioDecoder.DISCONTINUITY_US：pts 与按样本数推算的时间差超过它就重新起头
+PCM_CAPACITY = SR * 20        # VideoProcessActivity：new PcmCircularBuffer(16000, 20)
+MAX_ADVANCE_MS = 3000         # AudioDecoder.MAX_ADVANCE_NORMAL：解码最多领先播放位置 3 秒
+
+
+def _lead_frames(frames, lead):
+    """_apply_lead 对应到帧表：真机流开头多 lead 个样本算进第一帧，少的从开头几帧里扣掉。"""
+    fr = [list(f) for f in frames]
+    if lead > 0 and fr:
+        fr[0][1] += lead
+    k = -lead if lead < 0 else 0
+    while k > 0 and fr:
+        d = min(k, fr[0][1])
+        fr[0][1] -= d
+        k -= d
+        if fr[0][1] == 0:
+            fr.pop(0)
+    return [tuple(f) for f in fr]
+
+
+def pts_segments(frames, sr):
+    """复刻 AudioDecoder 给 PCM 打时间戳的方式。每个解码 buffer（= 一帧）：
+      · pts（ms）比上一帧小 → 整帧丢掉（lastPtsMs 回退检查）；
+      · 与"起头 pts + 已喂样本数 / 采样率"相差超过 100ms（或是第一帧）→ 换一个新的 PcmResampler，从这一帧的 pts 起头。
+    frames：[(pts_us, nb_samples)]，与 ffmpeg 连续解出来的 PCM 按顺序首尾相接。
+    → [(起头 pts_us, [(样本起点, 样本终点), …])]。时间戳连续的音轨只有一段、中间没有洞。"""
+    segs = []
+    base = None
+    infr = 0
+    cur = 0
+    last_ms = -1
+    for pts, n in frames:
+        a, b = cur, cur + n
+        cur = b
+        ms = jdiv(pts, 1000)
+        if last_ms >= 0 and ms < last_ms:
+            continue
+        last_ms = ms
+        if base is None or abs(pts - (base + infr * 1000000 // sr)) > DISCONTINUITY_US:
+            base, infr = pts, 0
+            segs.append((pts, []))
+        rngs = segs[-1][1]
+        if rngs and rngs[-1][1] == a:
+            rngs[-1] = (rngs[-1][0], b)
+        else:
+            rngs.append((a, b))
+        infr += n
+    return segs
+
+
 class FixedPipeline(object):
     """修好之后的离线模式（现在 app 离线模式唯一的音频处理）：AudioDecoder 把每个解码 buffer 交给
-    PcmResampler，产出的 16kHz 样本连续写进 PcmCircularBuffer，时间戳 = 首个 buffer 的 pts + n/16000；
-    readWindowRelaxed(T) 取到的就是 [T-2s, T]。与 app 逐样本一致，所以拿它重算出来的 run 拟合的
-    融合配置，装到手机上就是那个效果。"""
+    PcmResampler，产出的 16kHz 样本连续写进 PcmCircularBuffer，时间戳 = 起头 buffer 的 pts + n/16000；
+    readWindowRelaxed(T) 取的是时间戳 ≤ T 的最后 32000 个样本。与 app 逐样本一致，所以拿它重算出来的 run
+    拟合的融合配置，装到手机上就是那个效果。
 
-    def __init__(self, pcm, sr, ch, lead=0, base_us=0):
+    frames（每帧的 pts 和样本数，probe_frames 取）给了而且音轨时间戳不连续时，按 pts_segments 分段：每段一个新的
+    重采样器、各自从起头 pts 打时间戳，和手机一样。有的片子（多半是分片下载再拼起来的）音轨时间戳比样本数走得快，
+    手机按时间戳、每偏 100ms 重新起头一次，而连续解码的时间轴会越来越落后（10 分钟差出好几秒）。
+    时间戳连续（只有一段、没有丢帧）时走原来的算法，结果逐位不变。"""
+
+    def __init__(self, pcm, sr, ch, lead=0, base_us=0, frames=None):
         _need_numpy()
         pcm = _apply_lead(np.asarray(pcm, dtype=np.int16), ch, lead)
         self.sr, self.ch, self.lead = sr, ch, lead
-        self.y = Resampler(sr).run(downmix(pcm, ch))
-        self.base_ms = jdiv(base_us, 1000)
+        self.ts = None
+        self.n_segments = 1
+        self.frames_note = ''
+        segs = None
+        if frames:
+            fr = _lead_frames(frames, lead)
+            total = sum(n for _, n in fr)
+            if total != len(pcm) // ch:
+                self.frames_note = '帧表样本数 %d 与解码出的 %d 对不上，按连续时间轴处理' % (total, len(pcm) // ch)
+            else:
+                segs = pts_segments(fr, sr)
+        if not segs or (len(segs) == 1 and len(segs[0][1]) == 1):
+            self.y = Resampler(sr).run(downmix(pcm, ch))
+            self.base_ms = jdiv(base_us, 1000)
+            return
+        mono = downmix(pcm, ch)
+        ys, tss = [], []
+        for base, rngs in segs:
+            seg = np.concatenate([mono[a:b] for a, b in rngs])
+            y = Resampler(sr).run(seg)
+            ys.append(y)
+            tss.append(jdiv(base, 1000) + np.arange(len(y), dtype=np.int64) // 16)
+        self.y = np.concatenate(ys)
+        self.ts = np.concatenate(tss)
+        self.monotonic = bool(np.all(np.diff(self.ts) >= 0))
+        self.run_max = np.maximum.accumulate(self.ts)
+        self.n_segments = len(segs)
+        dropped = sum(n for _, n in fr) - sum(b - a for _, r in segs for a, b in r)
+        drift = (segs[-1][0] - segs[0][0]) / 1000.0 - sum(b - a for _, r in segs[:-1] for a, b in r) * 1000.0 / sr
+        self.frames_note = '音轨时间戳不连续：按 pts 分 %d 段重新起头（和手机一样），累计偏移 %+.0fms%s' % (
+            len(segs), drift, '，丢掉 pts 回退的 %d 个样本' % dropped if dropped else '')
 
     def window(self, T):
         T = int(T)
-        # 第 n 个样本的时间戳 = base_ms + n // 16（PcmCircularBuffer.write：块起点 + i*1000/16000）
-        hi = min(len(self.y), max(0, (T - self.base_ms) * 16 + 16))          # ts <= T
-        first = max(0, (1 - self.base_ms) * 16)                               # ts > 0
-        lo = max(first, hi - WIN)
-        cnt = hi - lo
+        if self.ts is None:
+            # 第 n 个样本的时间戳 = base_ms + n // 16（PcmCircularBuffer.write：块起点 + i*1000/16000）
+            hi = min(len(self.y), max(0, (T - self.base_ms) * 16 + 16))          # ts <= T
+            first = max(0, (1 - self.base_ms) * 16)                               # ts > 0
+            lo = max(first, hi - WIN)
+            cnt = hi - lo
+            if cnt < WIN * 0.9:
+                return None
+            out = np.zeros(WIN, np.float32)
+            out[WIN - cnt:] = self.y[lo:hi]
+            return out
+        if self.monotonic:              # 时间戳只往前跳：时间戳 ≤ T 的样本正好是写入顺序的一段前缀
+            hi = int(np.searchsorted(self.ts, T, 'right'))
+            first = int(np.searchsorted(self.ts, 0, 'right'))
+            take = np.arange(max(first, hi - WIN), hi)
+        else:                           # 有往回跳的：照 readWindowRelaxed 从最新写入的样本往回挑 0 < ts ≤ T 的
+            wpos = int(np.searchsorted(self.run_max, T + MAX_ADVANCE_MS, 'right'))
+            a = max(0, wpos - PCM_CAPACITY)
+            seg = self.ts[a:wpos]
+            take = np.flatnonzero((seg > 0) & (seg <= T))[-WIN:] + a
+        cnt = len(take)
         if cnt < WIN * 0.9:
             return None
         out = np.zeros(WIN, np.float32)
-        out[WIN - cnt:] = self.y[lo:hi]
+        out[WIN - cnt:] = self.y[take]
         return out
 
     def describe(self):
-        return '修复后的 app：%d 声道下混 + PcmResampler 抗混叠重采样到 16kHz，窗口 [T-2s, T]' % self.ch
+        return '修复后的 app：%d 声道下混 + PcmResampler 抗混叠重采样到 16kHz，窗口 [T-2s, T]%s' % (
+            self.ch, '；' + self.frames_note if self.frames_note else '')
 
 
 class CleanPipeline(object):
@@ -416,13 +517,43 @@ def probe_audio(path, ffmpeg, ffprobe):
     return info
 
 
+def probe_frames(path, ffprobe):
+    """第一条音轨每个解码帧的 (pts_us, 样本数)，顺序与 ffmpeg 连续解出来的 PCM 一致。pts 按 MediaExtractor 的算法
+    换成微秒（时间刻度整数 × 1e6 / timescale，向零取整）。没有 ffprobe 或读不出来时返回 None。"""
+    if not ffprobe:
+        return None
+    out = _run([ffprobe, '-v', 'error', '-select_streams', 'a:0', '-show_entries',
+                'stream=time_base:frame=pts,pkt_dts,best_effort_timestamp,nb_samples', '-of', 'json', path])
+    j = json.loads(out.decode('utf-8', 'replace'))
+    try:
+        num, den = (int(x) for x in j['streams'][0]['time_base'].split('/'))
+    except (KeyError, IndexError, ValueError):
+        return None
+    frames = []
+    for f in j.get('frames', []):
+        n = int(f.get('nb_samples') or 0)
+        ts = None
+        for k in ('pts', 'best_effort_timestamp', 'pkt_dts'):
+            v = f.get(k)
+            if v not in (None, 'N/A'):
+                ts = int(v)
+                break
+        if n <= 0 or ts is None:
+            return None
+        frames.append((jdiv(ts * 1000000 * num, den), n))
+    return frames or None
+
+
 def decode(path, ffmpeg, args, dtype):
     cmd = [ffmpeg, '-nostdin', '-hide_banner', '-v', 'error', '-i', path,
            '-map', '0:a:0', '-vn', '-sn', '-dn'] + args + ['pipe:1']
     return np.frombuffer(_run(cmd), dtype=dtype)
 
 
-def build_pipeline(kind, path, info, ffmpeg, frame=None, lead=0):
+_FRAMES = {}
+
+
+def build_pipeline(kind, path, info, ffmpeg, frame=None, lead=0, ffprobe=None):
     t0 = time.time()
     if kind == 'phone':
         pcm = decode(path, ffmpeg, ['-f', 's16le', '-acodec', 'pcm_s16le'], np.int16)
@@ -433,7 +564,9 @@ def build_pipeline(kind, path, info, ffmpeg, frame=None, lead=0):
     elif kind == 'fixed':
         pcm = decode(path, ffmpeg, ['-f', 's16le', '-acodec', 'pcm_s16le'], np.int16)
         base_us = int(round(max(0.0, info['start_time']) * 1e6))
-        pipe = FixedPipeline(pcm, info['sample_rate'], info['channels'], lead, base_us)
+        if path not in _FRAMES:
+            _FRAMES[path] = probe_frames(path, ffprobe)
+        pipe = FixedPipeline(pcm, info['sample_rate'], info['channels'], lead, base_us, _FRAMES[path])
     else:
         # 与训练脚本完全相同：ffmpeg -ac 1 -ar 16000 输出 16-bit。注意不能直接要 f32 输出——ffmpeg 只在
         # 整数输出格式下把下混系数归一化成 (L+R)/2，f32 输出是 0.707*(L+R)，比训练数据响 3dB。
@@ -865,7 +998,7 @@ def cmd_check(a):
         dump = {}
         for kind in kinds:
             lead = 0 if a.lead == 'auto' else int(a.lead)
-            pipe = build_pipeline(kind, vpath, info, ffmpeg, a.frame_size, lead)
+            pipe = build_pipeline(kind, vpath, info, ffmpeg, a.frame_size, lead, ffprobe)
             print('  %-6s %s' % (kind, pipe.describe()))
             best, curve, sinfo = scan_offset(pipe, model, res, scan, a.scan_n)
             if best is None:
@@ -1077,7 +1210,7 @@ def cmd_rescore(a):
             lead = int(a.lead)
         else:
             lead = int(rec.get('phone', {}).get('lead', 0)) if rec.get('device_pipeline') == 'phone' else 0
-        pipe = build_pipeline(a.pipeline, vpath, info, ffmpeg, a.frame_size, lead)
+        pipe = build_pipeline(a.pipeline, vpath, info, ffmpeg, a.frame_size, lead, ffprobe)
         computed, ts_list, T_list, P, Y = {}, [], [], [], []
         for x in res:
             w = pipe.window(x.ref - delta)
@@ -1427,6 +1560,91 @@ def _synth_audio(seconds, sr, ch, seed=0):
     return np.clip(np.round(x * 12000), -32768, 32767).astype(np.int16).reshape(-1)
 
 
+def _java_fixed_reference(pcm, sr, ch, frames, Ts):
+    """逐行照抄 AudioDecoder 的打时间戳（pts 回退丢帧、偏差 > 100ms 换重采样器重新起头）+ PcmCircularBuffer.write +
+    readWindowRelaxed（从最新写入的样本往回挑 0 < ts ≤ T 的，凑够 32000 个）。只给自检用，慢。
+    "写到哪了"用解码领先 3 秒近似：写入顺序里时间戳（取到目前为止的最大值）不超过 T + 3 秒的都已写入。"""
+    mono = downmix(pcm, ch)
+    segs, base, infr, cur, last_ms = [], None, 0, 0, -1
+    for pts, n in frames:
+        a, b = cur, cur + n
+        cur = b
+        ms = jdiv(pts, 1000)
+        if last_ms >= 0 and ms < last_ms:
+            continue
+        last_ms = ms
+        if base is None or abs(pts - (base + infr * 1000000 // sr)) > DISCONTINUITY_US:
+            base, infr = pts, 0
+            segs.append([pts, []])
+        segs[-1][1].append(mono[a:b])
+        infr += n
+    ys, tss = [], []
+    for base, chunks in segs:
+        y = Resampler(sr).run(np.concatenate(chunks))
+        for i in range(len(y)):
+            ys.append(y[i])
+            tss.append(jdiv(base, 1000) + (i * 1000) // SR)
+    out = []
+    for T in Ts:
+        written, top = 0, None
+        for k, t in enumerate(tss):
+            top = t if top is None or t > top else top
+            if top > T + MAX_ADVANCE_MS:
+                break
+            written = k + 1
+        got = []
+        for k in range(written - 1, max(-1, written - 1 - PCM_CAPACITY), -1):
+            if 0 < tss[k] <= T:
+                got.append(ys[k])
+                if len(got) == WIN:
+                    break
+        if len(got) < WIN * 0.9:
+            out.append(None)
+            continue
+        w = np.zeros(WIN, np.float32)
+        w[WIN - len(got):] = np.asarray(got[::-1], np.float32)
+        out.append(w)
+    return out
+
+
+def _selftest_drift_file(ffmpeg, ffprobe, check):
+    """用 ffmpeg 合成一个音轨时间戳比样本快 0.8% 的 AAC（setts 把每个包的时间戳乘 1.008），每 5 秒一个 100ms 的音。
+    手机按时间戳，所以第 k 个音出现在播放位置 k*5*1.008 秒：按 pts 分段的窗口要把它放在离期望位置 100ms 以内。"""
+    import tempfile
+    sr, ch, secs, rate = 48000, 2, 60, 1.008
+    x = np.zeros((sr * secs, ch), np.int16)
+    tt = np.arange(int(0.1 * sr)) / float(sr)
+    for k in range(1, secs // 5):
+        x[k * 5 * sr:k * 5 * sr + len(tt)] = (8000 * np.sin(2 * np.pi * 1000 * tt))[:, None].astype(np.int16)
+    d = tempfile.mkdtemp(prefix='xcup_drift_')
+    try:
+        raw, mp4 = os.path.join(d, 'a.raw'), os.path.join(d, 'drift.mp4')
+        x.tofile(raw)
+        _run([ffmpeg, '-nostdin', '-v', 'error', '-y', '-f', 's16le', '-ar', str(sr), '-ac', str(ch), '-i', raw,
+              '-c:a', 'aac', '-b:a', '128k', '-bsf:a', 'setts=pts=PTS*%g:dts=DTS*%g' % (rate, rate), mp4])
+        info = probe_audio(mp4, ffmpeg, ffprobe)
+        old = build_pipeline('fixed', mp4, dict(info), ffmpeg)
+        _FRAMES.pop(mp4, None)
+        new = build_pipeline('fixed', mp4, dict(info), ffmpeg, ffprobe=ffprobe)
+        _FRAMES.pop(mp4, None)
+        worst_new, worst_old = 0.0, 0.0
+        for k in (5, 8, 11):
+            T = int(k * 5 * 1000 * rate + 1000)
+            for p, name in ((old, 'old'), (new, 'new')):
+                e = np.convolve(p.window(T) ** 2, np.ones(160), 'same')
+                off = abs(int(np.argmax(e)) - (WIN - SR)) / 16.0
+                if name == 'new':
+                    worst_new = max(worst_new, off)
+                else:
+                    worst_old = max(worst_old, off)
+        check(new.ts is not None and new.n_segments > 1, '时间戳偏快的音轨应被分段，实际 %s' % new.describe())
+        check(worst_new < 100 and worst_old > 300,
+              '时间戳偏快：分段后最大偏差应 < 100ms（实际 %.0fms），原算法应 > 300ms（实际 %.0fms）'
+              % (worst_new, worst_old))
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def selftest():
     if np is None:
         print('selftest: 需要 numpy')
@@ -1492,6 +1710,40 @@ def selftest():
         y = Resampler(48000).run(downmix(np.repeat(tone, 2), 2))[800:-800]
         gain = np.sqrt(np.mean(y ** 2)) / (0.5 / np.sqrt(2))
         check(lo <= gain <= hi, 'Resampler 48k→16k 在 %dHz 的增益 %.4f 不在 [%g, %g]' % (hz, gain, lo, hi))
+
+    # 2c. 音轨时间戳不连续（分片拼接的片子）：按 pts 分段重新起头，与逐行照抄的 Java 一致；时间戳连续时与原算法逐位相同
+    sr2, ch2 = 44100, 2
+    pcm2 = _synth_audio(24, sr2, ch2, seed=7)
+    nfr = len(pcm2) // ch2 // 1024
+    pcm2 = pcm2[:nfr * 1024 * ch2]
+    flat = [(jdiv(k * 1024 * 1000000, sr2), 1024) for k in range(nfr)]
+    p0, p1 = FixedPipeline(pcm2, sr2, ch2), FixedPipeline(pcm2, sr2, ch2, frames=flat)
+    check(p1.ts is None and np.array_equal(p0.y, p1.y), '时间戳连续时带帧表的 FixedPipeline 应与原算法逐位相同')
+    check(len(pts_segments(flat, sr2)) == 1, '时间戳连续时应只有一段')
+    drift = [(int(k * 1024 * 1000000 * 1.008 / sr2), 1024) for k in range(nfr)]     # 时间戳快 0.8%：往前跳
+    back = [(int(k * 1024 * 1000000 * 0.992 / sr2), 1024) for k in range(nfr)]      # 慢 0.8%：重新起头时往回跳
+    back[300] = (back[299][0] - 50000, 1024)                                        # 再加一帧 pts 回退：整帧丢掉
+    Ts = [2600, 7300, 9999, 12345, 15000, 18800, 21000, 23500]
+    for name, fr in (('时间戳偏快', drift), ('时间戳偏慢 + pts 回退', back)):
+        segs = pts_segments(fr, sr2)
+        pipe = FixedPipeline(pcm2, sr2, ch2, frames=fr)
+        ref = _java_fixed_reference(pcm2, sr2, ch2, fr, Ts)
+        bad = sum(1 for T, rw in zip(Ts, ref)
+                  if (rw is None) != (pipe.window(T) is None)
+                  or (rw is not None and not np.array_equal(pipe.window(T), rw)))
+        check(len(segs) > 1 and pipe.ts is not None and bad == 0,
+              'FixedPipeline 分段（%s）与逐行 Java 不一致：%d 段，%d/%d 个窗口' % (name, len(segs), bad, len(Ts)))
+    check(not FixedPipeline(pcm2, sr2, ch2, frames=back).monotonic, '时间戳偏慢时重新起头会往回跳，应走逐个挑选的读法')
+    if not fails:
+        print('  ok   音轨时间戳不连续时按 pts 分段，与逐行照抄的 Java 一致；连续时与原算法逐位相同')
+    ff2, fp2 = shutil.which('ffmpeg'), shutil.which('ffprobe')
+    if ff2 and fp2:
+        n_before = len(fails)
+        _selftest_drift_file(ff2, fp2, check)
+        if len(fails) == n_before:
+            print('  ok   ffmpeg 合成"时间戳快 0.8%"的 AAC：离线窗口跟着时间戳走（偏差 < 100ms，原算法越走越偏）')
+    else:
+        print('  skip 时间戳偏快的端到端测试（需要 ffmpeg 和 ffprobe）')
 
     # 3. clean 管线取窗
     x = np.arange(SR * 10, dtype=np.float32)

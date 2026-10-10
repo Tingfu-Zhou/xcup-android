@@ -22,7 +22,8 @@ rescore 写的，每个音频结果的 521 类分数，按结果时间戳 wall-a
   A2 "听不出"时音频的"不转"不算结束证据
   A3 "听不出"时音频的"转"不算启动证据：1 = 只在音频兜底（"9 秒内全部是转"）里；2 = 所有启动规则。
      A3 的"听不出"单独由 a3_set 定（A1 放行视频时安静的风险大，A3 不让安静里的"转"启动则正需要安静）
-  B  对白时音频的"转"按 unclear 记：start = 只在启动判断里；all = 启动和维持都算
+  B  对白时音频的"转"按 unclear 记：start = 只在启动判断里；all = 启动和维持都算；
+     vid = 只在启动判断里、而且只在视频最近 bvn 个结果都是置信度 ≥ bvc 的"剧情"时（2026-10-11 看了 v09/v11 之后加的）
   B2 最近 bv 个音频结果都是对白时，视频不能单独维持
   P1 最近 p_n 个音频结果都是"确认的转"（分类头判转 + 人声 / 拍打）时直接启动（新原因 start_cue）
   P2 维持时，最近 4 个音频结果里有确认的转，音频支持就从 3 个转降到 2 个（新原因 hold_cue）；
@@ -104,13 +105,14 @@ CFG0 = dict(
     a1=0, a1_n=2, a1_cv=3, a1_cons=90,   # A1：音频最近 a1_n 个都听不出 + 3 秒内视频强转 ≥ a1_cv + 视频占比 ≥ a1_cons%
     a2=0,
     a3=0,               # 0 / 1（只管音频兜底）/ 2（所有启动规则）
-    b='off',            # off / start / all
+    b='off',            # off / start / all / vid
+    bvn=4, bvc=0.9,     # b=vid：视频最近 bvn 个结果都是置信度 ≥ bvc 的"剧情"时才否决
     bv=0,               # B2：最近 bv 个音频结果都是对白时视频不能单独维持（0 = 关）
     p1=0, p_n=3,        # P1：最近 p_n 个音频结果都是确认的转 → 启动
     p2=0,               # P2：确认的转让音频维持少要一个转
     p2_max=6000,        # P2 最多续多久（ms，从最后一次正常支持算起）
 )
-_INT_KEYS = ('a1', 'a1_n', 'a1_cv', 'a1_cons', 'a2', 'a3', 'bv', 'p1', 'p_n', 'p2', 'p2_max')
+_INT_KEYS = ('a1', 'a1_n', 'a1_cv', 'a1_cons', 'a2', 'a3', 'bv', 'p1', 'p_n', 'p2', 'p2_max', 'bvn')
 
 # 2026-10-10 留一视频 + 敏感曲线之后剩下的候选（阈值都在平台中间，前后挪一档结果几乎不变）
 PRESETS = {
@@ -119,6 +121,9 @@ PRESETS = {
     # 对白（人声 < 0.01、Speech ≥ 0.7）时分类头的"转"不算启动证据；维持不受影响
     'bstart': dict(b='start', d_voc=0.01, d_sp=0.7),
     'a1b': dict(a1=1, uninf='mqb', a1_n=4, a1_cons=90, b='start', d_voc=0.01, d_sp=0.7),
+    # 2026-10-11 看了 v09（剧情对白、视频很确定是剧情）和 v11（边打电话边口交、视频不确定）之后加的：
+    # 对白的"转"只在视频最近 4 个结果都是 ≥0.9 的剧情时才不算启动证据。是事后设计的，要靠 v10/v12/v13 和新片检验
+    'bvid': dict(b='vid', d_voc=0.01, d_sp=0.7, bvn=4, bvc=0.9),
 }
 _STR_KEYS = ('voc', 'sp', 'uninf', 'a3_set', 'b')
 
@@ -166,9 +171,10 @@ def cfg_str(c, full=False):
         if c['a1']:
             parts.append('A1[n=%d,强转≥%d,占比≥%d%%]' % (c['a1_n'], c['a1_cv'], c['a1_cons']))
     if c['b'] != 'off' or c['bv']:
-        parts.append('%s(人声<%g,Speech≥%g)' % ('+'.join(([('B=' + c['b'])] if c['b'] != 'off' else [])
-                                                         + (['B2[%d]' % c['bv']] if c['bv'] else [])),
-                                               c['d_voc'], c['d_sp']))
+        parts.append('%s(人声<%g,Speech≥%g%s)' % ('+'.join(([('B=' + c['b'])] if c['b'] != 'off' else [])
+                                                           + (['B2[%d]' % c['bv']] if c['bv'] else [])),
+                                                 c['d_voc'], c['d_sp'],
+                                                 ',视频最近%d个都是≥%g的剧情' % (c['bvn'], c['bvc']) if c['b'] == 'vid' else ''))
     if c['p1'] or c['p2']:
         parts.append('%s(人声≥%g或拍打≥%g%s%s)' % ('+'.join(x.upper() for x in ('p1', 'p2') if c[x]), c['p_voc'],
                                                 c['p_imp'], ',n=%d' % c['p_n'] if c['p1'] else '',
@@ -214,8 +220,9 @@ def group_features(scores):
 
 
 # ======================================================================== 带线索的融合仲裁
-# 账本一条：(ts, 置信度, 原始类别, 启动用类别, 兜底用类别, 维持用类别, 算不算结束证据, 听不出, 确认的转, 对白)
-_CONF, _K0, _KS, _KZ, _KH, _NEG, _UN, _CF, _DL = 1, 2, 3, 4, 5, 6, 7, 8, 9
+# 账本一条：(ts, 置信度, 原始类别, 启动用类别, 兜底用类别, 维持用类别, 算不算结束证据, 听不出, 确认的转, 对白,
+#           b=vid 否决生效时的启动用类别, b=vid 否决生效时的兜底用类别)
+_CONF, _K0, _KS, _KZ, _KH, _NEG, _UN, _CF, _DL, _KSV, _KZV = 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
 
 
 class _Ledger(object):
@@ -346,11 +353,22 @@ class CueArbiter(object):
         kz = 0 if (k == 1 and un3) else ks
         kh = 0 if (k == 1 and dial and self.b_hold) else k
         neg = k == -1 and not (un and c['a2'])
-        return (ac, k, ks, kz, kh, neg, un, k == 1 and cue in self.confirm, dial)
+        ksv = 0 if (k == 1 and dial) else ks
+        kzv = 0 if (k == 1 and dial) else kz
+        return (ac, k, ks, kz, kh, neg, un, k == 1 and cue in self.confirm, dial, ksv, kzv)
 
     def _has_neg(self, now):
         w = self.p['ARB_NEG_WIN']
         return self.video.count(now, w, _NEG, True) + self.audio.count(now, w, _NEG, True) > 0
+
+    def _video_says_plot(self, now):
+        """b=vid：视频最近 bvn 个结果（都在 M_MAX 内）全是置信度 ≥ bvc 的"剧情"。"""
+        c, p = self.c, self.p
+        its = self.video.items[-c['bvn']:]
+        if len(its) < c['bvn']:
+            return False
+        lo = now - p['ARB_M_MAX']
+        return all(it[0] > lo and it[_K0] == -1 and it[_CONF] >= F.f32(c['bvc']) for it in its)
 
     def _video_support(self, now, cons_pct):
         p = self.p
@@ -366,18 +384,21 @@ class CueArbiter(object):
             self.reset(now)
         self.prev_now = now
         kv = F._arb_cls(v)
-        self.video.feed(v_ts, (vc, kv, kv, kv, kv, kv == -1, False, False, False), now)
+        self.video.feed(v_ts, (vc, kv, kv, kv, kv, kv == -1, False, False, False, kv, kv), now)
         self.audio.feed(a_ts, self._arec(a, ac, cue), now)
         if not motor_on:
             self.last_support = -1
+            KS, KZ = _KS, _KZ
+            if c['b'] == 'vid' and self._video_says_plot(now):
+                KS, KZ = _KSV, _KZV
             if self.video.count(now, p['ARB_C_WIN'], _K0, 1, self.v_floor) >= p['ARB_C_V'] and \
-                    self.audio.count(now, p['ARB_C_WIN'], _KS, 1, self.a_floor) >= p['ARB_C_A'] and \
+                    self.audio.count(now, p['ARB_C_WIN'], KS, 1, self.a_floor) >= p['ARB_C_A'] and \
                     (self._video_support(now, p['ARB_START_V_CONS'])
-                     or self.audio.last_n_pos(now, p['ARB_MA_N'], p['ARB_M_MAX'], _KS) >= p['ARB_START_MA_K']):
+                     or self.audio.last_n_pos(now, p['ARB_MA_N'], p['ARB_M_MAX'], KS) >= p['ARB_START_MA_K']):
                 self.reason = 'start_both'
                 return 'do'
             n = self.audio.total(now, p['ARB_Z_WIN'])
-            if n >= p['ARB_Z_N'] and self.audio.count(now, p['ARB_Z_WIN'], _KZ, 1) == n:
+            if n >= p['ARB_Z_N'] and self.audio.count(now, p['ARB_Z_WIN'], KZ, 1) == n:
                 self.reason = 'start_audio'
                 return 'do'
             if c['p1'] and self.audio.last_n_all(now, c['p_n'], p['ARB_M_MAX'], _CF):   # 不看视频：特写时也能启动
@@ -480,10 +501,15 @@ def attach_features(videos, npz_dir, say=print):
     return cov
 
 
-def load(gt_dir=DEF_GT, runs_dir=DEF_RUNS, npz_dir=DEF_NPZ, seeks=True, quiet=False):
+def load(gt_dir=DEF_GT, runs_dir=DEF_RUNS, npz_dir=DEF_NPZ, seeks=True, quiet=False, only=None):
     d = A.Data()
     with contextlib.redirect_stdout(io.StringIO()):
         d.videos = F.load_videos(gt_dir, runs_dir, quiet=True)
+    if only:
+        keep = set(x.strip() for x in only.split(',') if x.strip())
+        d.videos = [v for v in d.videos if v.vid in keep]
+        if not d.videos:
+            sys.exit('--only %s：一部片都没选中' % only)
     d.coverage = attach_features(d.videos, npz_dir, say=(lambda *a: None) if quiet else print)
     d.splices = dict((v.vid, F.make_splices(v)) for v in d.videos)
     d.prep = dict((v.vid, A.prepare(v)) for v in d.videos)
@@ -507,7 +533,7 @@ def _gt_bin(video, pos_ms):
 
 # ======================================================================== stats / blame
 def cmd_stats(a):
-    d = load(a.gt_dir, a.runs_dir, a.npz, seeks=False)
+    d = load(a.gt_dir, a.runs_dir, a.npz, only=a.only, seeks=False)
     c = parse_cfg(a.cfg, a.preset)
     print('线索定义：%s' % cfg_str(c, full=True))
     print('（只取 2 秒窗整段落在同一真值段内、且在评测范围里的音频结果；"判转%" 是分类头在该线索下判"转"的比例）\n')
@@ -549,7 +575,7 @@ def _replay_log(prep, cfg):
 
 
 def cmd_blame(a):
-    d = load(a.gt_dir, a.runs_dir, a.npz, seeks=False)
+    d = load(a.gt_dir, a.runs_dir, a.npz, only=a.only, seeks=False)
     c = parse_cfg(a.cfg, a.preset)
     v1 = make_cfg()
     print('基线（v1）回放，按 500ms tick 统计（与 100ms 栅格的官方指标有细微差别）。线索定义：%s\n' % cfg_str(c, full=True))
@@ -800,7 +826,7 @@ def _fmt_row(want, ok, on, at):
 
 
 def cmd_stress(a):
-    d = load(a.gt_dir, a.runs_dir, a.npz, seeks=False, quiet=True)
+    d = load(a.gt_dir, a.runs_dir, a.npz, only=a.only, seeks=False, quiet=True)
     params = d.videos[0].params
     c = parse_cfg(a.cfg, a.preset)
     r0 = run_stress(factory(make_cfg()), params)
@@ -866,7 +892,7 @@ def fp_seconds(r):
 
 
 def cmd_eval(a):
-    d = load(a.gt_dir, a.runs_dir, a.npz)
+    d = load(a.gt_dir, a.runs_dir, a.npz, only=a.only)
     c = parse_cfg(a.cfg, a.preset)
     cost = F.Cost.parse(a.cost)
     base = A.evaluate(d, A.factory('arbiter'), cost)
@@ -895,7 +921,7 @@ def cmd_eval(a):
 
 # ======================================================================== 扫参（样本内，只看方向）
 def cmd_scan(a):
-    d = load(a.gt_dir, a.runs_dir, a.npz, seeks=False, quiet=True)
+    d = load(a.gt_dir, a.runs_dir, a.npz, only=a.only, seeks=False, quiet=True)
     cost = F.Cost.parse(a.cost)
     vids = [v.vid for v in d.videos]
 
@@ -1096,7 +1122,7 @@ def select_fold(grid, res, train, seeks, fn_w=1.0, max_check=400):
 
 def cmd_lovo(a):
     cost = F.Cost.parse(a.cost)
-    d = load(a.gt_dir, a.runs_dir, a.npz, quiet=True)
+    d = load(a.gt_dir, a.runs_dir, a.npz, only=a.only, quiet=True)
     vids = [v.vid for v in d.videos]
     print('YAMNet 分数接上的音频结果：%s' % ', '.join('%s %d/%d' % (v, d.coverage[v][0], d.coverage[v][1]) for v in vids))
     # 基线留一：arbiter_lab lovo（NARROW 网格选融合仲裁参数），逐片代价单独算出来作对照
@@ -1230,7 +1256,7 @@ SENS_AXES = [
 
 
 def cmd_sens(a):
-    d = load(a.gt_dir, a.runs_dir, a.npz, quiet=True)
+    d = load(a.gt_dir, a.runs_dir, a.npz, only=a.only, quiet=True)
     cost = F.Cost.parse(a.cost)
     c0 = parse_cfg(a.cfg, a.preset)
     vids = [v.vid for v in d.videos]
@@ -1283,12 +1309,13 @@ def selftest():
     # 2. 开关全关 / 线索未知时与 v1 逐 tick 一致：真实片子 + 拼接样本 + seek 片段
     d = load(quiet=True)
     full = make_cfg(a1=1, a2=1, a3=2, b='all', bv=2, p1=1, p2=1, uninf='mqb', a3_set='mqb')
+    full_vid = make_cfg(a1=1, a3=2, b='vid', p1=1, p2=1, uninf='mqb', a3_set='mqb')
     n, bad = 0, []
     for v in d.videos:
         preps = [d.prep[v.vid]] + d.sprep[v.vid] + [pp for _, _, pp, _, _ in d.seeks[v.vid]]
         for pp in preps:
             # 开关全关 + 真实线索；开关全开 + 线索未知：两种都必须与 v1 相同
-            for cfg, use_cue in ((make_cfg(), True), (full, False)):
+            for cfg, use_cue in ((make_cfg(), True), (full, False), (full_vid, False)):
                 ref = F.FusionArbiter(pp.video.params)
                 arb = CueArbiter(pp.video.params, cfg)
                 for i in range(len(pp.pos)):
@@ -1367,6 +1394,7 @@ def main():
         p.add_argument('--cfg', nargs='*', default=[], help='覆盖配置，如 a1=1 b=start d_sp=0.8')
         p.add_argument('--preset', default='', help='候选配置：%s（--cfg 可以再覆盖）' % ' / '.join(sorted(PRESETS)))
         p.add_argument('--cost', default='fp=1,fn=1,stop=3')
+        p.add_argument('--only', default='', help='只看这几部片，如 v08,v09,v11')
         if name == 'stress':
             p.add_argument('--brief', action='store_true', help='安全约束只列两边不同或没过的')
         if name == 'eval':
