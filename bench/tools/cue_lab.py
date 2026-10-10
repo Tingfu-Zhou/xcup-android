@@ -40,12 +40,13 @@ rescore 写的，每个音频结果的 521 类分数，按结果时间戳 wall-a
   python3 bench/tools/cue_lab.py sens   [--cfg ..]  # 阈值敏感曲线：一次动一个参数
   python3 bench/tools/cue_lab.py --selftest
 --cfg 用 k=v 覆盖默认配置，如 --cfg a1=1 b=start d_sp=0.8；可用的键见 CFG0。--preset 用 PRESETS 里起好名字的候选。
-其他片子：在命令后面给 <gt 目录> <runs 目录>，--npz 指定 .yamnet.npz 所在目录，例如新片：
-  python3 bench/tools/cue_lab.py eval bench/gt bench/runs_test --npz bench/rescored/test_audio_old --preset a1
+其他片子：在命令后面给 <gt 目录> <runs 目录>，--npz 指定 .yamnet.npz 所在目录（都可以逗号分隔给几个），例如全部 13 部：
+  python3 bench/tools/cue_lab.py eval bench/gt bench/runs_initial,bench/runs_test \
+      --npz bench/rescored/audio_old,bench/rescored/test_audio_old --preset a1bvid
 
-2026-10-10 的结论（7 部片，详见 bench/README.md 第 6 节）：A2、A3、B=all、B2、P 留一视频都不成立；
-B=start 每一折都选中同一组阈值（留一代价 996 → 891），但口交时 YAMNet 常把口腔声判成 Speech，会推迟启动；
-A1 只在 v03（动作里有背景音乐）上起作用，另外 6 部完全不变。候选见 PRESETS。
+结论（详见 bench/README.md 第 6 节）：2026-10-10 在 7 部片上，A2、A3、B=all、B2、P 留一视频都不成立；B=start 留一成立，
+但口交时 YAMNet 常把口腔声判成 Speech，会推迟启动。2026-10-11 加 6 部新片：B=start 让 v11（边打电话边口交）漏转翻倍；
+改成 bvid（只在视频确定是剧情时否决）后 v10/v12/v13 独立检验没有坏处。13 部片上推荐 a1bvid。候选见 PRESETS。
 """
 import argparse
 import contextlib
@@ -124,6 +125,8 @@ PRESETS = {
     # 2026-10-11 看了 v09（剧情对白、视频很确定是剧情）和 v11（边打电话边口交、视频不确定）之后加的：
     # 对白的"转"只在视频最近 4 个结果都是 ≥0.9 的剧情时才不算启动证据。是事后设计的，要靠 v10/v12/v13 和新片检验
     'bvid': dict(b='vid', d_voc=0.01, d_sp=0.7, bvn=4, bvc=0.9),
+    # 2026-10-11 在 13 部片上的推荐组合（见 bench/README.md 第 6 节）
+    'a1bvid': dict(a1=1, uninf='mqb', a1_n=4, a1_cons=90, b='vid', d_voc=0.01, d_sp=0.7, bvn=4, bvc=0.9),
 }
 _STR_KEYS = ('voc', 'sp', 'uninf', 'a3_set', 'b')
 
@@ -471,12 +474,15 @@ def factory(cfg):
 
 # ======================================================================== 数据
 def attach_features(videos, npz_dir, say=print):
-    """把 <npz_dir>/<run 文件名>.yamnet.npz 的分数按结果时间戳接到每个 tick（Tick.ays）。返回 {vid: (接上, 总数)}。"""
+    """把 <npz_dir>/<run 文件名>.yamnet.npz 的分数按结果时间戳接到每个 tick（Tick.ays）。返回 {vid: (接上, 总数)}。
+    npz_dir 可以是逗号分隔的几个目录，按顺序找。"""
     import numpy as np
     cov = {}
+    dirs = [x for x in npz_dir.split(',') if x]
     for v in videos:
         stem = os.path.splitext(os.path.basename(v.run_path))[0]
-        path = os.path.join(npz_dir, stem + '.yamnet.npz')
+        cands = [os.path.join(x, stem + '.yamnet.npz') for x in dirs]
+        path = next((c for c in cands if os.path.exists(c)), cands[0])
         if not os.path.exists(path):
             say('  ⚠ %s：没有 %s，这部片的线索全是"未知"（规则不生效）' % (v.vid, os.path.relpath(path, ROOT)))
             cov[v.vid] = (0, 0)
@@ -503,8 +509,18 @@ def attach_features(videos, npz_dir, say=print):
 
 def load(gt_dir=DEF_GT, runs_dir=DEF_RUNS, npz_dir=DEF_NPZ, seeks=True, quiet=False, only=None):
     d = A.Data()
-    with contextlib.redirect_stdout(io.StringIO()):
-        d.videos = F.load_videos(gt_dir, runs_dir, quiet=True)
+    d.videos = []
+    for rd in [x for x in runs_dir.split(',') if x]:      # 可以给几个 run 目录（逗号分隔），同一部片取第一个
+        with contextlib.redirect_stdout(io.StringIO()):
+            try:
+                vs = F.load_videos(gt_dir, rd, quiet=True)
+            except SystemExit:
+                vs = []
+        have = set(v.vid for v in d.videos)
+        d.videos += [v for v in vs if v.vid not in have]
+    d.videos.sort(key=lambda v: v.vid)
+    if not d.videos:
+        sys.exit('在 %s 下没找到能和真值配对的 run' % runs_dir)
     if only:
         keep = set(x.strip() for x in only.split(',') if x.strip())
         d.videos = [v for v in d.videos if v.vid in keep]
