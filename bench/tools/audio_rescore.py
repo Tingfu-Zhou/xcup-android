@@ -599,7 +599,8 @@ def _interpreter_class():
 
 class AudioModel(object):
     """与 AudioInferenceHelper.predict() 相同：YAMNet → 各帧 embedding 平均 → 分类器。
-    另外留下 output 0 的 AudioSet 521 类分数（各帧平均），只做离线分析：app 不算这些分数。"""
+    另外留下 output 0 的 AudioSet 521 类分数（各帧平均，与 app 一样逐帧累加再除帧数）：存进 .yamnet.npz，
+    也用来重算音频线索（AudioCue）。"""
 
     def __init__(self, yamnet=DEFAULT_YAMNET, classifier=DEFAULT_CLASSIFIER, threads=None):
         _need_numpy()
@@ -1106,7 +1107,8 @@ def classify(probs, do_th, noise_th):
 
 
 def write_rescored(run_path, out_path, computed, note):
-    """computed: {结果时刻 ts: (probs[3], ys[len(YS_COLS)])}。其余列原样保留。"""
+    """computed: {结果时刻 ts: (probs[3], ys[len(YS_COLS)][, 线索分组分数 F.cue_features])}。其余列原样保留。
+    线索列（a_cue、a_cue_*）按重算的分数重写：fusion_lab 回放时优先用 a_cue 列，留着原 run 的会对不上新音频。"""
     comments, header, rows = [], None, []
     with io.open(run_path, encoding='utf-8-sig') as fh:
         for raw in fh:
@@ -1123,7 +1125,8 @@ def write_rescored(run_path, out_path, computed, note):
                 rows.append(f)
     meta, _ = M._rows(run_path)
     params = F.parse_params(meta.get('params', ''))
-    cols = header + [c for c in M.YS_COLS if c not in header]
+    cue_cols = [F.CUE_COL] + F.CUE_FEATURE_COLS
+    cols = header + [c for c in M.YS_COLS + cue_cols if c not in header]
     ix = dict((c, i) for i, c in enumerate(cols))
     n_hit = n_tick = 0
     for f in rows:
@@ -1136,16 +1139,20 @@ def write_rescored(run_path, out_path, computed, note):
         if got is None:
             for c in ('a_p_sex', 'a_p_oral', 'a_p_noise'):
                 f[ix[c]] = ''
-            for c in M.YS_COLS:
+            for c in M.YS_COLS + cue_cols:
                 f[ix[c]] = ''
             f[ix['a_action']], f[ix['a_conf']] = '', '0.0000'
             continue
         n_hit += 1
-        probs, ys = got
+        probs, ys = got[0], got[1]
+        cf = got[2] if len(got) > 2 else None
         for c, p in zip(('a_p_sex', 'a_p_oral', 'a_p_noise'), probs):
             f[ix[c]] = '%.4f' % p
         for c, v in zip(M.YS_COLS, ys):
             f[ix[c]] = '%.4f' % v
+        f[ix[F.CUE_COL]] = F.CUE_NAMES[F.audio_cue(cf)]
+        for c, v in zip(F.CUE_FEATURE_COLS, cf or [''] * len(F.CUE_FEATURE_COLS)):
+            f[ix[c]] = '' if v == '' else F._gf(v)            # 全精度：线索阈值按单精度值比较
         if age > F.MAX_AGE_MS:              # 融合循环：结果超过 2 秒算过期，动作串清空
             act, conf = '', 0.0
         else:
@@ -1158,7 +1165,7 @@ def write_rescored(run_path, out_path, computed, note):
         for c in comments:
             fh.write(c + '\n')
         fh.write('# ' + note + '\n')
-        fh.write('# 注意：a_p_* / a_action / a_conf / a_ys_* 是离线重算的；gated、arb、ble_*、sent* 等决策列 '
+        fh.write('# 注意：a_p_* / a_action / a_conf / a_ys_* / a_cue* 是离线重算的；gated、arb、ble_*、sent* 等决策列 '
                  '仍是原 run 的。端到端指标请用 fusion_lab.py eval/oracle 重放\n')
         fh.write(','.join(cols) + '\n')
         w = csv.writer(fh, lineterminator='\n')
@@ -1217,7 +1224,7 @@ def cmd_rescore(a):
             if w is None:
                 continue
             p, s = model.run(w)
-            computed[x.ts] = (p, s[ys_idx])
+            computed[x.ts] = (p, s[ys_idx], F.cue_features(s))
             ts_list.append(x.ts)
             T_list.append(int(round(x.ref - delta)))
             P.append(p)
@@ -1761,7 +1768,7 @@ def selftest():
     with io.open(src, 'w', encoding='utf-8', newline='') as fh:
         fh.write('# xcup-bench-run v1\n# video_name=selftest\n'
                  '# params: AUDIO_DO=0.55 AUDIO_NOISE=0.60\n')
-        base_cols = list(M.RUN_COLS_NEEDED)                             # app 的 dump 没有 a_ys_*
+        base_cols = list(M.RUN_COLS_NEEDED)                             # app 的 dump 没有 a_ys_*，有 a_cue*
         fh.write(','.join(base_cols) + '\n')
         for k in range(40):
             wall = 1000000 + 500 * k
@@ -1770,15 +1777,22 @@ def selftest():
             vals = dict((c, '') for c in base_cols)
             vals.update({'pos_ms': str(500 * k), 'wall_ms': str(wall), 'a_age': str(age),
                          'a_p_sex': '0.3000', 'a_p_oral': '0.3000', 'a_p_noise': '0.4000',
-                         'a_action': 'do', 'a_conf': '0.6000', 'sent': '0', 'sent_level': '-1'})
+                         'a_action': 'do', 'a_conf': '0.6000', 'sent': '0', 'sent_level': '-1',
+                         'a_cue': 'vocal', 'a_cue_voc_ext': '0.5'})          # 原 run 的线索：重算后应被覆盖
             fh.write(','.join(vals[c] for c in base_cols) + '\n')
     computed = {}
+    dialog_s = np.zeros(F.CUE_N_CLASSES, np.float32)
+    dialog_s[0] = 0.7                                    # Speech 0.7f（比 0.7 小一点）：不是对白，是"其它"
+    dialog_s2 = dialog_s.copy()
+    dialog_s2[0] = np.nextafter(np.float32(0.7), np.float32(1))     # 大 1 ulp：对白
+    is_dialog = lambda ts: (ts // 1000) % 2 == 0         # 相邻两行共用一个结果（按结果时刻定线索）
     for k, (wall, age) in enumerate(rows):
         if age >= 0:
             ts = wall - age
             q = (k % 3) / 2.0
             computed[ts] = (np.asarray([0.9 * q, 0.05, 1 - 0.9 * q - 0.05], np.float32),
-                            np.full(len(M.YS_COLS), 0.25, np.float32))
+                            np.full(len(M.YS_COLS), 0.25, np.float32),
+                            F.cue_features(dialog_s2 if is_dialog(ts) else dialog_s))
     dst = os.path.join(tmpd, 'out', 'v01_base.csv')
     write_rescored(src, dst, computed, 'rescored_by=selftest pipeline=clean')
     meta, rr = M.read_run(dst)
@@ -1794,6 +1808,13 @@ def selftest():
     check(ok, 'rescore 的 CSV 读回来概率/动作/a_ys_* 不对')
     _, ticks = F.load_run(dst)
     check(len(ticks) == len(rows) and ticks[5].ap is not None, 'fusion_lab 读不了 rescore 的 CSV')
+    want_cue = [('' if age < 0 else ('dialog' if is_dialog(wall - age) else 'other')) for wall, age in rows]
+    got_cue = [t.acue for t in ticks]
+    check(got_cue == want_cue and set(want_cue) == {'', 'dialog', 'other'}
+          and all(t.ays == F.cue_features(dialog_s2 if c == 'dialog' else dialog_s)
+                  for t, c in zip(ticks, want_cue) if c)
+          and ticks[0].ays is None and [F.tick_cue(t) for t in ticks] == [F.cue_from_name(c) for c in want_cue],
+          'rescore 应按重算的分数重写 a_cue / a_cue_*（单精度值逐位一致）：%r' % (got_cue[:6],))
     shutil.rmtree(tmpd, ignore_errors=True)
 
     # 5. AUC：numpy 版与 metrics._auc 一致

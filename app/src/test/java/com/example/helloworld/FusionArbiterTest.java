@@ -17,7 +17,8 @@ import java.nio.charset.StandardCharsets;
  *
  * <p>最重要的是 {@link #matchesPythonGolden()}：bench/tools/fusion_lab.py 的 FusionArbiter 是 Java 版的逐行移植，
  * 离线回放、扫参、check 都靠它；两边逐 tick 不一致，离线评估出的效果在手机上就不成立。对拍数据由
- * {@code python3 bench/tools/fusion_lab.py golden} 生成（真实 run 的若干段 + 合成边界用例）。</p>
+ * {@code python3 bench/tools/fusion_lab.py golden} 生成（真实 run 的若干段 + 合成边界用例 + 随机序列），
+ * 每行带音频线索（a_cue 列），v2 的视频单独启动和对白否决都在里面（fusion_lab 自检保证它们真的决定了输出）。</p>
  */
 public class FusionArbiterTest {
 
@@ -26,7 +27,7 @@ public class FusionArbiterTest {
         InputStream in = getClass().getClassLoader().getResourceAsStream("fusion/arbiter_golden.csv");
         assertNotNull("缺少测试资源 fusion/arbiter_golden.csv（python3 bench/tools/fusion_lab.py golden 生成）", in);
         BufferedReader r = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8));
-        assertEquals("reset,now,v_action,v_conf,v_ts,a_action,a_conf,a_ts,motor_on,exp_action,exp_reason",
+        assertEquals("reset,now,v_action,v_conf,v_ts,a_action,a_conf,a_ts,a_cue,motor_on,exp_action,exp_reason",
                 r.readLine());
         FusionArbiter arb = new FusionArbiter();
         String line;
@@ -43,16 +44,18 @@ public class FusionArbiterTest {
                     arb.reset(Long.parseLong(f[0].substring(0, plus)), Long.parseLong(f[0].substring(plus + 1)));
                 }
             }
+            int cue = AudioCue.fromName(f[8]);
+            assertEquals(row + " a_cue 写法", f[8], AudioCue.name(cue));
             String got = arb.decide(Long.parseLong(f[1]),
                     f[2], Float.parseFloat(f[3]), Long.parseLong(f[4]),
                     f[5], Float.parseFloat(f[6]), Long.parseLong(f[7]),
-                    "1".equals(f[8]));
-            assertEquals(row + " action", f[9], got);
-            assertEquals(row + " reason", f[10], arb.lastReason());
+                    cue, "1".equals(f[9]));
+            assertEquals(row + " action", f[10], got);
+            assertEquals(row + " reason", f[11], arb.lastReason());
             n++;
         }
         r.close();
-        assertTrue("对拍数据太少: " + n, n >= 5000);
+        assertTrue("对拍数据太少: " + n, n >= 10000);
     }
 
     private static final long T = 1_700_000_000_000L;
@@ -205,12 +208,105 @@ public class FusionArbiterTest {
         assertTrue(!arb.lastDoHadEvidence());                                   // wait_sparse / wait_unclear
     }
 
+    /**
+     * v2 视频单独启动：音频连续 4 个结果都听不出（被音乐盖住，分类头判"不转"），视频强"转"又稳时启动（start_video）；
+     * 同样的输入不带线索（UNKNOWN，即 v1）就一直不启动。
+     */
+    @Test
+    public void videoStartsAloneWhenAudioUninformative() {
+        int[] cues = {AudioCue.MUSIC, AudioCue.QUIET, AudioCue.BLIND, AudioCue.MUSIC};
+        for (boolean withCue : new boolean[]{true, false}) {
+            FusionArbiter arb = new FusionArbiter();
+            arb.reset(T);
+            String g = "";
+            for (int k = 2; k <= 8; k++) {
+                long now = T + 500L * k;
+                long aTs = now / 1000 * 1000;                     // 音频 1 秒一个结果：T+1000 … T+4000
+                int cue = withCue ? cues[(int) ((aTs - T) / 1000) - 1] : AudioCue.UNKNOWN;
+                g = arb.decide(now, "do", 0.95f, now - 5, "Noise", 0.9f, aTs, cue, false);
+                if (k < 8) {
+                    assertEquals("tick " + k, "Noise", g);         // 音频还不到 4 个结果：有"不转"证据，不启动
+                }
+            }
+            if (withCue) {
+                assertEquals("do", g);
+                assertEquals(FusionArbiter.R_START_VIDEO, arb.lastReason());
+                assertTrue(arb.lastDoHadEvidence());
+            } else {
+                assertEquals("Noise", g);
+                assertEquals(FusionArbiter.R_OFF_NEG, arb.lastReason());
+            }
+        }
+    }
+
+    /** 视频单独启动要 4 个都听不出：中间夹一个"其它"线索就不启动。 */
+    @Test
+    public void videoStartNeedsFourUninformative() {
+        FusionArbiter arb = new FusionArbiter();
+        arb.reset(T);
+        int[] cues = {AudioCue.MUSIC, AudioCue.OTHER, AudioCue.BLIND, AudioCue.MUSIC};
+        String g = "";
+        for (int k = 2; k <= 8; k++) {
+            long now = T + 500L * k;
+            long aTs = now / 1000 * 1000;
+            g = arb.decide(now, "do", 0.95f, now - 5, "Noise", 0.9f, aTs, cues[(int) ((aTs - T) / 1000) - 1], false);
+        }
+        assertEquals("Noise", g);
+        assertEquals(FusionArbiter.R_OFF_NEG, arb.lastReason());
+    }
+
+    /**
+     * v2 对白否决：视频最近 4 个都是 ≥0.90 的"剧情"时，对白线索的音频"转"不算启动证据，音频兜底不启动；
+     * 视频置信度不到 0.90，或者音频线索是人声时，照常由音频兜底启动（与 v1 相同）。
+     */
+    @Test
+    public void dialogVetoBlocksAudioValveOnlyWhenVideoSurePlot() {
+        Object[][] cases = {
+                {0.95f, AudioCue.DIALOG, "Noise", FusionArbiter.R_OFF_NEG},
+                {0.89f, AudioCue.DIALOG, "do", FusionArbiter.R_START_AUDIO},
+                {0.95f, AudioCue.VOCAL, "do", FusionArbiter.R_START_AUDIO},
+                {0.95f, AudioCue.UNKNOWN, "do", FusionArbiter.R_START_AUDIO},
+        };
+        for (Object[] c : cases) {
+            float vConf = (Float) c[0];
+            int cue = (Integer) c[1];
+            FusionArbiter arb = new FusionArbiter();
+            arb.reset(T);
+            String g = "";
+            for (int k = 0; k < 4; k++) {
+                long vTs = T + 500 + 1000L * k;
+                arb.decide(vTs + 5, "Noise", vConf, vTs, k > 0 ? "do" : "", 0.8f, k > 0 ? T + 1000L * k : -1,
+                        cue, false);
+                g = arb.decide(T + 1000L * (k + 1) + 10, "Noise", vConf, vTs, "do", 0.8f, T + 1000L * (k + 1),
+                        cue, false);
+            }
+            String what = "视频 " + vConf + " 线索 " + AudioCue.name(cue);
+            assertEquals(what, c[2], g);
+            assertEquals(what, c[3], arb.lastReason());
+        }
+    }
+
+    /** 维持不看线索：马达在转时，视频确定是剧情、音频是对白线索的"转"，照样靠音频维持。 */
+    @Test
+    public void holdIgnoresDialogCue() {
+        FusionArbiter arb = new FusionArbiter();
+        arb.reset(T);
+        String g = "";
+        for (int k = 1; k <= 6; k++) {
+            long now = T + 1000L * k;
+            g = arb.decide(now, "Noise", 0.95f, now - 300, "do", 0.95f, now - 10, AudioCue.DIALOG, true);
+        }
+        assertEquals("do", g);
+        assertEquals(FusionArbiter.R_HOLD_AUDIO, arb.lastReason());
+    }
+
     @Test
     public void paramsLineCarriesVersion() {
         String p = FusionArbiter.paramsLine();
-        assertTrue(p, p.startsWith("ARB=v1 "));
+        assertTrue(p, p.startsWith("ARB=v2 "));
         assertTrue(p, p.contains("ARB_Z_WIN=9000"));
         assertTrue(p, p.contains("ARB_V_FLOOR=0.8500"));
         assertTrue(p, p.contains("ARB_START_V_CONS=80"));
+        assertTrue(p, p.contains("ARB_A1_N=4 ARB_A1_CV=3 ARB_A1_CONS=90 ARB_BV_N=4 ARB_BV_CONF=0.9000"));
     }
 }

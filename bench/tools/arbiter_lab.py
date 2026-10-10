@@ -160,7 +160,7 @@ class Arbiter(object):
 
     def step(self, p, i, ble):
         return self.arb.decide(p.wall[i], p.v[i], p.vc[i], p.vts[i], p.a[i], p.ac[i], p.ats[i],
-                               F._is_sex(ble.cur))
+                               F._is_sex(ble.cur), F.audio_cue(p.aext[i]))
 
 
 def replay(p, policy, want_states=False):

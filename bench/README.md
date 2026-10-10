@@ -7,19 +7,21 @@
 ```
 bench/
   ANNOTATION_SPEC.md      人工真值标注规范（改动需递增 spec_version）
-  gt/<id>.csv             人工真值（v01~v07）
-  runs_initial/<id>_*.csv 真机 dump：app 1.2.5、融合仲裁、现用音频分类头，7 部片（当前基线）
-  rescored/               audio_rescore.py 的输出：audio_old = runs_initial 用现用分类头离线重算（与真机一致，
-                          另带 YAMNet 521 类分数 .yamnet.npz）；audio_new = 2026-10-09 评估过的新分类头（未采用）
+  gt/<id>.csv             人工真值（v01~v13）
+  runs_initial/<id>_*.csv 真机 dump：app 1.2.5、融合仲裁 v1、现用音频分类头，7 部片（调参用的基线）
+  runs_test/<id>_*.csv    同一个包录的新片 v08~v13（不参与调参，只做检验）
+  rescored/               audio_rescore.py 的输出：audio_old / test_audio_old = runs_initial / runs_test 用现用分类头离线重算
+                          （与真机一致，另带 YAMNet 521 类分数 .yamnet.npz）；audio_new = 2026-10-09 评估过的新分类头（未采用）
   videos/                 原始视频（不进 git；也可以放别处，用 --videos 指定）
   summary.csv             metrics.py --append 的汇总
   tools/
     labeler.html          真值标注器，双击即用，纯本地无上传
     metrics.py            单部片：指标、误判定位、单模态诊断
-    fusion_lab.py         融合层回放：check（复现真机）、eval（策略对比）、oracle（模态上限）、golden（Java 对拍数据）
+    fusion_lab.py         融合层回放：check（复现真机）、eval（策略对比）、oracle（模态上限）、golden（Java 对拍数据）；
+                          FusionArbiter / AudioCue 的 Python 移植
     arbiter_lab.py        融合仲裁评测：逐片最差情况、seek 模拟、压力场景、慢手机、留一选参
     audio_rescore.py      音频离线重算：换音频模型不用上真机
-    cue_lab.py            YAMNet 线索实验（第 6 节）：线索统计、误判归因、压力场景、留一视频选规则
+    cue_lab.py            YAMNet 线索实验（第 6 节）：线索统计、误判归因、压力场景、留一视频选规则（app 用了其中的 a1bvid）
     test_labeler.js       标注器测试：node bench/tools/test_labeler.js
     yamnet_class_map.csv  YAMNet 的 AudioSet 521 类名（来自 tensorflow/models，Apache-2.0）
 ```
@@ -61,14 +63,15 @@ python3 bench/tools/metrics.py bench/gt/v01.csv bench/runs_initial/v01_base.csv 
 ## 3. 融合仲裁 FusionArbiter（app 当前的融合层）
 
 `FusionArbiter.java`（纯 Java），离线 / 网页视频 / 在线三种模式共用。融合循环每 500ms 调一次 `decide()`：输入是两个
-分析线程判出的动作（`"do"` / `"Noise"` / `""`）、置信度和结果产出时刻，输出交给 `updateBluetoothState`（蓝牙状态机没有改）。
+分析线程判出的动作（`"do"` / `"Noise"` / `""`）、置信度、结果产出时刻和音频线索（v2，见下），输出交给 `updateBluetoothState`
+（蓝牙状态机没有改）。
 旧融合（投票窗 `smoothedFusion` + 快通道 + `selectBestAction`、启动仲裁 `applyDoStartGate`）已从 app 删除，
 `fusion_lab.py` 里留有 Python 版，作"旧融合"对照、回放旧 run。证据按"新推理结果"计数：同一个结果在几个 tick 里
 重复出现只算一次，产出超过 2 秒的不记。
 
 | 阶段 | 规则 |
 |---|---|
-| 启动 | 满足任一条：<br>• 两路佐证：3 秒内视频强"转"（≥0.85）≥2 个、音频强"转"（≥0.90）≥1 个，并满足比维持更严一档的条件（视频 6 秒内"转"占比 ≥80%，或音频最近 4 个全是"转"），防止开关抖动；<br>• 音频兜底：9 秒内音频结果 ≥4 个且**全部**是"转"（不看视频，特写时也能启动；零容忍挡住剧情里"转"中夹"不转"的音频）。 |
+| 启动 | 满足任一条：<br>• 两路佐证：3 秒内视频强"转"（≥0.85）≥2 个、音频强"转"（≥0.90）≥1 个，并满足比维持更严一档的条件（视频 6 秒内"转"占比 ≥80%，或音频最近 4 个全是"转"），防止开关抖动；<br>• 音频兜底：9 秒内音频结果 ≥4 个且**全部**是"转"（不看视频，特写时也能启动；零容忍挡住剧情里"转"中夹"不转"的音频）；<br>• 视频单独启动（v2）：音频最近 4 个结果的线索都是音乐 / 安静 / 听不出，且 3 秒内视频强"转"≥3 个、6 秒内占比 ≥90%（动作被背景音乐盖住时分类头一直判"不转"）。<br>对白否决（v2）：视频最近 4 个都是 ≥0.90 的"剧情"时，线索为对白的音频"转"在上面三条里按 unclear 算（剧情对白被分类头判成"转"）。 |
 | 维持 | 任一路有支持：音频最近 4 个里 ≥3 个"转"；或视频最近 4 个里 ≥2 个"转"且 6 秒内占比 ≥70%。维持时主动交 `"do"`，取消状态机里待执行的停转。 |
 | 停止 | 两路都没有支持时：刚 reset 的 6 秒内某一路结果还不到 4 个，先等；4 秒内有"不转"就交 Noise（之后照旧要状态机 1 秒稳定 + 2 秒最短驻留）；看不清 / 听不清 / 过期最多再等 6 秒（两路结果完全中断时约 16.5 秒停）。 |
 
@@ -76,10 +79,14 @@ python3 bench/tools/metrics.py bench/gt/v01.csv bench/runs_initial/v01_base.csv 
   结果也不算（音频窗口里还混着静音）；墙钟回跳自动 reset。run 的 `arb_reset` 列记下每次 reset，离线回放照做。
 - **暂停**：离线 / 网页视频模式下，只有"有证据撑着"的 do（原因 `start_*` / `hold_*`）才挂起、恢复后接着转，只是在等结果时
   同步成 Noise（否则网页模式下"静音暂停 → 一声短响恢复 → 又静音暂停"会让马达跟着每声短响一直转）。在线模式暂停一律同步成 Noise。
-- 每个 tick 的原因写进 `arb` 列：`start_both` / `start_audio` / `hold_audio` / `hold_video` / `hold_both` / `stop_neg` /
-  `stop_unclear` / `wait_sparse` / `wait_unclear` / `off_neg` / `off_wait`。
+- 每个 tick 的原因写进 `arb` 列：`start_both` / `start_audio` / `start_video` / `hold_audio` / `hold_video` / `hold_both` /
+  `stop_neg` / `stop_unclear` / `wait_sparse` / `wait_unclear` / `off_neg` / `off_wait`。
+- **音频线索**（v2，2026-10-11，`AudioCue.java`）：`AudioInferenceHelper` 同一次推理多取 YAMNet 的第 0 个输出（AudioSet 521 类
+  分数，4 帧平均），按含义分组求和后给每个音频结果判一个线索（对白 / 音乐 / 安静 / 听不出 / 人声 / 拍打 / 其它，判法见第 6 节），
+  界面的音频行后面会显示。只用在启动的两条规则上，维持和停止不看；拿不到分数时线索为未知，行为与 v1 完全相同。
+  参数行多了 `ARB=v2 … ARB_A1_* ARB_BV_*` 和 `CUE=v1 CUE_*`，CSV 多了 `a_cue`、`a_cue_*` 列（第 5 节）。
 
-### 当前效果（runs_initial 7 部片，离线回放）
+### v1 的效果（runs_initial 7 部片，离线回放）
 
 | | 准确率 | 误转 | 漏转 | 动作中误停 | v03 漏转 | v04 / v07 误转 | 停止后还转 | 启动后没转 |
 |---|---|---|---|---|---|---|---|---|
@@ -87,6 +94,7 @@ python3 bench/tools/metrics.py bench/gt/v01.csv bench/runs_initial/v01_base.csv 
 | 融合仲裁 | 92.6% | 18.7% | 3.0% | 4 次 | 26.5% | 43.6% / 55.8% | 3.2s | 2.6s |
 
 - 规则和参数是看着这 7 部片定的（样本内）；留一视频选参后是 92.6% / 19.0% / 3.0%。真正的验收要靠新片子。
+- v2（加音频线索）在全部 13 部片上：准确率 93.3% → 94.2%，误转 16.0% → 13.9%，漏转 2.4% → 2.1%，误停 6 → 7 次（第 6 节）。
 - 误转 = 剧情时长里马达在转的比例，漏转 = 动作时长里马达没转的比例。"停止后还转 / 启动后没转"取自拼接样本（同一部片的
   动作段和剧情段首尾拼接，造出切换点）：切换点之后该停还转 / 该转没转的秒数中位数，比真实片子乐观 1~2 秒。
 
@@ -104,7 +112,8 @@ python3 bench/tools/metrics.py bench/gt/v01.csv bench/runs_initial/v01_base.csv 
 
 1. 用新包按第 2 节重录（最好加几部规则没见过的新片）。
 2. `python3 bench/tools/fusion_lab.py check bench/gt <新 runs 目录>`：`gated` 和 `arb` 的一致率都 ≥99%，才说明手机上跑的
-   就是离线评估的那套。
+   就是离线评估的那套。v2 的 run 还会打出"音频线索 真机与重判一致 x/y"（要 100%）和线索分布；出现"没有音频线索"
+   说明手机上没读到 YAMNet 的第 0 个输出，线索规则没生效。
 3. `python3 bench/tools/arbiter_lab.py report bench/gt <新 runs 目录>` 看逐片结果；`metrics.py --at` 的"仲裁原因"列能看出
    某次停转是哪条规则触发的。
 
@@ -138,17 +147,20 @@ python3 bench/tools/metrics.py bench/gt/v01.csv bench/runs_initial/v01_base.csv 
 4. **选参**：把候选值写进 `arbiter_lab.py` 的 `NARROW` / `WIDE` 网格（用 Python 侧的名字，如 `ARB_Z_WIN`，对照 `fusion_lab.py`
    的 `ARB_DEFAULTS`），跑 `lovo`（留一视频选参；压力场景必须全过、seek 进动作段不能有不启动的）。优先选多数折都选中的值。
 5. **改代码**：`FusionArbiter.java` 的常量和 `fusion_lab.py` 的 `ARB_DEFAULTS` 一起改（规则本身要改时，两边的 `FusionArbiter`
-   逐行一起改），然后 `python3 bench/tools/fusion_lab.py golden bench/gt <runs 目录>` 重新生成
-   `app/src/test/resources/fusion/arbiter_golden.csv`，跑 `FusionArbiterTest` 和 `fusion_lab.py --selftest`。
+   逐行一起改；线索的分组和阈值在 `AudioCue.java` 和 `fusion_lab.py` 的 `CUE_*` / `audio_cue`），然后
+   `python3 bench/tools/fusion_lab.py golden` 重新生成 `app/src/test/resources/fusion/` 下的两份对拍数据，
+   跑 `FusionArbiterTest`、`AudioCueTest` 和 `fusion_lab.py --selftest`。
 6. **真机复验**：同第 3 节。
 
-`FusionArbiterTest` 在 Android Studio 里直接跑，或 `gradlew :app:testDebugUnitTest`。没有 Android SDK 时用 JDK + JUnit：
+`FusionArbiterTest` / `AudioCueTest` 在 Android Studio 里直接跑，或 `gradlew :app:testDebugUnitTest`。没有 Android SDK 时用 JDK + JUnit：
 
 ```bash
 CP=junit-4.13.2.jar:hamcrest-core-1.3.jar
+J=app/src/main/java/com/example/helloworld; T=app/src/test/java/com/example/helloworld
 javac --release 11 -encoding UTF-8 -cp $CP -d /tmp/arbtest \
-  app/src/main/java/com/example/helloworld/FusionArbiter.java app/src/test/java/com/example/helloworld/FusionArbiterTest.java
-java -cp /tmp/arbtest:app/src/test/resources:$CP org.junit.runner.JUnitCore com.example.helloworld.FusionArbiterTest
+  $J/AudioCue.java $J/FusionArbiter.java $T/FusionArbiterTest.java $T/AudioCueTest.java
+java -cp /tmp/arbtest:app/src/test/resources:$CP org.junit.runner.JUnitCore \
+  com.example.helloworld.FusionArbiterTest com.example.helloworld.AudioCueTest
 ```
 
 ## 5. 工具参考
@@ -159,10 +171,14 @@ java -cp /tmp/arbtest:app/src/test/resources:$CP org.junit.runner.JUnitCore com.
 python3 bench/tools/fusion_lab.py check  bench/gt bench/runs_initial   # 回放能否逐 tick 复现真机（≥99% 才可信）
 python3 bench/tools/fusion_lab.py eval   bench/gt bench/runs_initial   # 策略对比：旧融合 / 融合仲裁 / 只用视频 / 只用音频 / 一直转 / 证据融合
 python3 bench/tools/fusion_lab.py oracle bench/gt bench/runs_initial   # 模态上限：假设视频（或音频）完美，最多能到多少
-python3 bench/tools/fusion_lab.py golden bench/gt bench/runs_initial   # 生成 Java 对拍数据
+python3 bench/tools/fusion_lab.py golden                               # 生成 Java 对拍数据（FusionArbiterTest、AudioCueTest）
 ```
 
-- 回放按 run 的参数行选融合：有 `ARB=` 的用融合仲裁，否则用旧融合；之后都接蓝牙状态机的复刻。
+- 回放按 run 的参数行选融合：有 `ARB=` 的用融合仲裁（`ARB=v1` 不看线索），否则用旧融合；之后都接蓝牙状态机的复刻。
+  音频线索优先用 run 里记下的 `a_cue`，没有时按 `a_cue_*` 现判；老 run 两样都没有，线索为未知（要线索就用 `cue_lab.py`，
+  它从 `.yamnet.npz` 接上分数）。
+- `golden` 默认读 `bench/gt` + `runs_initial,runs_test`，真实片段的线索来自 `rescored/audio_old,test_audio_old` 的
+  `.yamnet.npz`；对拍数据里线索规则真正决定输出的行数会打出来（`--selftest` 要求视频单独启动 ≥20 行、对白否决 ≥50 行）。
 - 少量不一致来自蓝牙状态机取时间比 `wall_ms` 晚几毫秒、以及旧 run 把置信度存成 4 位小数（新 run 存完整 float），
   正好卡在阈值边界时会翻转。
 - 代价 = 误转秒数 × fp + 漏转秒数 × fn + 动作中误停次数 × stop，默认 `--cost fp=1,fn=1,stop=3`（产品取舍，不随模型变）。
@@ -192,7 +208,8 @@ python3 bench/tools/audio_rescore.py auc bench/gt bench/rescored/audio_old [--al
 - `check` 用 app 里的模型在每个音频结果时刻重算概率、和真机比，对齐结果写进 `bench/rescored/alignment.json`，`rescore` 直接用。
 - `rescore` 写到 `bench/rescored/<管线>[_<分类器>]/`（或 `--tag` 指定的目录），文件名不变：`a_p_*` 换成新概率，`a_action` /
   `a_conf` 按 run 文件头的阈值重判。决策列还是原 run 的，所以只能用 `eval` / `arbiter_lab` 重放，`check` 对它没有意义。
-  另写 YAMNet 自带的 AudioSet 类别分数：`a_ys_*` 列（10 类）和同名 `.yamnet.npz`（全部 521 类，按结果时间戳对齐），只做离线分析。
+  另写 YAMNet 自带的 AudioSet 类别分数：`a_ys_*` 列（10 类）和同名 `.yamnet.npz`（全部 521 类，按结果时间戳对齐），只做离线分析；
+  音频线索 `a_cue` / `a_cue_*` 也按重算的分数重写（新 app 的 run 里原有的那份不留）。
 - 管线 `fixed` = 现在 app 喂给模型的音频（下混 + `PcmResampler`，与 Java 逐点对拍）；`phone` = 2026-10-05 之前的半速音频；
   `clean` = 训练数据的处理方式。
 - 视频按真值文件头的 `file_name` 在 `--videos`（默认 `bench/videos/`）里找，或 `--pair v01=D:/xcup/视频1.mp4`；`--only v01,v04`
@@ -218,13 +235,17 @@ node bench/tools/test_labeler.js
 | `a_pos` | 该音频结果读 PCM 时的播放位置，模型窗口 = `[a_pos-2s, a_pos]` |
 | `arb` | 融合仲裁本 tick 的原因（见第 3 节）。`gated` 是融合仲裁的输出。旧融合时期的 run 还有 `smoothed` 列（投票窗），新 run 没有 |
 | `arb_reset` | 这一行之前的 reset：`<ms>[+<预热ms>][:seek]`。回放时同样 reset，带 `:seek` 的还清空蓝牙状态（旧融合回放时也清空投票窗） |
-| `a_ys_*` | AudioSet 类别分数（Speech、Music、Moan 等，见 `metrics.YS_CLASSES`），只有 `rescore` 写 |
+| `a_ys_*` | AudioSet 类别分数（Speech、Music、Moan 等，见 `metrics.YS_CLASSES`），只有 `rescore` 写，4 位小数 |
+| `a_cue` | 该音频结果的线索（`dialog` / `music` / `quiet` / `blind` / `vocal` / `impact` / `other`，没有为空），2026-10-11 起的 app 写 |
+| `a_cue_*` | 线索用的 YAMNet 分组分数（`voc_core` `voc_ext` `speech` `speech_ext` `music` `silence` `impact`，全精度），同上 |
 
-## 6. YAMNet 线索（cue_lab.py，离线实验，app 还没用）
+## 6. YAMNet 线索（cue_lab.py；app 2026-10-11 起用 `a1bvid`）
 
-YAMNet 的第 0 个输出（AudioSet 521 类分数）app 目前没读。`cue_lab.py` 把 `rescored/audio_old/*.yamnet.npz` 按结果时间戳
+YAMNet 的第 0 个输出（AudioSet 521 类分数）以前 app 没读。`cue_lab.py` 把 `rescored/audio_old/*.yamnet.npz` 按结果时间戳
 接到 `runs_initial` 的每个音频结果上（7 部片 100% 接上），给每个结果判一个"线索"，再在融合仲裁上加开关，看能不能改进。
-开关全关、或者线索未知时与 v1 逐 tick 一致（`--selftest` 校验，含 FusionArbiterTest 的对拍数据）。
+开关全关、或者线索未知时与 v1 逐 tick 一致（`--selftest` 校验，含 FusionArbiterTest 的对拍数据）。最后选定的 `a1bvid`
+已经做进 app（`AudioCue.java` + `FusionArbiter` v2，第 3 节）；`--selftest` 也核对 `fusion_lab.py` 里 app 的移植与
+`cue_lab.py` 的 `a1bvid` 在 13 部片上逐 tick 一致。
 
 | 线索 | 判定（4 帧平均的分数） |
 |---|---|
@@ -286,7 +307,7 @@ seek 启动不变慢；基线留一代价 996）：
 | **`a1bvid`** | **1164** | **94.2%** | **13.9%** | **2.1%** | 7 | **7.2s** | 上面两行合起来 |
 | `bstart` | 1204 | 94.1% | 12.5% | 2.8% | 6 | 13.0s | v11 +53、v01 +14 …… |
 
-- 推荐 `a1bvid`（`a1` + `bvid`）：代价 −17%，漏转 126→109 秒、误转 384→334 秒，准确率 +0.9 个百分点，seek 进动作段从不启动
+- 选定 `a1bvid`（`a1` + `bvid`）：代价 −17%，漏转 126→109 秒、误转 384→334 秒，准确率 +0.9 个百分点，seek 进动作段从不启动
   2→0 次。代价：v03 多一次误停（以前那段根本没转）；v01 +3 全在"剧情 → 口交"的拼接样本里（真实片子不变），按验收线的
   "最多 1 部变差且 ≤5%"算是擦边超了（+12%，绝对值 3 秒）。
 - `bvid` 的收益主要来自 v09 一部；`a1` 的收益只有 v03 一部。两条在其余片子上都几乎不改变结果，风险小，但收益要靠以后的新片继续确认。
@@ -310,3 +331,7 @@ seek 启动不变慢；基线留一代价 996）：
 - 2026-10-11：加新片 v08~v13（`runs_test`）。v10/v12/v13 的音轨时间戳比样本数快 0.5~0.9%，离线重算越播越偏（到片尾差约 6 秒），
   `audio_rescore.py` 的 `fixed` 管线改成按每帧 pts 分段（与手机 `AudioDecoder` 一致）。`cue_lab.py` 加 `--only`、候选 `bvid` /
   `a1bvid`，run / npz 目录可以逗号分隔给几个。13 部片上推荐 `a1bvid`（第 6 节），等确认后改 app（阶段 2）。
+- 2026-10-11：app 上 `a1bvid`（阶段 2）。`AudioInferenceHelper` 同一次推理多取 YAMNet 第 0 个输出；新增 `AudioCue`；
+  `FusionArbiter` v2（`start_video`、对白否决，线索未知时与 v1 相同）；两个 Activity 把线索传给仲裁、显示在音频行；
+  `BenchLogger` 加 `a_cue`、`a_cue_*` 列和 `CUE=` 参数。`fusion_lab.py` 同步（check 核对线索、golden 带线索）、
+  `audio_rescore.py` rescore 时重写线索列；对拍数据重新生成，新增 `AudioCueTest`。要用新包重录验证（第 3 节"上真机验证"）。

@@ -28,8 +28,8 @@ LABELS = ('plot', 'oral', 'sex', 'other_adult', 'exclude')
 BIN    = {'plot': 'noise', 'oral': 'do', 'sex': 'do'}
 
 # YAMNet output 0 是 AudioSet 521 类分数 [帧, 521]。按帧取平均后，挑这几类写进 run CSV 的 a_ys_* 列：
-# (列名后缀, AudioSet 类别号, 英文类名)。只有 audio_rescore.py rescore 会写这些列（离线分析用），
-# app 不算 AudioSet 分数。前 4 类是"剧情"候选证据（对白、旁白、配乐），其余是"动作"候选。
+# (列名后缀, AudioSet 类别号, 英文类名)。只有 audio_rescore.py rescore 会写这些列（离线分析用；app 记的是线索用的
+# 分组分数 a_cue_*，见 RUN_COLS_NEEDED）。前 4 类是"剧情"候选证据（对白、旁白、配乐），其余是"动作"候选。
 YS_CLASSES = [('speech', 0, 'Speech'), ('conversation', 2, 'Conversation'),
               ('narration', 3, 'Narration, monologue'), ('music', 132, 'Music'),
               ('silence', 494, 'Silence'), ('moan', 22, 'Wail, moan'), ('groan', 33, 'Groan'),
@@ -550,7 +550,11 @@ RUN_COLS_NEEDED = ['pos_ms', 'wall_ms',
                    # FusionArbiter 本 tick 的输出原因（start_both / hold_audio / stop_neg …）
                    'arb',
                    # 这一行之前 FusionArbiter reset 的时刻（seek / 恢复播放；没有为空），回放时同样 reset
-                   'arb_reset']
+                   'arb_reset',
+                   # 音频结果的线索（AudioCue：dialog / music / quiet / blind / vocal / impact / other，没有为空）和
+                   # YAMNet AudioSet 分数按含义分组求和（全精度，fusion_lab.py 回放时用）。2026-10-11 起的 app 才有
+                   'a_cue', 'a_cue_voc_core', 'a_cue_voc_ext', 'a_cue_speech', 'a_cue_speech_ext',
+                   'a_cue_music', 'a_cue_silence', 'a_cue_impact']
 
 
 def _java_header():
@@ -599,7 +603,7 @@ def _write_run_csv(path, rows):
                         r['gated'], r['ble_level'],
                         r['ble_state'], r['ble_level'],
                         1 if r['sent'] else 0, r['sent_action'], r['sent_level'],
-                        -1, '', ''])
+                        -1, '', '', '', '', '', '', '', '', '', ''])
 
 
 def selftest():
@@ -688,7 +692,7 @@ def selftest():
             if [x[k] for x in rr] != [x[k] for x in base]:
                 fails.append('CSV 往返列 %s 不一致' % k)
         if any(x['ys'] != [-1] * len(YS_COLS) for x in rr):
-            fails.append('app 格式的 run 没有 a_ys_* 列，应读成 -1')
+            fails.append('app 格式的 run 没有 a_ys_* 列（只有 rescore 写），应读成 -1')
     m6 = evaluate(segs, dur, rr, 'exclude')
     if abs(m6['acc'] - m['acc']) > 1e-9 or m6['lat'] != m['lat']:
         fails.append('从 CSV 读回来算出的指标与内存版不一致')

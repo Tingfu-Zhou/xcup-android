@@ -10,16 +10,19 @@ run CSV 里已经存了两个模型每个 tick 的原始概率（v_p_* / a_p_*�
   check   复刻线上 Java 融合，和 run CSV 里记下的逐 tick 输出比对。参数行有 ARB=（2026-10-07 起的 app）
           的 run 用融合仲裁 FusionArbiter 回放（还比对 arb 列），没有的用旧的平滑投票 + 启动仲裁；
           之后都接蓝牙状态机。一致率 >=99% 才说明回放器可信，后面的对比才有意义。
+          ARB=v2 的 run（2026-10-11 起）还带音频线索 a_cue / a_cue_*：回放用真机记下的线索，并核对它与按
+          分组分数重判的一致。
   eval    留一视频交叉验证：旧融合 / 融合仲裁 / 证据融合 / 三条基线（一直转/只用视频/只用音频）。
           证据融合与单模态基线的参数只用其余几部拟合；旧融合与融合仲裁用固定参数。
   oracle  假设某个模态完美（概率换成真值），端到端最多能到多少——决定先改哪个模型。
-  golden  生成 FusionArbiterTest 的对拍数据（改了融合仲裁的规则 / 参数后要重新生成）。
+  golden  生成 FusionArbiterTest / AudioCueTest 的对拍数据（改了融合仲裁或音频线索的规则 / 参数后要重新生成；
+          真实片段的线索来自 bench/rescored/*/ 的 .yamnet.npz）。
 
 用法:
   python3 bench/tools/fusion_lab.py check  bench/gt bench/runs
   python3 bench/tools/fusion_lab.py eval   bench/gt bench/runs
   python3 bench/tools/fusion_lab.py oracle bench/gt bench/runs
-  python3 bench/tools/fusion_lab.py golden bench/gt bench/runs_initial
+  python3 bench/tools/fusion_lab.py golden          # 默认 bench/gt + bench/runs_initial,bench/runs_test
   python3 bench/tools/fusion_lab.py --selftest
 
 真值与 run 的配对：bench/gt/v01.csv 配 bench/runs/ 下以 "v01" 开头的文件（如 v01_base.csv）；
@@ -75,9 +78,10 @@ F01, F07, F08, F12 = f32(0.1), f32(0.7), f32(0.8), f32(1.2)
 # ======================================================================== 读数据
 class Tick(object):
     """run CSV 的一行。v/a 是融合循环实际用到的动作串（已过新鲜度过滤），vp/ap 是原始概率。
-    ays：这一行的音频结果对应的 YAMNet AudioSet 分组分数（cue_lab.py 接上去的，见那里的 FEAT_*），没有为 None。"""
+    ays：这一行的音频结果对应的 YAMNet 分组分数（CUE_GROUPS 顺序，单精度值；v2 的 run 从 a_cue_* 列读，老 run 由
+    cue_lab.py 从 .yamnet.npz 接上），没有为 None。acue：run 里记下的音频线索（a_cue 列，AudioCue 的名字），没有为 ''。"""
     __slots__ = ('pos', 'wall', 'v', 'vc', 'v_age', 'vp', 'a', 'ac', 'a_age', 'ap',
-                 'loud_lv', 'loud_conf', 'log', 'ays')
+                 'loud_lv', 'loud_conf', 'log', 'ays', 'acue')
 
     def copy(self, **kw):
         t = Tick()
@@ -131,7 +135,9 @@ def load_run(path):
         t.loud_lv = _inum(d.get('loud_lv'), -1)
         t.loud_conf = f32(_fnum(d.get('loud_conf')) or 0.0)
         t.log = dict((k, (d.get(k) or '').strip()) for k in LOG_COLS)
-        t.ays = None
+        feats = [_fnum(d.get(c)) for c in CUE_FEATURE_COLS]       # Float.toString 写的：f32 还原成同一个单精度值
+        t.ays = tuple(f32(x) for x in feats) if all(x is not None for x in feats) else None
+        t.acue = (d.get(CUE_COL) or '').strip()
         ticks.append(t)
     return meta, ticks       # 保持文件顺序（= 时间顺序），回放必须按真实先后
 
@@ -499,6 +505,128 @@ def final_freq(loud_lv, loud_conf, cur_level):
 Step = namedtuple('Step', 'smoothed gated final_freq ble_state ble_level sent ev_l ev_llr_v ev_llr_a')
 
 
+# ======================================================================== 音频线索（AudioCue.java 的逐行移植）
+# YAMNet 第 0 个输出（AudioSet 521 类分数，各帧平均）按含义分组求和（下标顺序 float 累加），再判线索。
+# 实验和选参见 cue_lab.py（PRESETS['a1bvid']），改这里要同步改 AudioCue.java 并重新生成对拍数据。
+CUE_GROUPS = [
+    ('voc_core', (21, 22, 23, 33, 34, 36, 39, 40)),          # 呜咽 呻吟 叹气 哼 咕哝 呼吸 倒吸气 喘
+    ('voc_ext', (11, 13, 15, 16, 17, 18, 19, 21, 22, 23, 33, 34, 36, 39, 40)),   # + 尖叫 笑 哭
+    ('speech', (0,)),
+    ('speech_ext', (0, 2, 3)),                                 # + Conversation、Narration
+    ('music', (132,)),
+    ('silence', (494,)),
+    ('impact', (49, 353, 354, 441, 461, 462)),                 # 咀嚼 敲 轻敲 挤压水声 拍打 重击
+]
+CUE_COL = 'a_cue'                                            # 线索名（AudioCue.name），空 = 未知
+CUE_FEATURE_COLS = ['a_cue_' + n for n, _ in CUE_GROUPS]     # 分组分数（全精度；与 AudioCue.FEATURE_COLS 相同）
+CUE_UNKNOWN, CUE_OTHER, CUE_DIALOG, CUE_MUSIC, CUE_QUIET, CUE_BLIND, CUE_VOCAL, CUE_IMPACT = range(8)
+CUE_NAMES = ('', 'other', 'dialog', 'music', 'quiet', 'blind', 'vocal', 'impact')
+CUE_D_VOC, CUE_D_SP = 0.01, 0.7
+CUE_B_VOC, CUE_B_SP, CUE_B_IMP, CUE_B_MUS, CUE_B_SIL = 0.05, 0.2, 0.1, 0.3, 0.3
+CUE_P_VOC, CUE_P_IMP = 0.3, 0.2
+CUE_N_CLASSES = 521
+
+
+def cue_features(scores):
+    """AudioCue.features：521 类分数 → 分组分数（CUE_GROUPS 顺序）。每组按下标顺序做单精度累加（与 Java 逐位一致：
+    两个单精度数在 double 里相加再舍入成单精度，结果与单精度加法相同）。不是 521 维时 None。"""
+    if scores is None or len(scores) != CUE_N_CLASSES:
+        return None
+    out = []
+    for _, idx in CUE_GROUPS:
+        acc = 0.0
+        for i in idx:
+            acc = f32(acc + f32(float(scores[i])))
+        out.append(acc)
+    return tuple(out)
+
+
+def audio_cue(f):
+    """AudioCue.classify：分组分数（CUE_GROUPS 顺序）→ 线索（CUE_*）。f 为 None 时 CUE_UNKNOWN。
+    分数是单精度值，阈值按 double 比较（Java 里也是 (double) float 与 double 常量比）。"""
+    if f is None:
+        return CUE_UNKNOWN
+    voc, sp, mus, sil, imp = f[1], f[2], f[4], f[5], f[6]
+    if voc < CUE_D_VOC and sp >= CUE_D_SP:
+        return CUE_DIALOG
+    if voc < CUE_B_VOC and imp < CUE_B_IMP:
+        if mus >= CUE_B_MUS and mus >= sp:
+            return CUE_MUSIC
+        if sp < CUE_B_SP:
+            return CUE_QUIET if sil >= CUE_B_SIL else CUE_BLIND
+    if voc >= CUE_P_VOC:
+        return CUE_VOCAL
+    if imp >= CUE_P_IMP:
+        return CUE_IMPACT
+    return CUE_OTHER
+
+
+def cue_from_name(name):
+    return CUE_NAMES.index(name) if name in CUE_NAMES else CUE_UNKNOWN
+
+
+def _uninformative(cue):
+    return cue in (CUE_MUSIC, CUE_QUIET, CUE_BLIND)
+
+
+def tick_cue(t):
+    """回放时这一行的音频线索：v2 的 run 用真机记下的 a_cue，否则按分组分数现算（老 run 由 attach_cue_features 接上分数），
+    都没有为未知。"""
+    acue = getattr(t, 'acue', '') or ''
+    if acue:
+        return cue_from_name(acue)
+    return audio_cue(getattr(t, 'ays', None))
+
+
+def cue_features_np(scores):
+    """cue_features 的 numpy 批量版：[N, 521] → [N, len(CUE_GROUPS)] float32。逐组按下标顺序做单精度累加，逐位相同。"""
+    import numpy as np
+    sc = np.asarray(scores, np.float32)
+    out = np.zeros((sc.shape[0], len(CUE_GROUPS)), np.float32)
+    for j, (_, idx) in enumerate(CUE_GROUPS):
+        acc = np.zeros(sc.shape[0], np.float32)
+        for i in idx:
+            acc += sc[:, i]
+        out[:, j] = acc
+    return out
+
+
+def attach_cue_features(videos, npz_dirs, say=print):
+    """老 run（2026-10-11 之前的 app 不记线索）：把 audio_rescore.py rescore 存下的 <run 文件名>.yamnet.npz 里的
+    AudioSet 分数按结果时刻（wall - a_age）接到每个 tick 上（Tick.ays），回放时按它判线索。npz_dirs 是逗号分隔的
+    目录，按顺序找。已经带线索列的 run（新 app 录的）不动。返回 {vid: (接上的结果数, 结果总数)}。"""
+    import numpy as np
+    cov = {}
+    dirs = [x for x in (npz_dirs or '').split(',') if x]
+    for v in videos:
+        if any(t.acue or t.ays is not None for t in v.ticks):
+            continue
+        stem = os.path.splitext(os.path.basename(v.run_path))[0]
+        cands = [os.path.join(x, stem + '.yamnet.npz') for x in dirs]
+        path = next((c for c in cands if os.path.exists(c)), None)
+        if path is None:
+            say('  ⚠ %s：没有 %s.yamnet.npz，这部片的线索全是"未知"（规则不生效）' % (v.vid, stem))
+            cov[v.vid] = (0, 0)
+            continue
+        z = np.load(path)
+        rows = [tuple(float(x) for x in r) for r in cue_features_np(z['scores'])]
+        idx = dict((int(ts), i) for i, ts in enumerate(z['ts']))
+        seen, hit = set(), 0
+        for t in v.ticks:
+            t.ays = None
+            if t.a_age is None or t.a_age < 0:
+                continue
+            ts = t.wall - t.a_age
+            i = idx.get(ts)
+            if i is not None:
+                t.ays = rows[i]
+            if ts not in seen:
+                seen.add(ts)
+                hit += i is not None
+        cov[v.vid] = (hit, len(seen))
+    return cov
+
+
 # ======================================================================== 融合仲裁（FusionArbiter.java 的逐行移植）
 # 2026-10-07 起 app 用它替代 applyDoStartGate：启动 / 维持 / 停止 分开判断，证据按"新推理结果"计数。
 # 规则与取舍见 FusionArbiter.java 的类注释和 bench/README.md。改这里要同步改 Java，并重新生成对拍数据
@@ -511,9 +639,10 @@ ARB_DEFAULTS = {
     'ARB_CONS_WIN': 6000, 'ARB_V_CONS': 70,
     'ARB_NEG_WIN': 4000, 'ARB_UNCLEAR_MAX': 6000, 'ARB_MAX_AGE': 2000, 'ARB_KEEP': 20000,
     'ARB_COLD': 6000, 'ARB_START_V_CONS': 80, 'ARB_START_MA_K': 4,
+    'ARB_A1_N': 4, 'ARB_A1_CV': 3, 'ARB_A1_CONS': 90, 'ARB_BV_N': 4, 'ARB_BV_CONF': 0.90,
 }
-ARB_CAP = 128            # Java 账本的环形缓冲容量（正常用不满：每秒最多约 2 个结果 × 20 秒）
-ARB_VERSIONS = ('v1',)   # 这份移植对应的 FusionArbiter.java 规则版本
+ARB_CAP = 128                  # Java 账本的环形缓冲容量（正常用不满：每秒最多约 2 个结果 × 20 秒）
+ARB_VERSIONS = ('v1', 'v2')    # v1：2026-10-07；v2：2026-10-11 加音频线索（视频单独启动、对白否决）
 
 
 def _arb_cls(action):
@@ -528,11 +657,11 @@ class ArbLedger(object):
         self.reset(None)
 
     def reset(self, min_ts):
-        self.items = []          # [(ts, cls, conf)]，旧的在前
+        self.items = []          # [(ts, cls, conf, 对白, 听不出)]，旧的在前
         self.last_ts = None
         self.min_ts = min_ts
 
-    def feed(self, action, conf, ts, now):
+    def feed(self, action, conf, ts, now, cue=CUE_UNKNOWN):
         if ts is None or ts <= 0 or ts > now or (self.last_ts is not None and ts <= self.last_ts):
             return False
         self.last_ts = ts
@@ -540,7 +669,7 @@ class ArbLedger(object):
             return False
         if len(self.items) == ARB_CAP:
             self.items.pop(0)
-        self.items.append((ts, _arb_cls(action), conf))
+        self.items.append((ts, _arb_cls(action), conf, cue == CUE_DIALOG, _uninformative(cue)))
         lim = now - self.keep
         while self.items and self.items[0][0] <= lim:
             self.items.pop(0)
@@ -549,40 +678,55 @@ class ArbLedger(object):
     def recent(self, now, n, max_win):
         lo = now - max_win
         got = 0
-        for ts, _, _ in list(reversed(self.items))[:n]:
-            if ts <= lo:
+        for it in list(reversed(self.items))[:n]:
+            if it[0] <= lo:
                 break
             got += 1
         return got
 
-    def count(self, now, win, c, floor=0.0):
+    def count(self, now, win, c, floor=0.0, veto=False):
+        """veto：线索为对白的"转"按 unclear 算（不计入 c = 1）。"""
         lo = now - win
         n = 0
-        for ts, k, cf in reversed(self.items):
+        for ts, k, cf, dial, _ in reversed(self.items):
             if ts <= lo:
                 break
-            if k == c and cf >= floor:
+            if k == c and cf >= floor and not (veto and c == 1 and dial):
                 n += 1
         return n
 
     def total(self, now, win):
         lo = now - win
         n = 0
-        for ts, _, _ in reversed(self.items):
-            if ts <= lo:
+        for it in reversed(self.items):
+            if it[0] <= lo:
                 break
             n += 1
         return n
 
-    def last_n_pos(self, now, n, max_win):
+    def last_n_pos(self, now, n, max_win, veto=False):
         lo = now - max_win
         pos = 0
-        for ts, k, _ in list(reversed(self.items))[:n]:
+        for ts, k, _, dial, _ in list(reversed(self.items))[:n]:
             if ts <= lo:
                 break
-            if k == 1:
+            if k == 1 and not (veto and dial):
                 pos += 1
         return pos
+
+    def last_n_uninformative(self, now, n, max_win):
+        """最近 n 个结果都在窗口内、线索全是听不出；不足 n 个为 False。"""
+        if len(self.items) < n:
+            return False
+        lo = now - max_win
+        return all(it[0] > lo and it[4] for it in self.items[-n:])
+
+    def last_n_negative(self, now, n, max_win, floor):
+        """最近 n 个结果都在窗口内、全是置信度 ≥ floor 的"不转"；不足 n 个为 False。"""
+        if len(self.items) < n:
+            return False
+        lo = now - max_win
+        return all(it[0] > lo and it[1] == -1 and it[2] >= floor for it in self.items[-n:])
 
 
 class FusionArbiter(object):
@@ -594,8 +738,11 @@ class FusionArbiter(object):
             if params and k in params:
                 p[k] = params[k]
         self.p = p
+        # 按 run 记下的版本回放：ARB=v1 的 run 没有线索规则；没给参数（对拍数据、合成场景）按现在的 Java（v2）
+        self.version = (params or {}).get('ARB') or 'v2'
         self.v_floor = f32(p['ARB_V_FLOOR'])      # Java 里是 float 常量，边界比较按单精度
         self.a_floor = f32(p['ARB_A_FLOOR'])
+        self.bv_conf = f32(p['ARB_BV_CONF'])
         self.video = ArbLedger(p['ARB_MAX_AGE'], p['ARB_KEEP'])
         self.audio = ArbLedger(p['ARB_MAX_AGE'], p['ARB_KEEP'])
         self.last_support = -1
@@ -623,24 +770,32 @@ class FusionArbiter(object):
         k = self.video.count(now, p['ARB_CONS_WIN'], 1)
         return n > 0 and k * 100 >= cons_pct * n
 
-    def decide(self, now, v, vc, v_ts, a, ac, a_ts, motor_on):
+    def decide(self, now, v, vc, v_ts, a, ac, a_ts, motor_on, cue=CUE_UNKNOWN):
         p = self.p
+        if self.version == 'v1':
+            cue = CUE_UNKNOWN                        # v1 没有线索规则
         if self.prev_now is not None and now < self.prev_now:
             self.reset(now)                          # 墙钟往回跳
         self.prev_now = now
         self.video.feed(v, vc, v_ts, now)
-        self.audio.feed(a, ac, a_ts, now)
+        self.audio.feed(a, ac, a_ts, now, cue)
         if not motor_on:
             self.last_support = -1
+            veto = self.video.last_n_negative(now, p['ARB_BV_N'], p['ARB_M_MAX'], self.bv_conf)
             if self.video.count(now, p['ARB_C_WIN'], 1, self.v_floor) >= p['ARB_C_V'] and \
-                    self.audio.count(now, p['ARB_C_WIN'], 1, self.a_floor) >= p['ARB_C_A'] and \
+                    self.audio.count(now, p['ARB_C_WIN'], 1, self.a_floor, veto) >= p['ARB_C_A'] and \
                     (self._video_support(now, p['ARB_START_V_CONS'])
-                     or self.audio.last_n_pos(now, p['ARB_MA_N'], p['ARB_M_MAX']) >= p['ARB_START_MA_K']):
+                     or self.audio.last_n_pos(now, p['ARB_MA_N'], p['ARB_M_MAX'], veto) >= p['ARB_START_MA_K']):
                 self.reason = 'start_both'
                 return 'do'
             n = self.audio.total(now, p['ARB_Z_WIN'])
-            if n >= p['ARB_Z_N'] and self.audio.count(now, p['ARB_Z_WIN'], 1) == n:
+            if n >= p['ARB_Z_N'] and self.audio.count(now, p['ARB_Z_WIN'], 1, 0.0, veto) == n:
                 self.reason = 'start_audio'
+                return 'do'
+            if self.audio.last_n_uninformative(now, p['ARB_A1_N'], p['ARB_M_MAX']) and \
+                    self.video.count(now, p['ARB_C_WIN'], 1, self.v_floor) >= p['ARB_A1_CV'] and \
+                    self._video_support(now, p['ARB_A1_CONS']):
+                self.reason = 'start_video'
                 return 'do'
             if self._has_neg(now):
                 self.reason = 'off_neg'
@@ -722,7 +877,8 @@ def replay_legacy(ticks, params, actions=None, arbiter=None, reasons=None):
                 arb.reset(ms, warm)
         sm = core.smoothed(v, a, vc, ac) if arb is None else ''
         if arb is not None:
-            g = arb.decide(t.wall, v, vc, _tick_ts(t, 'v'), a, ac, _tick_ts(t, 'a'), _is_sex(ble.cur))
+            g = arb.decide(t.wall, v, vc, _tick_ts(t, 'v'), a, ac, _tick_ts(t, 'a'), _is_sex(ble.cur),
+                           tick_cue(t))
             if reasons is not None:
                 reasons.append(arb.reason)
         else:
@@ -1624,10 +1780,27 @@ def cmd_check(args):
         if 'arb' in vcols:                            # 原因也要对上：输出相同但走的规则不同，说明两边实现已经分叉
             worst = min(worst, agree['arb'] / n)
         sl, sr = Score.of(v, tl, Cost()), Score.of(v, tr, Cost())
+        # 音频线索（v2 的 run）：真机判的 a_cue 与按 a_cue_* 分组分数重判的要一致，否则 AudioCue 与这里的移植已经分叉
+        seen, dist, cue_n, cue_ok = set(), {}, 0, 0
+        for t in v.ticks:
+            if not (t.acue or t.ays is not None) or t.a_age is None or t.a_age < 0 or t.wall - t.a_age in seen:
+                continue
+            seen.add(t.wall - t.a_age)
+            cue_n += 1
+            cue_ok += cue_from_name(t.acue) == audio_cue(t.ays)
+            dist[t.acue or '未知'] = dist.get(t.acue or '未知', 0) + 1
+        if cue_n:
+            worst = min(worst, cue_ok / float(cue_n))
         print('══ %s  %s  回放：%s ══' % (v.vid, os.path.basename(v.run_path), what))
         print('  逐 tick 一致率  ' + '  '.join('%s %.2f%%' % (c, 100.0 * agree[c] / n) for c in vcols))
         print('  马达状态时间线一致率 %.2f%%   准确率 实测 %s / 回放 %s'
               % (100.0 * tl_agree, _pct(sl.acc()).strip(), _pct(sr.acc()).strip()))
+        if cue_n:
+            print('  音频线索  真机与重判一致 %d/%d（%.2f%%）  分布 %s' % (
+                cue_ok, cue_n, 100.0 * cue_ok / cue_n,
+                ' '.join('%s %.0f%%' % (k, 100.0 * c / cue_n) for k, c in sorted(dist.items(), key=lambda x: -x[1]))))
+        elif v.params.get('ARB', '') not in ('', 'v1'):
+            print('  ⚠ 这份 run 没有音频线索（a_cue 全空）：YAMNet 没读到第 0 个输出？线索规则没有生效')
         for pos, c, w, g in divs:
             print('    pos %8.1fs  %-10s 实测 %-10r 回放 %r' % (pos / 1000.0, c, w, g))
         print()
@@ -1702,7 +1875,13 @@ def cmd_oracle(args):
 
 # ======================================================================== 对拍数据（Java 单元测试用）
 GOLDEN_PATH = os.path.join(ROOT, 'app', 'src', 'test', 'resources', 'fusion', 'arbiter_golden.csv')
-GOLDEN_HEADER = 'reset,now,v_action,v_conf,v_ts,a_action,a_conf,a_ts,motor_on,exp_action,exp_reason'
+GOLDEN_HEADER = 'reset,now,v_action,v_conf,v_ts,a_action,a_conf,a_ts,a_cue,motor_on,exp_action,exp_reason'
+# AudioCueTest 的对拍数据：线索用到的 AudioSet 下标的分数 → 期望的分组分数（单精度逐位）和线索名
+CUE_GOLDEN_PATH = os.path.join(ROOT, 'app', 'src', 'test', 'resources', 'fusion', 'audio_cue_golden.csv')
+CUE_GOLDEN_IDX = sorted(set(i for _, idx in CUE_GROUPS for i in idx))
+CUE_GOLDEN_HEADER = ','.join(['s%d' % i for i in CUE_GOLDEN_IDX] + CUE_FEATURE_COLS + [CUE_COL])
+# 老 run 的 YAMNet 分数（audio_rescore.py rescore 存的 .yamnet.npz），golden 回放真实片段时靠它判线索
+DEF_CUE_NPZ = ','.join(os.path.join(ROOT, 'bench', 'rescored', d) for d in ('audio_old', 'test_audio_old'))
 
 
 def _gf(x):
@@ -1721,9 +1900,10 @@ def _golden_rows_from_video(video, lo, hi):
         on = _is_sex(ble.cur)
         if first:
             arb.reset(t.wall)        # 这一段从 seek 开始：之前产出的结果不算（Java 端同样先 reset）
-        g = arb.decide(t.wall, t.v, t.vc, vts, t.a, t.ac, ats, on)
+        cue = tick_cue(t)
+        g = arb.decide(t.wall, t.v, t.vc, vts, t.a, t.ac, ats, on, cue)
         rows.append((t.wall if first else '', t.wall, t.v, t.vc, -1 if vts is None else vts,
-                     t.a, t.ac, -1 if ats is None else ats, on, g, arb.reason))
+                     t.a, t.ac, -1 if ats is None else ats, cue, on, g, arb.reason))
         first = False
         if g:
             ble.update(g, final_freq(t.loud_lv, t.loud_conf, ble.level), t.wall)
@@ -1737,12 +1917,12 @@ def _golden_rows_synthetic():
     arb = FusionArbiter()
     W = ARB_DEFAULTS
 
-    def tick(now, v='', vc=0.0, vts=-1, a='', ac=0.0, ats=-1, on=False, reset=None):
+    def tick(now, v='', vc=0.0, vts=-1, a='', ac=0.0, ats=-1, on=False, reset=None, cue=CUE_UNKNOWN):
         if reset is not None:
             ms, warm = (int(x) for x in str(reset).split('+')) if '+' in str(reset) else (int(reset), 0)
             arb.reset(ms, warm)
-        g = arb.decide(now, v, f32(vc), vts, a, f32(ac), ats, on)
-        rows.append(('' if reset is None else reset, now, v, f32(vc), vts, a, f32(ac), ats, on, g, arb.reason))
+        g = arb.decide(now, v, f32(vc), vts, a, f32(ac), ats, on, cue)
+        rows.append(('' if reset is None else reset, now, v, f32(vc), vts, a, f32(ac), ats, cue, on, g, arb.reason))
         return g
 
     # 1) 两路佐证：置信度恰好等于下限（0.85f / 0.90f）算"强"，再低一点不算
@@ -1898,6 +2078,100 @@ def _golden_rows_synthetic():
         last = base + 3200 - 5
         tick(last - 400 + W['ARB_C_WIN'] - edge, 'do', 0.5, last - 400 + W['ARB_C_WIN'] - edge - 1,
              'do', 0.95, last - 400 + W['ARB_C_WIN'] - edge - 1)
+
+    # ---- v2：音频线索（视频单独启动 start_video、对白否决）。线索都跟着音频结果走：同一个结果每个 tick 带同一个线索
+    MUS, QUI, BLI, DIA, VOC, OTH, UNK = CUE_MUSIC, CUE_QUIET, CUE_BLIND, CUE_DIALOG, CUE_VOCAL, CUE_OTHER, CUE_UNKNOWN
+    # 22) 视频单独启动：音频最近 4 个结果都听不出（音乐 / 安静 / 听不出，分类头判不转）、视频强"转"又稳时启动；
+    #     第 4 个线索是"其它"或"未知"就不启动（与 v1 相同：off_neg）
+    for last_cue, base in ((MUS, T + 2700000), (OTH, T + 2710000), (UNK, T + 2720000)):
+        tick(base, reset=base)
+        cues = (MUS, QUI, BLI, last_cue)
+        for k in range(9):
+            now = base + 500 * (k + 1)
+            j = now // 1000 * 1000 - base                  # 音频 1 秒一个结果：base+1000 … base+4000
+            ats = base + j if j >= 1000 else -1
+            c = cues[min(j // 1000, 4) - 1] if j >= 1000 else UNK
+            tick(now, 'do', 0.95, now - 5, 'Noise' if ats > 0 else '', 0.9 if ats > 0 else 0.0, ats, cue=c)
+    # 23) 视频单独启动看的 4 个音频结果都要在 M_MAX 内：最旧的恰好 12 秒前产出就不算
+    for edge, base in ((1, T + 2730000), (0, T + 2750000)):
+        tick(base, reset=base)
+        for k in range(4):
+            tick(base + 1000 * k + 10, a='Noise', ac=0.9, ats=base + 1000 * k, cue=MUS)
+        end = base + W['ARB_M_MAX'] - edge
+        for d in (1000, 500, 0):                           # 第 3 个强视频"转"恰好在 end 到
+            tick(end - d, 'do', 0.95, end - d - 1, 'Noise', 0.9, base + 3000, cue=MUS)
+    # 24) 视频单独启动要 C_WIN 内 3 个强"转"：第 3 个比 0.85 低 1 ulp 就不启动
+    for vfl, base in ((f32(0.85), T + 2770000), (below(f32(0.85)), T + 2780000)):
+        tick(base, reset=base)
+        for k in range(4):
+            tick(base + 1000 * k + 10, a='', ac=0.0, ats=base + 1000 * k, cue=QUI)
+        tick(base + 3500, 'do', 0.95, base + 3490, '', 0.0, base + 3000, cue=QUI)
+        tick(base + 4000, 'do', 0.95, base + 3990, '', 0.0, base + 3000, cue=QUI)
+        tick(base + 4500, 'do', vfl, base + 4490, '', 0.0, base + 3000, cue=QUI)
+    # 25) 视频单独启动要 6 秒内"转"占比 ≥ 90%：9 转 1 不转可以，8 转 1 不转不行（第 4 个听不出的音频结果最后到）
+    for n_do, base in ((9, T + 2790000), (8, T + 2810000)):
+        tick(base, reset=base)
+        for k in range(3):
+            tick(base + 1000 * k + 10, a='', ac=0.0, ats=base + 1000 * k, cue=BLI)
+        end = base + 9000
+        for j in range(n_do + 1):
+            ts = end - 5400 + 500 * j
+            tick(ts + 5, 'Noise' if j == 0 else 'do', 0.6 if j == 0 else 0.95, ts, '', 0.0, base + 2000, cue=BLI)
+        tick(end, 'do', 0.95, end - 5400 + 500 * n_do, '', 0.0, end - 10, cue=BLI)
+    # 26) 对白否决：视频最近 4 个都是 ≥0.90 的"剧情"时，对白线索的音频"转"不算启动证据（音频兜底不启动）；
+    #     视频置信度低 1 ulp、最近一个视频结果 unclear、音频线索是人声时照常启动；4 个里 1 个人声也凑不够"全部转"
+    for vc4, last_v, acues, base in ((f32(0.90), 'Noise', (DIA,) * 4, T + 2830000),
+                                     (below(f32(0.90)), 'Noise', (DIA,) * 4, T + 2850000),
+                                     (f32(0.95), '', (DIA,) * 4, T + 2870000),
+                                     (f32(0.95), 'Noise', (VOC,) * 4, T + 2890000),
+                                     (f32(0.95), 'Noise', (DIA, VOC, DIA, DIA), T + 2900000)):
+        tick(base, reset=base)
+        for k in range(4):
+            vts = base + 500 + 1000 * k
+            va = last_v if k == 3 else 'Noise'
+            tick(vts + 5, va, vc4 if va else 0.0, vts, 'do' if k else '', 0.8 if k else 0.0,
+                 base + 1000 * k if k else -1, cue=acues[k - 1] if k else UNK)
+            tick(base + 1000 * (k + 1) + 10, va, vc4 if va else 0.0, vts, 'do', 0.8, base + 1000 * (k + 1),
+                 cue=acues[k])
+    # 27) 对白否决看的 4 个视频结果都要在 M_MAX 内：最旧的恰好 12 秒前产出就不否决（音频兜底照常启动）
+    for edge, base in ((1, T + 2910000), (0, T + 2930000)):
+        tick(base, reset=base)
+        end = base + W['ARB_M_MAX'] - edge
+        ev = [(base + 10, base, None), (base + 4010, base + 4000, None), (base + 8010, base + 8000, None),
+              (base + 9010, base + 8000, base + 9000), (base + 10010, base + 8000, base + 10000),
+              (base + 11010, base + 11000, base + 11000), (end, base + 11000, end - 1)]
+        for now, vts, ats in ev:
+            tick(now, 'Noise', 0.95, vts, 'do' if ats else '', 0.8 if ats else 0.0, ats or -1,
+                 cue=DIA if ats else UNK)
+    # 28) 对白否决也管两路佐证（视频先 2 个强"转"、再 4 个强"剧情"，音频 4 个"转"）：全是对白时不启动；
+    #     第 4 个是人声时音频强"转"够了，但"最近 4 个全是转"按否决算只有 1 个，也不启动；视频置信度 0.85 时不否决，启动
+    for vneg, cue4, base in ((0.95, DIA, T + 2950000), (0.95, VOC, T + 2970000), (0.85, DIA, T + 2990000)):
+        tick(base, reset=base)
+        D = base + 10000
+        for k, ts in enumerate((D - 8000, D - 7000, D - 6000)):
+            tick(ts + 5, a='do', ac=0.95, ats=ts, cue=DIA)
+        vev = [('do', 0.95, D - 2500), ('do', 0.95, D - 2000), ('Noise', vneg, D - 1500), ('Noise', vneg, D - 1000),
+               ('Noise', vneg, D - 500)]
+        for va, vcf, vts in vev:
+            tick(vts + 5, va, vcf, vts, 'do', 0.95, D - 6000, cue=DIA)
+        tick(D, 'Noise', vneg, D - 10, 'do', 0.95, D - 5, cue=cue4)
+    # 28b) 两路佐证里"音频强转"也按否决算：C_WIN 内唯一的强"转"是对白、最近 4 个是人声的弱"转"时不启动
+    #      （视频结果来得很密，2 个强"转"之后紧跟 4 个强"剧情"，否决成立时视频强"转"仍在 C_WIN 内）
+    base = T + 3000000
+    tick(base, reset=base)
+    D = base + 10000
+    for k in range(6):
+        vts = D - 2990 + 10 * k
+        tick(vts + 2, 'do' if k < 2 else 'Noise', 0.95, vts)
+    aev = [(D - 2500, 0.95, DIA), (D - 2000, 0.8, VOC), (D - 1500, 0.8, VOC), (D - 1000, 0.8, VOC), (D - 500, 0.8, VOC)]
+    for ats, acf, acue in aev:
+        tick(ats + 5, 'Noise', 0.95, D - 2940, 'do', acf, ats, cue=acue)
+    # 29) 维持不看线索：马达在转、视频确定是剧情、音频是对白线索的"转"，照样靠音频维持（与 v1 相同）
+    base = T + 3010000
+    tick(base, on=True, reset=base)
+    for k in range(6):
+        now = base + 1000 * (k + 1)
+        tick(now, 'Noise', 0.95, now - 300, 'do', 0.95, now - 10, True, cue=DIA)
     return rows
 
 
@@ -1930,33 +2204,232 @@ def _golden_rows_random(seed=20261007, n=3000):
             on = not on
         v, a = last['v'], last['a']
         g = arb.decide(now, v[0], v[1], v[2], a[0], a[1], a[2], on)
-        rows.append((reset, now, v[0], v[1], v[2], a[0], a[1], a[2], on, g, arb.reason))
+        rows.append((reset, now, v[0], v[1], v[2], a[0], a[1], a[2], CUE_UNKNOWN, on, g, arb.reason))
     return rows
 
 
+def _golden_rows_random_cues(seed=20261011, episodes=180):
+    """带线索的随机片段（每段从 reset 开始、马达不转）。三类轮流：视频多半强"转"、音频多半听不出（视频单独启动）；
+    视频多半是 ≥0.9 的"剧情"、音频多半是对白线索的"转"（对白否决）；全随机。置信度取在下限附近，结果间隔、
+    过期、偶尔"没有新结果"都随机；马达跟着输出走，转起来后不时被停掉（暂停 / 状态机），好让启动规则多判几次。"""
+    rnd = random.Random(seed)
+    arb, rows = FusionArbiter(), []
+    MUS, QUI, BLI, DIA, VOC, OTH, UNK = CUE_MUSIC, CUE_QUIET, CUE_BLIND, CUE_DIALOG, CUE_VOCAL, CUE_OTHER, CUE_UNKNOWN
+    confs = [0.5, 0.849999, 0.85, 0.850001, 0.899999, 0.9, 0.900001, 0.95, 0.99, 1.0]
+    ages = [0, 1, 50, 300, 300, 50, 2000, 2001]
+    now = 1760000000000
+    for e in range(episodes):
+        kind = ('a1', 'veto', 'mixed')[e % 3]
+        now += 60000
+        arb.reset(now)
+        reset = now
+        on = False
+        vlast = alast = None
+        for k in range(rnd.randint(16, 30)):
+            now += rnd.choice([0, 250, 499, 500, 500, 500, 501, 1000])
+            if rnd.random() < 0.85:
+                if kind == 'a1':
+                    act = 'do' if rnd.random() < 0.9 else rnd.choice(['Noise', ''])
+                    cf = rnd.choice([0.8, 0.849999, 0.85, 0.9, 0.95])
+                elif kind == 'veto':
+                    act = 'Noise' if rnd.random() < 0.9 else rnd.choice(['do', ''])
+                    cf = rnd.choice([0.899999, 0.9, 0.95, 0.99, 0.95, 0.99])
+                else:
+                    act, cf = rnd.choice(['do', 'Noise', '']), rnd.choice(confs)
+                vlast = (act, f32(cf), now - rnd.choice(ages))
+            if rnd.random() < 0.5 or alast is None:
+                if kind == 'a1':
+                    cue = rnd.choice([MUS, QUI, BLI] * 6 + [OTH, UNK, DIA])
+                    act = 'do' if rnd.random() < 0.06 else rnd.choice(['Noise', 'Noise', ''])
+                elif kind == 'veto':
+                    cue = rnd.choice([DIA] * 8 + [VOC, OTH])
+                    act = rnd.choice(['do'] * 15 + ['Noise'])
+                else:
+                    cue, act = rnd.choice(range(len(CUE_NAMES))), rnd.choice(['do', 'Noise', ''])
+                alast = (act, f32(rnd.choice(confs)), now - rnd.choice(ages), cue)
+            v = vlast or ('', f32(0.0), -1)
+            a = alast
+            g = arb.decide(now, v[0], v[1], v[2], a[0], a[1], a[2], on, a[3])
+            rows.append((reset, now, v[0], v[1], v[2], a[0], a[1], a[2], a[3], on, g, arb.reason))
+            reset = ''
+            if g == 'do' and not on:
+                on = True
+            elif g == 'Noise' and on and rnd.random() < 0.5:
+                on = False
+            elif on and rnd.random() < 0.15:
+                on = False
+    return rows
+
+
+def _cue_rule_points(video):
+    """整部片按 app 回放（v2 驱动蓝牙状态机），同时喂一个 v1：返回两者输出不同的 tick 的播放位置（线索规则起作用的地方）。"""
+    a2, a1, ble = FusionArbiter({'ARB': 'v2'}), FusionArbiter({'ARB': 'v1'}), Ble(video.params)
+    pts = []
+    for t in video.ticks:
+        vts, ats = _tick_ts(t, 'v'), _tick_ts(t, 'a')
+        on = _is_sex(ble.cur)
+        cue = tick_cue(t)
+        g = a2.decide(t.wall, t.v, t.vc, vts, t.a, t.ac, ats, on, cue)
+        if g != a1.decide(t.wall, t.v, t.vc, vts, t.a, t.ac, ats, on, cue):
+            pts.append(t.pos)
+        if g:
+            ble.update(g, final_freq(t.loud_lv, t.loud_conf, ble.level), t.wall)
+    return pts
+
+
+def golden_cue_effect(rows):
+    """对拍数据里线索规则真正决定输出的行：同样的输入喂 v1（不看线索），输出不同的行按 v2 的原因归类。"""
+    arb = FusionArbiter({'ARB': 'v1'})
+    eff = {'start_video': 0, 'veto': 0, 'other': 0}
+    for reset, now, v, vc, vts, a, ac, ats, cue, on, g, why in rows:
+        if reset != '':
+            ms, warm = (int(x) for x in str(reset).split('+')) if '+' in str(reset) else (int(reset), 0)
+            arb.reset(ms, warm)
+        g1 = arb.decide(now, v, vc, vts, a, ac, ats, on, cue)
+        if g1 != g:
+            if why == 'start_video':
+                eff['start_video'] += 1
+            elif arb.reason in ('start_both', 'start_audio'):
+                eff['veto'] += 1
+            else:
+                eff['other'] += 1
+    return eff
+
+
+def _f32_step(x, d):
+    """单精度 x（> 0）往上 / 往下挪 d 个 ulp。"""
+    return struct.unpack('<f', struct.pack('<I', struct.unpack('<I', struct.pack('<f', x))[0] + d))[0]
+
+
+def _cue_golden_rows(npz_dirs, seed=20261011, per_cue=60, n_edge=1200, n_spread=200):
+    """AudioCueTest 的对拍数据：每行是 CUE_GOLDEN_IDX 那几个下标的分数（其余下标 Java 端填 NaN：用错下标就对不上）、
+    期望的分组分数和线索。三部分：真实结果（.yamnet.npz，每种线索最多 per_cue 个）、阈值边界（阈值的单精度值和
+    前后 1 ulp 的组合）、各下标数量级悬殊的随机值（累加顺序错了就对不上）。返回 [(scores 列表, features, cue)]。"""
+    rnd = random.Random(seed)
+    out = []
+
+    def add(vals):
+        sc = [0.0] * CUE_N_CLASSES
+        for i, x in zip(CUE_GOLDEN_IDX, vals):
+            sc[i] = f32(x)
+        f = cue_features(sc)
+        out.append(([sc[i] for i in CUE_GOLDEN_IDX], f, audio_cue(f)))
+
+    # 1) 真实结果：按线索分层抽样
+    try:
+        import numpy as np
+        pool = {}
+        for d in [x for x in (npz_dirs or '').split(',') if x]:
+            for path in sorted(glob.glob(os.path.join(d, '*.yamnet.npz'))):
+                sc = np.load(path)['scores'].astype(np.float32)
+                for r, f in zip(sc, cue_features_np(sc)):
+                    pool.setdefault(audio_cue(tuple(float(x) for x in f)), []).append(
+                        [float(r[i]) for i in CUE_GOLDEN_IDX])
+        for c in sorted(pool):
+            for vals in rnd.sample(pool[c], min(per_cue, len(pool[c]))):
+                add(vals)
+    except ImportError:
+        print('  ⚠ 没有 numpy：线索对拍数据只有合成部分')
+    # 2) 阈值边界：每个特征只放在组里一个下标上（组和就是它本身），在阈值附近取值
+    pos = dict((i, k) for k, i in enumerate(CUE_GOLDEN_IDX))
+
+    def edge(th):
+        x = f32(th)
+        return [_f32_step(x, -1), x, _f32_step(x, 1)]
+    cand = {
+        'voc': [0.0] + edge(CUE_D_VOC) + edge(CUE_B_VOC) + edge(CUE_P_VOC),
+        'sp': [0.0] + edge(CUE_B_SP) + edge(CUE_D_SP) + [f32(0.45)],
+        'mus': [0.0] + edge(CUE_B_MUS) + [f32(0.45)],
+        'sil': [0.0] + edge(CUE_B_SIL),
+        'imp': [0.0] + edge(CUE_B_IMP) + edge(CUE_P_IMP),
+    }
+    for _ in range(n_edge):
+        vals = [0.0] * len(CUE_GOLDEN_IDX)
+        voc, sp, mus = rnd.choice(cand['voc']), rnd.choice(cand['sp']), rnd.choice(cand['mus'])
+        if rnd.random() < 0.15:
+            mus = sp                                        # 音乐 = Speech 时算音乐（>=）
+        vals[pos[rnd.choice((11, 21, 40))]] = voc            # 11 只在扩展组，21 / 40 两组都有
+        vals[pos[0]] = sp
+        vals[pos[132]] = mus
+        vals[pos[494]] = rnd.choice(cand['sil'])
+        vals[pos[rnd.choice(CUE_GROUPS[6][1])]] = rnd.choice(cand['imp'])
+        if rnd.random() < 0.3:
+            vals[pos[rnd.choice((2, 3))]] = f32(rnd.random())   # 只进 speech_ext（只记录）
+        add(vals)
+    # 3) 各下标数量级悬殊：单精度累加的舍入取决于顺序
+    for _ in range(n_spread):
+        add([f32(10 ** rnd.uniform(-9, 0)) if rnd.random() < 0.8 else 0.0 for _ in CUE_GOLDEN_IDX])
+    return out
+
+
+def cue_golden_coverage(rows):
+    """每个阈值在多少行里"决定"了线索：把该特征挪 1 ulp 跨过阈值，线索就变。"""
+    th = {'D_VOC': (1, CUE_D_VOC), 'B_VOC': (1, CUE_B_VOC), 'P_VOC': (1, CUE_P_VOC), 'D_SP': (2, CUE_D_SP),
+          'B_SP': (2, CUE_B_SP), 'B_MUS': (4, CUE_B_MUS), 'B_SIL': (5, CUE_B_SIL), 'B_IMP': (6, CUE_B_IMP),
+          'P_IMP': (6, CUE_P_IMP)}
+    cov = dict((k, 0) for k in th)
+    for _, f, c in rows:
+        for k, (j, t) in th.items():
+            x = f32(t)
+            if f[j] not in (_f32_step(x, -1), x, _f32_step(x, 1)):
+                continue
+            outs = set()
+            for y in (_f32_step(x, -1), x, _f32_step(x, 1)):
+                g = list(f)
+                g[j] = y
+                outs.add(audio_cue(tuple(g)))
+            cov[k] += len(outs) > 1
+    return cov
+
+
 def cmd_golden(args):
-    """生成 FusionArbiterTest 的对拍数据：真实 run 的几段 + 合成边界用例。"""
-    videos = load_videos(args.gt_dir, args.runs_dir, args.pair, args.policy, quiet=True)
+    """生成两份对拍数据：FusionArbiterTest 的（真实 run 的若干段 + 合成边界用例 + 随机序列）和 AudioCueTest 的。"""
+    videos = []
+    for rd in [x for x in args.runs_dir.split(',') if x]:
+        for v in load_videos(args.gt_dir, rd, args.pair, args.policy, quiet=True):
+            if all(w.vid != v.vid for w in videos):
+                videos.append(v)
+    cov = attach_cue_features(videos, args.npz) if args.npz else {}
     rows = []
     for v in videos:
-        if v.vid not in ('v01', 'v03', 'v04', 'v07'):
-            continue
-        trans = [s for s, e, lab in v.segs[1:]]
-        for c in trans[:3]:
-            rows += _golden_rows_from_video(v, max(0, c - 60000), c + 60000)
+        if v.vid in ('v01', 'v03', 'v04', 'v07'):         # 每部片前 3 个切换点前后各 60 秒
+            trans = [s for s, e, lab in v.segs[1:]]
+            for c in trans[:3]:
+                rows += _golden_rows_from_video(v, max(0, c - 60000), c + 60000)
+        picked = []                                        # 线索规则起作用的地方：每部片最多 2 处，前 40 秒后 20 秒
+        for p in _cue_rule_points(v):
+            if all(abs(p - q) > 60000 for q in picked):
+                picked.append(p)
+        for p in picked[:2]:
+            rows += _golden_rows_from_video(v, max(0, p - 40000), p + 20000)
     rows += _golden_rows_synthetic()
     rows += _golden_rows_random()
+    rows += _golden_rows_random_cues()
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     with io.open(args.out, 'w', encoding='utf-8', newline='\n') as fh:
         fh.write(GOLDEN_HEADER + '\n')
         for r in rows:
-            reset, now, v, vc, vts, a, ac, ats, on, g, why = r
-            fh.write(','.join([str(reset), str(now), v, _gf(vc), str(vts), a, _gf(ac), str(ats),
+            reset, now, v, vc, vts, a, ac, ats, cue, on, g, why = r
+            fh.write(','.join([str(reset), str(now), v, _gf(vc), str(vts), a, _gf(ac), str(ats), CUE_NAMES[cue],
                                '1' if on else '0', g, why]) + '\n')
     reasons = {}
     for r in rows:
         reasons[r[-1]] = reasons.get(r[-1], 0) + 1
-    print('写入 %s：%d 行；原因覆盖 %s' % (args.out, len(rows), sorted(reasons.items())))
+    eff = golden_cue_effect(rows)
+    print('写入 %s：%d 行（%d 部片接上了 YAMNet 分数）；原因覆盖 %s' % (
+        args.out, len(rows), sum(1 for x in cov.values() if x[0]), sorted(reasons.items())))
+    print('  线索规则决定输出（与 v1 不同）的行：视频单独启动 %d，对白否决 %d，其它 %d'
+          % (eff['start_video'], eff['veto'], eff['other']))
+    crow = _cue_golden_rows(args.npz)
+    with io.open(args.cue_out, 'w', encoding='utf-8', newline='\n') as fh:
+        fh.write(CUE_GOLDEN_HEADER + '\n')
+        for vals, f, c in crow:
+            fh.write(','.join([_gf(x) for x in vals] + [_gf(x) for x in f] + [CUE_NAMES[c]]) + '\n')
+    dist = {}
+    for _, _, c in crow:
+        dist[CUE_NAMES[c] or '未知'] = dist.get(CUE_NAMES[c] or '未知', 0) + 1
+    print('写入 %s：%d 行；线索 %s；阈值起决定作用的行数 %s' % (
+        args.cue_out, len(crow), sorted(dist.items()), sorted(cue_golden_coverage(crow).items())))
     return 0
 
 
@@ -2063,7 +2536,10 @@ def _write_synth(video, gt_path, run_path, fusion='', extra_params='', corrupt_a
                    'ble_state': lg['ble_state'], 'ble_level': lg['ble_level'], 'sent': lg['sent'],
                    'sent_action': lg['sent_action'], 'sent_level': lg['sent_level'], 'a_pos': -1,
                    'arb': 'bogus' if corrupt_arb_every and k % corrupt_arb_every == 0 else lg.get('arb', ''),
-                   'arb_reset': lg.get('arb_reset', '')}
+                   'arb_reset': lg.get('arb_reset', ''), CUE_COL: getattr(t, 'acue', '') or ''}
+            ays = getattr(t, 'ays', None)
+            for j, c in enumerate(CUE_FEATURE_COLS):
+                val[c] = '' if ays is None else _gf(ays[j])
             fh.write(','.join(str(val.get(c, '')) for c in cols) + '\n')
 
 
@@ -2289,7 +2765,7 @@ def selftest():
     # 11b. 提交进仓库的 Java 对拍数据，Python 移植逐行重放也必须一致（只改 Python 不改 Java 时这里会报）
     if os.path.exists(GOLDEN_PATH):
         ga = FusionArbiter()
-        bad = []
+        bad, grows = [], []
         with io.open(GOLDEN_PATH, encoding='utf-8') as fh:
             head = fh.readline().strip()
             check(head == GOLDEN_HEADER, '对拍数据表头不对: %r' % head)
@@ -2298,11 +2774,34 @@ def selftest():
                 if f[0]:
                     ms, _, warm = f[0].partition('+')
                     ga.reset(int(ms), int(warm or 0))
-                g = ga.decide(int(f[1]), f[2], f32(float(f[3])), int(f[4]), f[5], f32(float(f[6])), int(f[7]),
-                              f[8] == '1')
-                if (g, ga.reason) != (f[9], f[10]) and len(bad) < 3:
-                    bad.append('第 %d 行 期望 %s/%s 实际 %s/%s' % (ln, f[9], f[10], g, ga.reason))
+                r = (f[0] if not f[0] or '+' in f[0] else int(f[0]), int(f[1]), f[2], f32(float(f[3])), int(f[4]),
+                     f[5], f32(float(f[6])), int(f[7]), cue_from_name(f[8]), f[9] == '1', f[10], f[11])
+                grows.append(r)
+                g = ga.decide(r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[9], r[8])
+                if (g, ga.reason) != (f[10], f[11]) and len(bad) < 3:
+                    bad.append('第 %d 行 期望 %s/%s 实际 %s/%s' % (ln, f[10], f[11], g, ga.reason))
         check(not bad, 'Python 移植重放 %s 对不上（改了规则就重新 golden）: %s' % (GOLDEN_PATH, bad))
+        # 对拍数据要真的考到 v2 的两条线索规则（同样的输入喂 v1，输出不同的行），否则 Java 端改错了也测不出来
+        eff = golden_cue_effect(grows)
+        check(eff['start_video'] >= 20 and eff['veto'] >= 50 and eff['other'] == 0,
+              '对拍数据里线索规则决定输出的行太少（或有归不了类的差异）: %r' % (eff,))
+    if os.path.exists(CUE_GOLDEN_PATH):
+        bad, n_rows = [], 0
+        with io.open(CUE_GOLDEN_PATH, encoding='utf-8') as fh:
+            head = fh.readline().strip()
+            check(head == CUE_GOLDEN_HEADER, '线索对拍数据表头不对: %r' % head)
+            nk = len(CUE_GOLDEN_IDX)
+            for ln, line in enumerate(fh, 2):
+                f = line.rstrip('\n').split(',')
+                sc = [0.0] * CUE_N_CLASSES
+                for i, x in zip(CUE_GOLDEN_IDX, f[:nk]):
+                    sc[i] = f32(float(x))
+                got = cue_features(sc)
+                want = tuple(f32(float(x)) for x in f[nk:nk + len(CUE_GROUPS)])
+                n_rows += 1
+                if (got != want or CUE_NAMES[audio_cue(got)] != f[-1]) and len(bad) < 3:
+                    bad.append('第 %d 行 期望 %r/%s 实际 %r/%s' % (ln, want, f[-1], got, CUE_NAMES[audio_cue(got)]))
+        check(not bad and n_rows >= 1000, 'Python 移植重算 %s 对不上（%d 行）: %s' % (CUE_GOLDEN_PATH, n_rows, bad))
 
     # 12. 新格式 run（ARB=v1 + arb / arb_reset 列，中途 reset 过）：check 逐 tick 对得上；原因列错 5% 时 check 判不可信
     arb_params = 'ARB=v1 ' + ' '.join('%s=%s' % kv for kv in sorted(ARB_DEFAULTS.items()))
@@ -2336,6 +2835,49 @@ def selftest():
         else:
             check(rc == 0 and 'arb 100.00%' in txt and 'gated 100.00%' in txt,
                   '新格式 run（含 reset 记号）回放应逐 tick 一致:\n%s' % txt)
+
+    # 13. v2 格式 run（ARB=v2 + a_cue / a_cue_* 列）：check 用记下的线索逐 tick 对得上、线索与重判 100% 一致；
+    #     把一部分"音乐"改记成"对白"（与分组分数矛盾）时 check 判不可信
+    feats = [tuple(f32(x) for x in fv) for fv in ((0.0, 0.001, 0.9, 0.95, 0.0, 0.0, 0.0),     # 对白
+                                                 (0.0, 0.0, 0.1, 0.12, 0.6, 0.0, 0.0),      # 音乐
+                                                 (0.0, 0.0, 0.05, 0.05, 0.1, 0.1, 0.0),     # 听不出
+                                                 (0.4, 0.5, 0.1, 0.1, 0.0, 0.0, 0.0))]      # 人声
+    check([audio_cue(fv) for fv in feats] == [CUE_DIALOG, CUE_MUSIC, CUE_BLIND, CUE_VOCAL], '自检用的分组分数判错了')
+    v2_params = 'ARB=v2 ' + ' '.join('%s=%s' % kv for kv in sorted(ARB_DEFAULTS.items()))
+    pp2 = parse_params(' '.join('%s=%s' % kv for kv in sorted(LEGACY_DEFAULTS.items())) + ' ' + v2_params)
+    v2dir = os.path.join(tmp, 'arb_v2')
+    os.makedirs(os.path.join(v2dir, 'gt'))
+    os.makedirs(os.path.join(v2dir, 'runs'))
+    for corrupt in (False, True):
+        phone2 = [t.copy(log=dict(t.log)) for t in v0.ticks]
+        for t in phone2:
+            ts = _tick_ts(t, 'a')
+            t.ays = None if ts is None else feats[(ts // 3000) % len(feats)]
+            t.acue = CUE_NAMES[audio_cue(t.ays)]
+        why2 = []
+        for t, st in zip(phone2, replay_legacy(phone2, pp2, reasons=why2)):
+            t.log.update({'gated': st.gated, 'final_freq': str(st.final_freq),
+                          'ble_state': st.ble_state, 'ble_level': str(st.ble_level),
+                          'sent': '1' if st.sent else '0', 'sent_action': st.sent[0] if st.sent else '',
+                          'sent_level': str(st.sent[1]) if st.sent else '-1'})
+        for t, r in zip(phone2, why2):
+            t.log['arb'] = r
+            if corrupt and t.acue == 'music':
+                t.acue = 'dialog'
+        _write_synth(v0.with_ticks(phone2), os.path.join(v2dir, 'gt', v0.vid + '.csv'),
+                     os.path.join(v2dir, 'runs', v0.vid + '_base.csv'), extra_params=v2_params)
+        ns = argparse.Namespace(gt_dir=os.path.join(v2dir, 'gt'), runs_dir=os.path.join(v2dir, 'runs'), pair=[],
+                                policy='exclude', show=0, config=None)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            rc = cmd_check(ns)
+        txt = out.getvalue()
+        if corrupt:
+            check(rc == 1 and '音频线索  真机与重判一致' in txt and '（100.00%）' not in txt,
+                  '线索与分组分数矛盾时 check 应判不可信:\n%s' % txt)
+        else:
+            check(rc == 0 and 'arb 100.00%' in txt and 'gated 100.00%' in txt and '（100.00%）' in txt
+                  and sum(1 for r in why2 if r == 'start_video') + sum(1 for t in phone2 if t.acue == 'dialog') > 0,
+                  'v2 格式 run（带线索）回放应逐 tick 一致、线索 100%% 一致:\n%s' % txt)
 
     for f in fails:
         print('  FAIL ' + f)
@@ -2374,10 +2916,12 @@ def main():
         p.add_argument('--jobs', type=int, default=0,
                        help='留一拟合用几个进程并行（默认 0 = CPU 核数；1 = 串行）')
 
-    p = sub.add_parser('golden', help='生成 FusionArbiterTest 的对拍数据（改了融合仲裁的规则/参数后要重新生成）')
+    p = sub.add_parser('golden', help='生成 FusionArbiterTest / AudioCueTest 的对拍数据（改了融合仲裁或线索的规则/参数后要重新生成）')
     common(p)
-    p.set_defaults(runs_dir=os.path.join(ROOT, 'bench', 'runs_initial'))
+    p.set_defaults(runs_dir=','.join(os.path.join(ROOT, 'bench', d) for d in ('runs_initial', 'runs_test')))
+    p.add_argument('--npz', default=DEF_CUE_NPZ, help='老 run 的 .yamnet.npz 目录（逗号分隔），给真实片段判线索')
     p.add_argument('--out', default=GOLDEN_PATH)
+    p.add_argument('--cue-out', default=CUE_GOLDEN_PATH)
 
     a = ap.parse_args()
     if a.selftest:

@@ -83,6 +83,7 @@ public class VideoProcessActivity extends AppCompatActivity {
      * 一次模型推理的结果快照。action 是分组概率判定（"do"/"Noise"/"" unclear），probs 为 null 表示推理失败。
      * winEndPosMs 只有音频有（视频为 -1）：读 PCM 时的播放位置，写进评测 CSV 的 a_pos 列，
      * bench/tools/audio_rescore.py 离线重算时靠它精确还原模型窗口。
+     * cue / cueFeat 也只有音频有：YAMNet AudioSet 分数判的线索（{@link AudioCue}）和分组分数，交给融合仲裁、写进评测 CSV。
      */
     private static final class ResultSnap {
         final String action;
@@ -90,13 +91,22 @@ public class VideoProcessActivity extends AppCompatActivity {
         final float[] probs;
         final long tsMs;            // 结果产出时刻（墙钟）
         final long winEndPosMs;     // 模型窗口 = [winEndPosMs-2s, winEndPosMs]
+        final int cue;              // AudioCue.*，视频 / 拿不到分数时 UNKNOWN
+        final float[] cueFeat;      // AudioCue.features，拿不到时 null
 
         ResultSnap(String action, float conf, float[] probs, long tsMs, long winEndPosMs) {
+            this(action, conf, probs, tsMs, winEndPosMs, AudioCue.UNKNOWN, null);
+        }
+
+        ResultSnap(String action, float conf, float[] probs, long tsMs, long winEndPosMs,
+                   int cue, float[] cueFeat) {
             this.action = action;
             this.conf = conf;
             this.probs = probs;
             this.tsMs = tsMs;
             this.winEndPosMs = winEndPosMs;
+            this.cue = cue;
+            this.cueFeat = cueFeat;
         }
     }
 
@@ -641,17 +651,23 @@ public class VideoProcessActivity extends AppCompatActivity {
                                     }
                                 }
 
-                                // 判定 + 原始概率 + 产出时刻 + 读窗位置打包成一个快照原子发布
-                                // （评测 CSV 的 a_p_* / a_age / a_pos 取自它）
+                                // [音频线索] YAMNet 自带的 AudioSet 分数判"这一刻音频靠不靠得住"（对白 / 听不出 / 人声 …），
+                                // 只给融合仲裁的启动判断用，不改上面的分类判定（规则见 AudioCue、FusionArbiter）
+                                float[] cueFeat = AudioCue.features(result.audioSet);
+                                int cue = AudioCue.classify(cueFeat);
+
+                                // 判定 + 原始概率 + 产出时刻 + 读窗位置 + 线索打包成一个快照原子发布
+                                // （评测 CSV 的 a_p_* / a_age / a_pos / a_cue* 取自它）
                                 long resultTs = System.currentTimeMillis();
                                 boolean probsOk = result.index >= 0 && result.probs.length >= 3;
                                 latestAudioSnap.set(new ResultSnap(action, confidence,
-                                        probsOk ? result.probs.clone() : null, resultTs, currentMs));
+                                        probsOk ? result.probs.clone() : null, resultTs, currentMs, cue, cueFeat));
 
                                 // UI更新
-                                final String displayText = action.isEmpty()
+                                final String displayText = (action.isEmpty()
                                         ? "A: unclear"
-                                        : String.format("A: %s (p=%.2f)", action, confidence);
+                                        : String.format("A: %s (p=%.2f)", action, confidence))
+                                        + (cue == AudioCue.UNKNOWN ? "" : " · " + AudioCue.label(cue));
                                 mainHandler.post(() -> tvAudioAction.setText(displayText));
                                 Log.d(TAG, "[同步分析] [音频线程] " + displayText);
                                 // 更新上次音频推理时间
@@ -759,11 +775,12 @@ public class VideoProcessActivity extends AppCompatActivity {
                 // 的分组概率决策只输出 "do"/"Noise"/""），此处无需再做 oral->do 归一化。
 
                 // [融合仲裁] 启动 / 维持 / 停止 分开判断，证据按"新推理结果"计数（按快照的产出时刻去重；
-                // 与评测 CSV 的 v_age/a_age 同源，离线回放才能逐 tick 复现）
+                // 与评测 CSV 的 v_age/a_age 同源，离线回放才能逐 tick 复现）。音频线索与音频结果同一个快照
+                int audioCue = aSnap == null ? AudioCue.UNKNOWN : aSnap.cue;
                 String finalAction = fusionArbiter.decide(currentTime,
                         videoAction, videoConf, videoTime > 0 ? videoTime : -1,
                         audioAction, audioConf, audioTime > 0 ? audioTime : -1,
-                        isSexAction(currentBluetoothState));
+                        audioCue, isSexAction(currentBluetoothState));
                 // 临时采用音频节律作为最终节律
                 // 将“最终节律计算”封装为独立方法，便于后续替换为音视频融合节律
                 int finalFreq = computeFinalFreq(audioFreq, audioFreqConf);
@@ -797,7 +814,8 @@ public class VideoProcessActivity extends AppCompatActivity {
                             audioFreqConf, audioFreqValid, audioFreqAge,
                             finalAction, finalFreq,
                             currentBluetoothState, currentLevel,
-                            fusionArbiter.lastReason());
+                            fusionArbiter.lastReason(),
+                            audioCue, aSnap == null ? null : aSnap.cueFeat);
                 }
 
                 // 更新UI, 显示蓝牙实际发送的动作
@@ -1144,7 +1162,7 @@ public class VideoProcessActivity extends AppCompatActivity {
                 LEVEL_STABLE_MS, LEVEL_MIN_DUR_MS,
                 MAIN_FUSION_INTERVAL, VIDEO_INFERENCE_INTERVAL, AUDIO_INFERENCE_INTERVAL,
                 isWebVideoMode ? "web" : "fixed")
-                + FusionArbiter.paramsLine();
+                + FusionArbiter.paramsLine() + " " + AudioCue.paramsLine();
     }
 
 

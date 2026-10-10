@@ -529,11 +529,15 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                                 }
                             }
 
-                            latestAudioResult.set(new FusionArbiter.Result(action, confidence, System.currentTimeMillis()));
+                            // [音频线索] YAMNet 自带的 AudioSet 分数判"这一刻音频靠不靠得住"，只给融合仲裁的启动判断用
+                            // （规则见 AudioCue、FusionArbiter；与 VideoProcessActivity 相同）
+                            int cue = AudioCue.of(result.audioSet);
+                            latestAudioResult.set(new FusionArbiter.Result(action, confidence, System.currentTimeMillis(), cue));
 
-                            final String displayText = action.isEmpty()
+                            final String displayText = (action.isEmpty()
                                     ? "A: unclear"
-                                    : String.format("A: %s (%.2f)", action, confidence);
+                                    : String.format("A: %s (%.2f)", action, confidence))
+                                    + (cue == AudioCue.UNKNOWN ? "" : " · " + AudioCue.label(cue));
                             Log.d(TAG, "[同步分析] [音频线程] " + displayText);
 
                             lastAudioInferenceTime = currentSystemTime;
@@ -618,10 +622,12 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                 // 注：oral/sex 的归并已在各分析线程内完成（分组概率决策只输出 "do"/"Noise"/""），
                 // 此处无需再做 oral->do 归一化。
 
-                // [融合仲裁] 启动 / 维持 / 停止 分开判断，证据按"新推理结果"计数（结果时间戳去重）
+                // [融合仲裁] 启动 / 维持 / 停止 分开判断，证据按"新推理结果"计数（结果时间戳去重）；
+                // 音频线索与音频结果来自同一个 Result
                 String finalAction = fusionArbiter.decide(currentTime,
                         videoAction, videoConf, videoTime > 0 ? videoTime : -1,
                         audioAction, audioConf, audioTime > 0 ? audioTime : -1,
+                        aRes == null ? AudioCue.UNKNOWN : aRes.cue,
                         isSexAction(currentBluetoothState));
                 Log.d(TAG, String.format("[融合仲裁] %s -> %s", fusionArbiter.lastReason(), finalAction));
                 // 临时采用音频节律作为最终节律

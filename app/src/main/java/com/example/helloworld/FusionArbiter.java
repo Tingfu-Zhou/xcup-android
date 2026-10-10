@@ -23,6 +23,18 @@ import java.util.Locale;
  *       （夹一个"不转"或 unclear 就不算）。这条不看视频，因为特写 / 遮挡时视频判剧情，不能因此永远不启动；
  *       而剧情里的音频常是"转"里每隔几秒夹一个"不转"，零容忍正好把它挡住。</li>
  * </ol>
+ * <p><b>音频线索</b>（v2，2026-10-11，{@link AudioCue}）：每个音频结果带一个 YAMNet 判的线索，启动阶段多两条规则：</p>
+ * <ol start="3">
+ *   <li>视频单独启动：音频最近 {@link #A1_N} 个结果都"听不出"（音乐 / 安静 / 听不出），而且最近 {@link #C_WIN_MS} 内
+ *       视频强"转"≥ {@link #A1_CV} 个、"转"占比 ≥ {@link #A1_CONS_PCT}%（比两路佐证更严）。动作被背景音乐盖住时
+ *       分类头一直判"不转"，原来只能干等（v03 漏转的主要来源）。原因记 start_video。</li>
+ *   <li>对白否决：视频最近 {@link #BV_N} 个结果都是置信度 ≥ {@link #BV_CONF} 的"剧情"时，音频里线索为对白的"转"
+ *       在上面的启动判断里一律按 unclear 算。剧情对白常被分类头判成"转"，靠音频兜底误启动（v09 等）；
+ *       边说话边口交时视频拿不准，不会否决，所以不推迟启动。维持和停止不受线索影响。</li>
+ * </ol>
+ * <p>线索未知（{@link AudioCue#UNKNOWN}：没有分数）时这两条都不生效，行为与 v1 完全相同。离线评估见
+ * bench/README.md 第 6 节（13 部片：误转 16.0%→13.9%，漏转 2.4%→2.1%）。</p>
+ *
  * <p>都不满足时：最近 {@link #NEG_WIN_MS} 内有"不转"结果交 "Noise"，否则交 ""（不驱动状态机）。</p>
  *
  * <p><b>维持</b>（马达在转），任一模态"有支持"就交 "do"：</p>
@@ -89,6 +101,13 @@ public final class FusionArbiter {
     /** 启动·两路佐证还要满足的"更严一档"的维持条件（迟滞）：视频"转"占比、音频最近 MA_N 个里"转"的个数。 */
     static final int START_V_CONS_PCT = 80;
     static final int START_MA_K = 4;
+    /** 启动·视频单独启动（v2）：音频最近 A1_N 个结果都听不出，视频 C_WIN_MS 内强"转"≥ A1_CV 个、占比 ≥ A1_CONS_PCT%。 */
+    static final int A1_N = 4;
+    static final int A1_CV = 3;
+    static final int A1_CONS_PCT = 90;
+    /** 启动·对白否决（v2）：视频最近 BV_N 个结果都是置信度 ≥ BV_CONF 的"剧情"时，对白线索的音频"转"不算启动证据。 */
+    static final int BV_N = 4;
+    static final float BV_CONF = 0.90f;
     /** 静音暂停后恢复时，丢掉恢复后这么久内产出的结果（模型窗口里还混着暂停前的静音）。音频窗口 2 秒。 */
     public static final long SILENCE_RESUME_WARMUP_MS = 2000;
     /** 账本只需保留最长窗口（Z_WIN_MS / M_MAX_MS）以内的结果，这里留足余量。 */
@@ -97,6 +116,7 @@ public final class FusionArbiter {
     // ======================================================== 本 tick 输出的原因（评测 CSV 的 arb 列）
     public static final String R_START_BOTH = "start_both";
     public static final String R_START_AUDIO = "start_audio";
+    public static final String R_START_VIDEO = "start_video";
     public static final String R_OFF_NEG = "off_neg";
     public static final String R_OFF_WAIT = "off_wait";
     public static final String R_HOLD_BOTH = "hold_both";
@@ -123,11 +143,17 @@ public final class FusionArbiter {
         public final String action;   // "do" / "Noise" / ""（unclear）
         public final float conf;
         public final long tsMs;       // 产出时刻（墙钟）
+        public final int cue;         // 音频线索（AudioCue.*），视频结果为 UNKNOWN
 
         public Result(String action, float conf, long tsMs) {
+            this(action, conf, tsMs, AudioCue.UNKNOWN);
+        }
+
+        public Result(String action, float conf, long tsMs, int cue) {
             this.action = action == null ? "" : action;
             this.conf = conf;
             this.tsMs = tsMs;
+            this.cue = cue;
         }
     }
 
@@ -137,6 +163,8 @@ public final class FusionArbiter {
         private final long[] ts = new long[CAP];
         private final int[] cls = new int[CAP];
         private final float[] conf = new float[CAP];
+        private final boolean[] dialog = new boolean[CAP];   // 音频线索是对白
+        private final boolean[] uninf = new boolean[CAP];    // 音频线索是听不出（音乐 / 安静 / 听不出）
         private int head = 0;                    // 最旧一条的下标
         private int size = 0;
         private long lastTs = Long.MIN_VALUE;
@@ -154,7 +182,7 @@ public final class FusionArbiter {
          * 每个 tick 喂一次当前最新结果；resultTs <= 0 表示还没有结果。返回是否记了一条新结果。
          * 产出时刻晚于 now 的结果（只会在墙钟往回跳之后出现）不记、也不推进去重游标，免得挡住之后的新结果。
          */
-        boolean feed(String action, float c, long resultTs, long now) {
+        boolean feed(String action, float c, long resultTs, long now, int cue) {
             if (resultTs <= 0 || resultTs > now || resultTs <= lastTs) return false;
             lastTs = resultTs;
             if (resultTs < minTs || now - resultTs > MAX_AGE_MS) return false;
@@ -166,6 +194,8 @@ public final class FusionArbiter {
             ts[i] = resultTs;
             cls[i] = cls(action);
             conf[i] = c;
+            dialog[i] = cue == AudioCue.DIALOG;
+            uninf[i] = AudioCue.uninformative(cue);
             size++;
             long lim = now - KEEP_MS;
             while (size > 0 && ts[head] <= lim) {
@@ -182,12 +212,17 @@ public final class FusionArbiter {
 
         /** (now - win, now] 内类别为 c 且置信度 ≥ floor 的结果数。 */
         int count(long now, long win, int c, float floor) {
+            return count(now, win, c, floor, false);
+        }
+
+        /** 同上；vetoDialog 时线索为对白的"转"按 unclear 算（不计入 c = 1）。 */
+        int count(long now, long win, int c, float floor, boolean vetoDialog) {
             long lo = now - win;
             int n = 0;
             for (int k = 0; k < size; k++) {
                 int i = idx(k);
                 if (ts[i] <= lo) break;
-                if (cls[i] == c && conf[i] >= floor) n++;
+                if (cls[i] == c && conf[i] >= floor && !(vetoDialog && c == 1 && dialog[i])) n++;
             }
             return n;
         }
@@ -216,14 +251,41 @@ public final class FusionArbiter {
 
         /** 最近 n 个结果（须在 (now - maxWin, now] 内）里判"转"的个数。 */
         int lastNPos(long now, int n, long maxWin) {
+            return lastNPos(now, n, maxWin, false);
+        }
+
+        /** 同上；vetoDialog 时线索为对白的"转"不算。 */
+        int lastNPos(long now, int n, long maxWin, boolean vetoDialog) {
             long lo = now - maxWin;
             int pos = 0;
             for (int k = 0; k < size && k < n; k++) {
                 int i = idx(k);
                 if (ts[i] <= lo) break;
-                if (cls[i] == 1) pos++;
+                if (cls[i] == 1 && !(vetoDialog && dialog[i])) pos++;
             }
             return pos;
+        }
+
+        /** 最近 n 个结果都在 (now - maxWin, now] 内，而且线索全是听不出。不足 n 个时为 false。 */
+        boolean lastNUninformative(long now, int n, long maxWin) {
+            if (size < n) return false;
+            long lo = now - maxWin;
+            for (int k = 0; k < n; k++) {
+                int i = idx(k);
+                if (ts[i] <= lo || !uninf[i]) return false;
+            }
+            return true;
+        }
+
+        /** 最近 n 个结果都在 (now - maxWin, now] 内，而且全是置信度 ≥ floor 的"不转"。不足 n 个时为 false。 */
+        boolean lastNNegative(long now, int n, long maxWin, float floor) {
+            if (size < n) return false;
+            long lo = now - maxWin;
+            for (int k = 0; k < n; k++) {
+                int i = idx(k);
+                if (ts[i] <= lo || cls[i] != -1 || conf[i] < floor) return false;
+            }
+            return true;
         }
     }
 
@@ -266,6 +328,12 @@ public final class FusionArbiter {
         return reason.startsWith("start_") || reason.startsWith("hold_");
     }
 
+    /** 没有音频线索的版本（线索按 UNKNOWN，行为与 v1 相同）。 */
+    public String decide(long now, String vAction, float vConf, long vTs,
+                         String aAction, float aConf, long aTs, boolean motorOn) {
+        return decide(now, vAction, vConf, vTs, aAction, aConf, aTs, AudioCue.UNKNOWN, motorOn);
+    }
+
     /**
      * 每个融合 tick 调一次。
      *
@@ -273,28 +341,38 @@ public final class FusionArbiter {
      * @param vAction 视频动作串（"do"/"Noise"/""，已按新鲜度过滤）
      * @param vConf   视频置信度
      * @param vTs     该视频结果的产出时刻（结果时间戳），还没有结果传 -1
+     * @param aCue    该音频结果的线索（AudioCue.*），没有分数传 AudioCue.UNKNOWN
      * @param motorOn 蓝牙状态机当前是否在转（currentBluetoothState 是 do）
      * @return "do" / "Noise" / ""（"" = 本 tick 不驱动蓝牙状态机）
      */
     public String decide(long now, String vAction, float vConf, long vTs,
-                         String aAction, float aConf, long aTs, boolean motorOn) {
+                         String aAction, float aConf, long aTs, int aCue, boolean motorOn) {
         if (prevNowMs != Long.MIN_VALUE && now < prevNowMs) reset(now);   // 墙钟往回跳
         prevNowMs = now;
-        video.feed(vAction, vConf, vTs, now);
-        audio.feed(aAction, aConf, aTs, now);
+        video.feed(vAction, vConf, vTs, now, AudioCue.UNKNOWN);
+        audio.feed(aAction, aConf, aTs, now, aCue);
 
         if (!motorOn) {
             lastSupportMs = -1;
+            // 对白否决：视频确定是剧情时，对白线索的音频"转"不算启动证据
+            boolean veto = video.lastNNegative(now, BV_N, M_MAX_MS, BV_CONF);
             if (video.count(now, C_WIN_MS, 1, V_FLOOR) >= C_V
-                    && audio.count(now, C_WIN_MS, 1, A_FLOOR) >= C_A
+                    && audio.count(now, C_WIN_MS, 1, A_FLOOR, veto) >= C_A
                     && (videoSupport(now, START_V_CONS_PCT)
-                        || audio.lastNPos(now, MA_N, M_MAX_MS) >= START_MA_K)) {
+                        || audio.lastNPos(now, MA_N, M_MAX_MS, veto) >= START_MA_K)) {
                 reason = R_START_BOTH;
                 return "do";
             }
             int n = audio.total(now, Z_WIN_MS);
-            if (n >= Z_N && audio.count(now, Z_WIN_MS, 1, 0f) == n) {
+            if (n >= Z_N && audio.count(now, Z_WIN_MS, 1, 0f, veto) == n) {
                 reason = R_START_AUDIO;
+                return "do";
+            }
+            // 视频单独启动：音频连续听不出（被音乐盖住 / 安静），视频又很确定
+            if (audio.lastNUninformative(now, A1_N, M_MAX_MS)
+                    && video.count(now, C_WIN_MS, 1, V_FLOOR) >= A1_CV
+                    && videoSupport(now, A1_CONS_PCT)) {
+                reason = R_START_VIDEO;
                 return "do";
             }
             if (hasNeg(now)) {
@@ -347,13 +425,15 @@ public final class FusionArbiter {
     /** 写进评测 CSV 的参数行。fusion_lab.py 靠 ARB= 判断这份 run 用的是哪套仲裁、参数是什么。 */
     public static String paramsLine() {
         return String.format(Locale.US,
-                "ARB=v1 ARB_V_FLOOR=%.4f ARB_A_FLOOR=%.4f ARB_C_WIN=%d ARB_C_V=%d ARB_C_A=%d "
+                "ARB=v2 ARB_V_FLOOR=%.4f ARB_A_FLOOR=%.4f ARB_C_WIN=%d ARB_C_V=%d ARB_C_A=%d "
                         + "ARB_Z_WIN=%d ARB_Z_N=%d ARB_MA_N=%d ARB_MA_K=%d "
                         + "ARB_MV_N=%d ARB_MV_K=%d ARB_M_MAX=%d ARB_CONS_WIN=%d ARB_V_CONS=%d "
                         + "ARB_NEG_WIN=%d ARB_UNCLEAR_MAX=%d ARB_MAX_AGE=%d ARB_KEEP=%d "
-                        + "ARB_COLD=%d ARB_START_V_CONS=%d ARB_START_MA_K=%d",
+                        + "ARB_COLD=%d ARB_START_V_CONS=%d ARB_START_MA_K=%d "
+                        + "ARB_A1_N=%d ARB_A1_CV=%d ARB_A1_CONS=%d ARB_BV_N=%d ARB_BV_CONF=%.4f",
                 V_FLOOR, A_FLOOR, C_WIN_MS, C_V, C_A, Z_WIN_MS, Z_N, MA_N, MA_K,
                 MV_N, MV_K, M_MAX_MS, CONS_WIN_MS, V_CONS_PCT, NEG_WIN_MS, UNCLEAR_MAX_MS,
-                MAX_AGE_MS, KEEP_MS, COLD_MS, START_V_CONS_PCT, START_MA_K);
+                MAX_AGE_MS, KEEP_MS, COLD_MS, START_V_CONS_PCT, START_MA_K,
+                A1_N, A1_CV, A1_CONS_PCT, BV_N, BV_CONF);
     }
 }

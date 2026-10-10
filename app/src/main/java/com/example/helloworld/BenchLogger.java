@@ -132,7 +132,9 @@ public final class BenchLogger {
      *
      * @param aPosMs     该音频结果读 PCM 时的播放位置（模型窗口 = [aPosMs-2s, aPosMs]），没有结果时 -1。
      *                   bench/tools/audio_rescore.py 靠它离线还原模型输入，不用再从出结果时刻反推
-     * @param arbReason  FusionArbiter 本 tick 的输出原因（start_both / hold_audio / stop_neg …）
+     * @param arbReason  FusionArbiter 本 tick 的输出原因（start_both / start_video / hold_audio / stop_neg …）
+     * @param aCue       该音频结果的线索（{@link AudioCue}），与 aProbs 来自同一个快照；没有结果时 AudioCue.UNKNOWN
+     * @param aCueFeat   该音频结果的 YAMNet 分组分数（{@link AudioCue#features}），拿不到时 null
      */
     public void tick(long posMs, long wallMs,
                      String vAction, float vConf, long vAgeMs, float[] vProbs,
@@ -140,12 +142,13 @@ public final class BenchLogger {
                      long aPosMs,
                      int loudLevel, float loudConf, boolean loudValid, long loudAgeMs,
                      String gated, int finalFreq,
-                     String bleState, int bleLevel, String arbReason) {
+                     String bleState, int bleLevel, String arbReason,
+                     int aCue, float[] aCueFeat) {
         if (!enabled || failed) return;
         if (out == null && !open()) return;
 
         float[] vp = vProbs, ap = aProbs;
-        StringBuilder sb = new StringBuilder(260);
+        StringBuilder sb = new StringBuilder(360);
         sb.append(posMs).append(',').append(wallMs).append(',');
         sb.append(csv(vAction)).append(',').append(f6(vConf)).append(',').append(age(vAgeMs)).append(',');
         sb.append(p(vp, 0)).append(',').append(p(vp, 1)).append(',').append(p(vp, 2)).append(',');
@@ -164,6 +167,12 @@ public final class BenchLogger {
             if (arbResetSeek) sb.append(":seek");
         } else {
             sb.append(',');
+        }
+        // 线索和分组分数：分数写全精度（Float.toString），回放按阈值重判时不会因为少几位翻转
+        sb.append(',').append(csv(AudioCue.name(aCue)));
+        for (int i = 0; i < AudioCue.N_FEATURES; i++) {
+            sb.append(',');
+            if (aCueFeat != null && i < aCueFeat.length) sb.append(f6(aCueFeat[i]));
         }
 
         if (queue.offer(sb.toString())) {
@@ -254,7 +263,11 @@ public final class BenchLogger {
                     + "ble_state,ble_level,sent,sent_action,sent_level,"
                     // a_pos：音频窗口结尾的播放位置；arb：FusionArbiter 的输出原因；
                     // arb_reset：这一行之前 FusionArbiter reset 的记号 <ms>[+<预热ms>][:seek]（没有为空）
-                    + "a_pos,arb,arb_reset\n");
+                    + "a_pos,arb,arb_reset,"
+                    // a_cue：音频结果的线索（AudioCue.name，没有为空）；a_cue_*：YAMNet AudioSet 分数按含义分组求和
+                    // （顺序同 AudioCue.FEATURE_COLS；metrics.py 自检会逐字比对这里的列名）
+                    + "a_cue,a_cue_voc_core,a_cue_voc_ext,a_cue_speech,a_cue_speech_ext,"
+                    + "a_cue_music,a_cue_silence,a_cue_impact\n");
             out.flush();
             writerThread = new Thread(this::drain, "BenchLoggerWriter");
             writerThread.setDaemon(true);

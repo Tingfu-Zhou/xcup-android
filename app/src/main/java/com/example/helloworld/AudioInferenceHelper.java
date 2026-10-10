@@ -11,6 +11,8 @@ import java.io.IOException;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Map;
 
 
 public class AudioInferenceHelper {
@@ -23,6 +25,12 @@ public class AudioInferenceHelper {
     private static final int SAMPLE_RATE = 16000;
     private static final int INPUT_LENGTH = 32000; // 2秒音频数据
     private static final int EMBEDDING_SIZE = 1024;
+    private static final int FRAMES = 4;           // 2 秒输入 YAMNet 出 4 帧（0.96s 窗、0.48s 步长，末尾补零）
+
+    // YAMNet 的输出按形状认（[帧, 521] 是 AudioSet 分数，[帧, 1024] 是 embedding），不写死下标；
+    // 与 bench/tools/audio_rescore.py 的 AudioModel 相同。找不到分数输出时 scoresOutput = -1，线索为 UNKNOWN。
+    private int embeddingOutput = 1;
+    private int scoresOutput = -1;
 
     private NnApiDelegate nnApiDelegate;
 
@@ -37,6 +45,13 @@ public class AudioInferenceHelper {
             // 加载两个 TFLite 模型（建议放到 assets 文件夹中）
             yamnetInterpreter = new Interpreter(loadModelFile(context, "yamnet.tflite"), options);
             classifierInterpreter = new Interpreter(loadModelFile(context, "yamnet_finetuned.tflite"), options);
+            for (int i = 0; i < yamnetInterpreter.getOutputTensorCount(); i++) {
+                int[] shape = yamnetInterpreter.getOutputTensor(i).shape();
+                int last = shape.length > 0 ? shape[shape.length - 1] : -1;
+                if (last == EMBEDDING_SIZE) embeddingOutput = i;
+                else if (last == AudioCue.N_CLASSES) scoresOutput = i;
+            }
+            Log.d(TAG, "YAMNet 输出：embedding=" + embeddingOutput + "，AudioSet 分数=" + scoresOutput);
 
             Log.d(TAG, "音频模型初始化成功");
 
@@ -59,10 +74,13 @@ public class AudioInferenceHelper {
         public final float confidence;
         // 三分类完整概率 [sex, oral, noise]，供分组概率决策使用；无效结果时为空数组
         public final float[] probs;
-        public AudioInferenceResult(int index, float confidence, float[] probs) {
+        // YAMNet 的 AudioSet 521 类分数（各帧平均），给 AudioCue 判线索；拿不到时为空数组
+        public final float[] audioSet;
+        public AudioInferenceResult(int index, float confidence, float[] probs, float[] audioSet) {
             this.index = index;
             this.confidence = confidence;
             this.probs = probs != null ? probs : new float[0];
+            this.audioSet = audioSet != null ? audioSet : new float[0];
         }
     }
 
@@ -75,17 +93,20 @@ public class AudioInferenceHelper {
     public AudioInferenceResult predict(float[] audioBuffer) {
         if (audioBuffer.length != INPUT_LENGTH) {
             Log.e(TAG, "音频输入长度不正确，期望: " + INPUT_LENGTH + "，实际: " + audioBuffer.length);
-            return new AudioInferenceResult(-1, 0f, null);
+            return new AudioInferenceResult(-1, 0f, null, null);
         }
         Log.d(TAG, "AudioInferenceHelper: 开始推理 ");
 
-        // 1. 输入 YAMNet 模型
+        // 1. 输入 YAMNet 模型（AudioSet 分数和 embedding 是同一次推理的两个输出，多取一个几乎不花时间）
         Object[] inputArray = { audioBuffer };
 
         // ⚠️ YAMNet 输出 shape 为 [num_frames, 1024]，不是 [1, 96, 1024]
-        float[][] yamnetEmbeddingOutput = new float[4][EMBEDDING_SIZE]; // 实际推理出来是 [4, 1024]
-        yamnetInterpreter.runForMultipleInputsOutputs(inputArray,
-                java.util.Collections.singletonMap(1, yamnetEmbeddingOutput));
+        float[][] yamnetEmbeddingOutput = new float[FRAMES][EMBEDDING_SIZE]; // 实际推理出来是 [4, 1024]
+        float[][] yamnetScoresOutput = scoresOutput >= 0 ? new float[FRAMES][AudioCue.N_CLASSES] : null;
+        Map<Integer, Object> outputs = new HashMap<>();
+        outputs.put(embeddingOutput, yamnetEmbeddingOutput);
+        if (yamnetScoresOutput != null) outputs.put(scoresOutput, yamnetScoresOutput);
+        yamnetInterpreter.runForMultipleInputsOutputs(inputArray, outputs);
 
         // 2. 对 embedding 做平均
         int frameCount = yamnetEmbeddingOutput.length;
@@ -97,6 +118,20 @@ public class AudioInferenceHelper {
         }
         for (int j = 0; j < EMBEDDING_SIZE; j++) {
             meanEmbedding[j] /= frameCount;
+        }
+
+        // 2b. AudioSet 分数同样各帧平均（逐帧累加再除帧数，与 audio_rescore.py 的离线重算逐位一致）
+        float[] meanScores = null;
+        if (yamnetScoresOutput != null) {
+            meanScores = new float[AudioCue.N_CLASSES];
+            for (int i = 0; i < frameCount; i++) {
+                for (int j = 0; j < AudioCue.N_CLASSES; j++) {
+                    meanScores[j] += yamnetScoresOutput[i][j];
+                }
+            }
+            for (int j = 0; j < AudioCue.N_CLASSES; j++) {
+                meanScores[j] /= frameCount;
+            }
         }
 
         // 3. 输入分类器模型
@@ -118,7 +153,7 @@ public class AudioInferenceHelper {
                 bestIndex = i;
             }
         }
-        return new AudioInferenceResult(bestIndex, maxScore, scores.clone());
+        return new AudioInferenceResult(bestIndex, maxScore, scores.clone(), meanScores);
 
     }
 

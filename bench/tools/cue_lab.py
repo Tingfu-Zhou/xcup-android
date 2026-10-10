@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-bench/tools/cue_lab.py — 用 YAMNet 自带的 AudioSet 521 类分数（tflite 第 0 个输出，app 目前没读）判断
-"音频这一刻靠不靠得住"，离线评估它对融合仲裁的改进。只做离线实验，app 不变。
+bench/tools/cue_lab.py — 用 YAMNet 自带的 AudioSet 521 类分数（tflite 第 0 个输出）判断"音频这一刻靠不靠得住"，
+离线评估它对融合仲裁的改进。这里是实验台（各种开关组合）；选定的 a1bvid 2026-10-11 做进了 app（AudioCue.java +
+FusionArbiter v2，Python 移植在 fusion_lab.py），--selftest 核对两边逐 tick 一致。
 
 数据：真机 run（默认 bench/runs_initial）+ 同名的 <run>.yamnet.npz（默认 bench/rescored/audio_old，audio_rescore.py
 rescore 写的，每个音频结果的 521 类分数，按结果时间戳 wall-a_age 对齐）。
@@ -210,16 +211,8 @@ def cue_of(f, c):
 
 
 def group_features(scores):
-    """[N, 521] → [N, len(GROUPS)] float32，按 GROUPS 里的下标顺序累加。"""
-    import numpy as np
-    s = np.asarray(scores, np.float32)
-    out = np.zeros((s.shape[0], len(GROUPS)), np.float32)
-    for j, (_, idx) in enumerate(GROUPS):
-        acc = np.zeros(s.shape[0], np.float32)
-        for i in idx:
-            acc += s[:, i]
-        out[:, j] = acc
-    return out
+    """[N, 521] → [N, len(GROUPS)] float32，按 GROUPS 里的下标顺序累加（GROUPS 与 fusion_lab.CUE_GROUPS 相同）。"""
+    return F.cue_features_np(scores)
 
 
 # ======================================================================== 带线索的融合仲裁
@@ -475,36 +468,8 @@ def factory(cfg):
 # ======================================================================== 数据
 def attach_features(videos, npz_dir, say=print):
     """把 <npz_dir>/<run 文件名>.yamnet.npz 的分数按结果时间戳接到每个 tick（Tick.ays）。返回 {vid: (接上, 总数)}。
-    npz_dir 可以是逗号分隔的几个目录，按顺序找。"""
-    import numpy as np
-    cov = {}
-    dirs = [x for x in npz_dir.split(',') if x]
-    for v in videos:
-        stem = os.path.splitext(os.path.basename(v.run_path))[0]
-        cands = [os.path.join(x, stem + '.yamnet.npz') for x in dirs]
-        path = next((c for c in cands if os.path.exists(c)), cands[0])
-        if not os.path.exists(path):
-            say('  ⚠ %s：没有 %s，这部片的线索全是"未知"（规则不生效）' % (v.vid, os.path.relpath(path, ROOT)))
-            cov[v.vid] = (0, 0)
-            continue
-        z = np.load(path)
-        feats = group_features(z['scores'])
-        rows = [tuple(float(x) for x in r) for r in feats]
-        idx = dict((int(ts), i) for i, ts in enumerate(z['ts']))
-        seen, hit = set(), 0
-        for t in v.ticks:
-            t.ays = None
-            if t.a_age is None or t.a_age < 0:
-                continue
-            ts = t.wall - t.a_age
-            i = idx.get(ts)
-            if i is not None:
-                t.ays = rows[i]
-            if ts not in seen:
-                seen.add(ts)
-                hit += i is not None
-        cov[v.vid] = (hit, len(seen))
-    return cov
+    npz_dir 可以是逗号分隔的几个目录，按顺序找。实现在 fusion_lab.attach_cue_features（golden 也用它）。"""
+    return F.attach_cue_features(videos, npz_dir, say)
 
 
 def load(gt_dir=DEF_GT, runs_dir=DEF_RUNS, npz_dir=DEF_NPZ, seeks=True, quiet=False, only=None):
@@ -1347,15 +1312,45 @@ def selftest():
                     if (x, ref.reason) != (y, arb.reason):
                         bad.append((v.vid, i, x, ref.reason, y, arb.reason))
     check(not bad, '开关全关、或线索未知（开关全开）时与 v1 逐 tick 一致（%d tick）%s' % (n, '' if not bad else '：%r' % bad[:3]))
-    # 3. 对拍数据（Java 侧的期望）原样通过
+    # 2b. app 的移植（fusion_lab.FusionArbiter v2 + audio_cue）与这里的 a1bvid 逐 tick 一致：13 部片 + 拼接 + seek
+    d13 = load(DEF_GT, DEF_RUNS + ',' + os.path.join(ROOT, 'bench', 'runs_test'),
+               DEF_NPZ + ',' + os.path.join(ROOT, 'bench', 'rescored', 'test_audio_old'), quiet=True)
+    cfg13 = make_cfg(**PRESETS['a1bvid'])
+    n2, bad2, cue_bad, cues = 0, [], 0, 0
+    for v in d13.videos:
+        params = dict(v.params, ARB='v2')
+        preps = [d13.prep[v.vid]] + d13.sprep[v.vid] + [pp for _, _, pp, _, _ in d13.seeks[v.vid]]
+        for pp in preps:
+            ref = F.FusionArbiter(params)
+            arb = CueArbiter(params, cfg13)
+            for i in range(len(pp.pos)):
+                if pp.reset[i]:
+                    ms, warm, _ = pp.reset[i]
+                    ref.reset(ms, warm)
+                    arb.reset(ms, warm)
+                motor = (i * 7919 + len(pp.pos)) % 3 != 0
+                c1 = cue_of(pp.aext[i], cfg13)
+                c2 = F.audio_cue(pp.aext[i])
+                cues += 1
+                cue_bad += F.CUE_NAMES[c2] != (c1 or '')
+                x = ref.decide(pp.wall[i], pp.v[i], pp.vc[i], pp.vts[i], pp.a[i], pp.ac[i], pp.ats[i], motor, c2)
+                y = arb.decide(pp.wall[i], pp.v[i], pp.vc[i], pp.vts[i], pp.a[i], pp.ac[i], pp.ats[i], motor, c1)
+                n2 += 1
+                if (x, ref.reason) != (y, arb.reason):
+                    bad2.append((v.vid, i, x, ref.reason, y, arb.reason))
+    check(cue_bad == 0, 'fusion_lab.audio_cue 与 cue_of(a1bvid) 一致（%d 个 tick，%d 处不同）' % (cues, cue_bad))
+    check(not bad2 and len(d13.videos) == 13,
+          'fusion_lab.FusionArbiter v2（app 的移植）与 a1bvid 逐 tick 一致（%d 部片，%d tick）%s'
+          % (len(d13.videos), n2, '' if not bad2 else '：%r' % bad2[:3]))
+    # 3. 对拍数据（Java 侧的期望，带线索）用这里的 a1bvid 重放也逐行一致
     rows = 0
     mism = []
     with io.open(F.GOLDEN_PATH, encoding='utf-8') as fh:
-        fh.readline()
-        arb = CueArbiter(None, full)
+        check(fh.readline().strip() == F.GOLDEN_HEADER, 'FusionArbiterTest 对拍数据的表头是 v2 格式（带 a_cue）')
+        arb = CueArbiter(None, cfg13)
         for line in fh:
             f = line.rstrip('\n').split(',')
-            if not f or len(f) < 11:
+            if not f or len(f) < 12:
                 continue
             if f[0]:
                 if '+' in f[0]:
@@ -1364,11 +1359,12 @@ def selftest():
                 else:
                     arb.reset(int(f[0]))
             got = arb.decide(int(f[1]), f[2], F.f32(float(f[3])), int(f[4]), f[5], F.f32(float(f[6])), int(f[7]),
-                             f[8] == '1', None)
+                             f[9] == '1', f[8] or None)
             rows += 1
-            if (got, arb.reason) != (f[9], f[10]):
+            if (got, arb.reason) != (f[10], f[11]):
                 mism.append(rows)
-    check(rows >= 5000 and not mism, 'FusionArbiterTest 的对拍数据（%d 行）在线索未知时逐行一致%s' % (rows, '' if not mism else '：第 %r 行' % mism[:5]))
+    check(rows >= 10000 and not mism, 'FusionArbiterTest 的对拍数据（%d 行，带线索）用 a1bvid 重放逐行一致%s'
+          % (rows, '' if not mism else '：第 %r 行' % mism[:5]))
     # 4. 线索接上的比例
     for vid, (hit, tot) in sorted(d.coverage.items()):
         check(tot > 0 and hit >= 0.99 * tot, '%s 的音频结果接上 YAMNet 分数 %d/%d' % (vid, hit, tot))
