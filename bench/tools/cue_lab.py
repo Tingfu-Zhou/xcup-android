@@ -876,9 +876,11 @@ def cmd_eval(a):
     d = load(a.gt_dir, a.runs_dir, a.npz, only=a.only)
     c = parse_cfg(a.cfg, a.preset)
     cost = F.Cost.parse(a.cost)
-    base = A.evaluate(d, A.factory('arbiter'), cost)
+    # 基线一律是 v1（开关全关，与 v1 逐 tick 一致）。不用 A.factory('arbiter')：它按 run 的 ARB= 回放，
+    # 2026-10-11 起的 run 是 v2，那样"基线"就成了 a1bvid 本身
+    base = A.evaluate(d, factory(make_cfg()), cost)
     new = A.evaluate(d, factory(c), cost)
-    A.print_report(base, '基线：融合仲裁 v1（app 当前参数）')
+    A.print_report(base, '基线：融合仲裁 v1（不用线索）')
     A.print_report(new, '新：%s' % cfg_str(c))
     pv0 = per_video(d, make_cfg(), cost)
     pv1 = per_video(d, c, cost)
@@ -893,7 +895,7 @@ def cmd_eval(a):
         for k, which, label in ((2, 'v', '视频结果间隔 ×2'), (3, 'v', '视频结果间隔 ×3'),
                                 (2, 'a', '音频结果间隔 ×2'), (3, 'a', '音频结果间隔 ×3')):
             sd = A.slow_data(d, k, which)
-            for name, mk in (('v1', A.factory('arbiter')), ('新', factory(c))):
+            for name, mk in (('v1', factory(make_cfg())), ('新', factory(c))):
                 s = A.summary(A.evaluate(sd, mk, cost, seeks=False))
                 print('  慢手机 %-14s %-3s 准确率 %s 误转 %s 漏转 %s 误停 %d' % (
                     label, name, A._pct(s['acc']), A._pct(s['fp']), A._pct(s['fn']), s['stops']))
