@@ -1,0 +1,24 @@
+# xcup-gt spec_version=1
+# video_id=视频9
+# file_name=视频9.mp4
+# file_size=208702325
+# duration_ms=1097940
+# frame_rate=30
+# annotator=
+# split=dev
+# created_at=2026-10-10
+# segments=13 do_noise_transitions=1
+start_ms,end_ms,label,note
+0,89708,plot,
+89708,102701,other_adult,
+102701,169497,plot,
+169497,673970,other_adult,
+673970,730504,oral,
+730504,743445,other_adult,
+743445,767979,oral,
+767979,817002,other_adult,
+817002,905794,sex,
+905794,929025,other_adult,
+929025,1055900,sex,
+1055900,1076023,other_adult,
+1076023,1097940,sex,

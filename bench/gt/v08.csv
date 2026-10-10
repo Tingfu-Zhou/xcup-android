@@ -1,0 +1,30 @@
+# xcup-gt spec_version=1
+# video_id=视频8
+# file_name=视频8.mp4
+# file_size=221924133
+# duration_ms=1183381
+# frame_rate=30
+# annotator=
+# split=dev
+# created_at=2026-10-10
+# segments=19 do_noise_transitions=2
+start_ms,end_ms,label,note
+0,77593,plot,
+77593,99549,other_adult,
+99549,216866,plot,
+216866,252553,other_adult,
+252553,344556,plot,
+344556,616541,other_adult,
+616541,640248,plot,
+640248,740960,other_adult,
+740960,765266,oral,
+765266,795016,other_adult,
+795016,832910,oral,
+832910,876449,other_adult,
+876449,921747,oral,
+921747,949723,other_adult,
+949723,968661,oral,
+968661,1021696,other_adult,
+1021696,1049850,oral,
+1049850,1116104,other_adult,
+1116104,1183381,plot,

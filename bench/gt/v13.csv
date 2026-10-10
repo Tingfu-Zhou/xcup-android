@@ -1,0 +1,18 @@
+# xcup-gt spec_version=1
+# video_id=视频13
+# file_name=视频13.mp4
+# file_size=218915832
+# duration_ms=1049461
+# frame_rate=30
+# annotator=
+# split=dev
+# created_at=2026-10-10
+# segments=7 do_noise_transitions=1
+start_ms,end_ms,label,note
+0,32110,plot,
+32110,84726,other_adult,
+84726,228220,oral,
+228220,262920,other_adult,
+262920,294197,oral,
+294197,521057,other_adult,
+521057,1049461,sex,

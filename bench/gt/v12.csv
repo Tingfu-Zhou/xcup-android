@@ -1,0 +1,22 @@
+# xcup-gt spec_version=1
+# video_id=视频12
+# file_name=视频12.mp4
+# file_size=177147016
+# duration_ms=856034
+# frame_rate=30
+# annotator=
+# split=dev
+# created_at=2026-10-10
+# segments=11 do_noise_transitions=2
+start_ms,end_ms,label,note
+0,218097,plot,
+218097,428089,other_adult,
+428089,445098,plot,
+445098,530372,other_adult,
+530372,538794,plot,
+538794,552582,other_adult,
+552582,806873,sex,
+806873,840749,other_adult,
+840749,848476,plot,
+848476,851546,exclude,
+851546,856034,plot,

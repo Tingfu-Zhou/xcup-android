@@ -1,0 +1,18 @@
+# xcup-gt spec_version=1
+# video_id=视频11
+# file_name=视频11.mp4
+# file_size=221030316
+# duration_ms=1179238
+# frame_rate=30
+# annotator=
+# split=dev
+# created_at=2026-10-10
+# segments=7 do_noise_transitions=1
+start_ms,end_ms,label,note
+0,3877,exclude,
+3877,64890,plot,
+64890,170375,other_adult,
+170375,288734,oral,
+288734,450647,other_adult,
+450647,511856,oral,
+511856,1179238,other_adult,
