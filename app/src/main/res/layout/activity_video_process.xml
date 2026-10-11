@@ -32,8 +32,9 @@
             app:use_controller="true" />
     </FrameLayout>
 
-    <!-- 控制状态展示文字（不变） -->
+    <!-- 调试悬浮窗：视频分析 / 音频分析 / 蓝牙输出结果。只在 debug 包显示，release 包由 VideoProcessActivity 隐藏 -->
     <LinearLayout
+        android:id="@+id/debugPanel"
         android:orientation="vertical"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"

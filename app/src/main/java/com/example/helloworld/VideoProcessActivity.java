@@ -26,6 +26,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
+import android.content.pm.ApplicationInfo;
 import android.view.TextureView;
 import android.view.View;
 import android.widget.ImageButton;
@@ -243,10 +244,10 @@ public class VideoProcessActivity extends AppCompatActivity {
         btnBack = findViewById(R.id.btnBack);
         btnBack.setOnClickListener(v -> finish());
 
-        // 正式版隐藏悬浮窗调试UI
-        // tvOverlay.setVisibility(View.GONE);
-        // tvVideoAction.setVisibility(View.GONE);
-        // tvAudioAction.setVisibility(View.GONE);
+        // 调试悬浮窗只在 debug 包（Android Studio 直接 Run 装的包）显示，release 包隐藏。
+        // 与 BenchLogger 一样看 FLAG_DEBUGGABLE，不依赖 BuildConfig。
+        boolean debuggable = (getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0;
+        findViewById(R.id.debugPanel).setVisibility(debuggable ? View.VISIBLE : View.GONE);
 
         videoClassifier = new VideoClassifierHelper(this);
         Log.d(TAG, "onCreate: VideoClassifierHelper (MobileNetV3Small) 初始化完成");
