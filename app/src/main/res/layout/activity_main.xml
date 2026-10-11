@@ -347,7 +347,9 @@
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
-            <!-- Resume control button -->
+            <!-- Resume control button：实际很少用到，先隐藏。MainActivity 里的逻辑保留，
+                 要恢复显示删掉 android:visibility="gone" 即可。
+                 设备被本地按键锁定时，仍可在手动电子菜单页点“恢复控制”。 -->
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/btnResumeControl"
                 style="@style/Widget.Material3.Button.TonalButton"
@@ -356,6 +358,7 @@
                 android:layout_marginTop="28dp"
                 android:alpha="0.5"
                 android:enabled="false"
+                android:visibility="gone"
                 android:text="@string/resume_control_inactive"
                 app:icon="@drawable/ic_pause_circle"
                 app:iconGravity="textStart" />
