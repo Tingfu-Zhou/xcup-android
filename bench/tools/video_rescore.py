@@ -94,9 +94,13 @@ FRAMES = ('keyframe', 'exact')
 PREPS = ('legacy', 'crop', 'squash', 'train')
 MATRICES = ('auto', 'bt601', 'bt709')
 
-# 旧 run 没记每帧的时刻：最后一帧在出结果前 Δ 毫秒请求（主线程抽帧约 45ms + 推理约 110ms + 排队），往前每 250ms 一帧
-DELTA_SCAN = (0, 600, 25)
-DEFAULT_DELTA = 200
+# 旧 run 没记每帧的时刻：最后一帧的取帧目标比出结果时的播放位置早 Δ 毫秒，往前每 250ms 一帧。
+# 旧版抽帧除了只取关键帧，还会晚好几次请求：每次先 seek、只喂一帧就取最早的一个输出，解码器流水线里积压的是前几次请求的帧。
+# runs_test 上从“冻住→变化”的时间点推出 Δ ≈ 0.5~1.3 秒（v10 525ms、v08 875ms、v11 约 900ms、v09 约 1.3 秒），所以扫到 3 秒
+DELTA_SCAN = (0, 3000, 25)
+# 修复后的 app：抽帧线程取“此刻的那一帧”，再加推理，出结果比最后一帧晚约 150~250ms。旧 run 按 exact 管线重算（rescore）时用它，
+# 不用 check 扫出来的旧 Δ（那里面是旧解码器的积压，新 app 没有）
+NEW_APP_DELTA = 200
 # 新 run 的 v_fpts 是手机 MediaExtractor 的 pts；PyAV 的 pts 可能差一个常数（编辑列表、起始时间），按帧扫
 OFFSET_FRAMES = (-2, -1, 0, 1, 2)
 SCAN_N = 300             # 扫描时间差只用这么多个结果（均匀抽）
@@ -608,7 +612,7 @@ def check_one(job):
             label = lambda c: 'Δ=%dms' % c                                         # noqa: E731
             tgt = lambda r, c: target_times_us(r, c)                               # noqa: E731
         if frames == 'exact' and not new_run:
-            cands = [DEFAULT_DELTA]       # 旧 run 不是这条管线录的，扫不出有意义的 Δ：只按默认 Δ 算一个对照
+            cands = [NEW_APP_DELTA]       # 旧 run 不是这条管线录的，扫不出有意义的 Δ：按修复后 app 的时序算一个对照
         need = set()
         for c in cands:
             for r in sub:
@@ -631,7 +635,8 @@ def check_one(job):
         st = parity(pred, [r.probs for r in results], params)
         fz = np.array(frozen)
         st_f = parity([p for p, z in zip(pred, fz) if z], [r.probs for r, z in zip(results, fz) if z], params)
-        rows.append(dict(pipe=pipe, best=label(best), cand=best, st=st, frozen=st_f, n_frozen=int(fz.sum())))
+        edge = len(cands) > 1 and best == cands[-1]
+        rows.append(dict(pipe=pipe, best=label(best), cand=best, st=st, frozen=st_f, n_frozen=int(fz.sum()), edge=edge))
         if pipe == (run_pipe or pipe) and (frames == 'keyframe' or new_run):
             align = dict(run=os.path.relpath(run_path, ROOT).replace('\\', '/'), pipe=pipe, matrix=matrix,
                          delta_ms=None if new_run else best, offset_us=best if new_run else 0,
@@ -643,11 +648,13 @@ def check_one(job):
         out.append('    %-16s %-9s MAE %.4f  判定一致 %5.1f%%  差≤0.05 %5.1f%%   %s%s' % (
             row['pipe'], row['best'], st['mae'], 100 * st['agree'], 100 * st['close'], grade,
             ('   12 帧同一张图的窗口 %d 个：MAE %.4f' % (row['n_frozen'], fz['mae'])) if row['n_frozen'] else ''))
+        if row['edge']:
+            out.append('    ⚠ %s 的最佳时间差落在扫描范围的边上，真实值可能更大，结果不可信' % row['pipe'])
     return dict(vid=vid, lines=out, rows=rows, align=align)
 
 
 def rescore_one(job):
-    vid, gt_path, run_path, video_path, pipe, matrix, model_path, out_path, align = job
+    vid, gt_path, run_path, video_path, pipe, matrix, model_path, out_path, align, delta_arg = job
     lines = []
 
     def log(msg):
@@ -660,11 +667,13 @@ def rescore_one(job):
     model = _make_model(model_path)
     cache = FrameCache(src, model, matrix, log)
     new_run = bool(results) and results[0].fpts is not None
-    delta = DEFAULT_DELTA
-    offset = 0
-    if align:
-        delta = align.get('delta_ms') if align.get('delta_ms') is not None else DEFAULT_DELTA
-        offset = align.get('offset_us') or 0
+    offset = (align or {}).get('offset_us') or 0
+    if delta_arg is not None:
+        delta = delta_arg
+    elif frames == 'keyframe' and align and align.get('delta_ms') is not None:
+        delta = align['delta_ms']              # 复现旧 app：用 check 扫出来的旧 Δ（含旧解码器的积压）
+    else:
+        delta = NEW_APP_DELTA                  # 模拟修复后的 app（或旧 Δ 没扫过）
     picks = {}
     for r in results:
         targets = target_times_us(r, delta, offset if new_run else 0)
@@ -821,12 +830,13 @@ def cmd_rescore(a):
     tag = a.tag or 'video_%s_%s' % (a.pipe, os.path.basename(os.path.normpath(a.runs)))
     out_dir = os.path.join(a.out, tag)
     align = load_alignment(a.align)
+    frames, _ = parse_pipe(a.pipe)
     jobs = []
     for vid, g, r, v in pairs:
         al = align.get(_align_key(r))
-        if al is None:
-            print('  %s: video_alignment.json 里没有这份 run 的 Δ，按默认 %dms（先跑 check 更准）' % (vid, DEFAULT_DELTA))
-        jobs.append((vid, g, r, v, a.pipe, a.matrix, a.model, os.path.join(out_dir, os.path.basename(r)), al))
+        if frames == 'keyframe' and a.delta is None and (al is None or al.get('delta_ms') is None):
+            print('  %s: video_alignment.json 里没有这份 run 的 Δ，按 %dms 算（复现旧 app 前先跑 check）' % (vid, NEW_APP_DELTA))
+        jobs.append((vid, g, r, v, a.pipe, a.matrix, a.model, os.path.join(out_dir, os.path.basename(r)), al, a.delta))
     print('视频重算 rescore：管线 %s，矩阵 %s → %s' % (a.pipe, a.matrix, os.path.relpath(out_dir)))
     for res in _jobs_map(rescore_one, jobs, a.jobs):
         print('\n'.join(res['lines']))
@@ -1051,9 +1061,14 @@ def selftest():
         check(row['pipe'] == 'exact_crop' and row['st']['mae'] < 1e-3 and row['cand'] == 0,
               '新格式 run：按参数行 VIDEO_PIPE=exact_crop、v_fpts 逐帧复现（%s，MAE %.5f）' % (row['best'], row['st']['mae']))
         out = os.path.join(tmp, 'rescored.csv')
-        rescore_one(('synth', None, old_run, vpath, 'exact_crop', 'auto', DEFAULT_MODEL, out, None))
+        rescore_one(('synth', None, old_run, vpath, 'exact_crop', 'auto', DEFAULT_MODEL, out,
+                     {'delta_ms': 900, 'offset_us': 0}, None))
         m2, rs2 = load_results(out)
         check(len(rs2) > 30 and all(r.fpts is not None for r in rs2), 'rescore 写出的 run 能读回，带 v_fpts')
+        _, rs_old = load_results(old_run)
+        lag = [r.pos - r2.fpts[-1] for r, r2 in zip(rs_old, rs2)]
+        check(all(abs(x - NEW_APP_DELTA) <= 34 for x in lag),
+              'rescore 的 exact 管线按修复后 app 的时序取帧（最后一帧比出结果早约 %dms），不用旧 Δ' % NEW_APP_DELTA)
         res = check_one(('synth', None, out, vpath, ['exact_crop'], 'auto', DEFAULT_MODEL))
         check(res['rows'][0]['st']['mae'] < 1e-3, 'rescore 写出的 run 再 check：exact_crop 逐帧复现（MAE %.5f）'
               % res['rows'][0]['st']['mae'])
@@ -1112,6 +1127,8 @@ def main():
             sp.add_argument('--pipe', default='exact_crop', help='管线（默认 exact_crop = 修复后的 app）')
             sp.add_argument('--out', default=DEFAULT_OUT, help='输出根目录（默认 bench/rescored）')
             sp.add_argument('--tag', help='输出子目录名（默认 video_<管线>_<runs 目录名>）')
+            sp.add_argument('--delta', type=int, help='旧 run（没有 v_fpts）的时间差 Δ（ms）。默认：keyframe 管线用 check 扫出的值，'
+                                                      'exact 管线用修复后 app 的 %dms' % NEW_APP_DELTA)
     sub.add_parser('golden', help='重新生成 Java 端 FramePreprocessorTest 的对拍数据（改了 FramePreprocessor 才需要）')
     a = p.parse_args()
     if a.selftest:

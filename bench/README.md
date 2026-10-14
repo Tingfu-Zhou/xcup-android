@@ -330,8 +330,11 @@ seek 启动不变慢；基线留一代价 996）：
 1. **离线模式只取到关键帧**。旧 `VideoFrameExtractor.getFrameAt(T)` 每次 `seekTo(T, SEEK_TO_CLOSEST_SYNC)` 后直接拿解码器吐出的
    第一帧，也就是离 T 最近的关键帧（可能在 T 之后，最多差半个 GOP）。12 帧窗口里只有 1~2 张不同的图，视频结果每个 GOP 才变一次：
    v01/v02/v04/v06/v07 每 ≈4.2 秒冻住 1~1.5 秒，v10/v12/v13 每 ≈8.3 秒（x264 默认 keyint=250）冻住 4.5~4.8 秒，
-   v08/v09/v11 每 ≈12 秒冻住 ≈8.5 秒（ffprobe 已确认 v08 的关键帧间隔是 12 秒）。融合仲裁按“新结果个数”计数，同一张关键帧的
-   9~17 个结果被当成了独立证据；现在的仲裁参数就是在这种输入上调出来的。网页模式（TextureView 截帧）和在线模式（截屏）不受影响。
+   v08/v09/v11 每 ≈12 秒冻住 ≈8.5 秒（ffprobe 已确认 v08 的关键帧间隔是 12 秒）。而且比播放位置晚 0.5~1.3 秒：每次先 seek、
+   只喂一帧就取最早的一个输出，解码器流水线里积压的是前几次请求的帧，换关键帧要等积压排空（从 runs_test“冻住→变化”的时间点推出：
+   v10 525ms、v08 875ms、v11 ≈900ms、v09 ≈1.3 秒，各片不同，跟解码器要攒几帧才出帧有关）。融合仲裁按“新结果个数”计数，同一张
+   关键帧的 9~17 个结果被当成了独立证据；现在的仲裁参数就是在这种输入上调出来的。
+   网页模式（TextureView 截当前显示的帧）和在线模式（截屏）没有这个问题；下面第 2 个问题三种模式都有。
 2. **三种模式都把整帧压扁成 160×160**。训练素材是 ffmpeg 短边缩到 224、居中裁 224×224，读帧时再 `cv2.INTER_AREA` 缩到 160；
    app 却把 16:9 的整帧横向压扁 1.78 倍（训练时裁掉的左右两边也送进了模型），离线模式还是 GPU 一步采样到 160（1080p 时每个输出
    像素只用到对应约 80 个原像素里的 4 个，有混叠）。
@@ -363,24 +366,30 @@ python3 bench/tools/video_rescore.py --selftest
 
 - 管线名 = 抽帧_预处理。抽帧：`keyframe`（旧）/ `exact`（新）；预处理：`legacy`（旧：整帧 GPU 一步到 160）/ `crop`（新）/
   `squash`（不裁，A/B）/ `train`（训练素材做法的近似：ffmpeg 同样的双三次缩放 + 居中裁、BT.601 转 RGB，不含 x264 重编码；只作参照）。
-- `check`：旧 run（没有 `v_fpts`）默认比 `keyframe_legacy`，从出结果时刻往前推 12 帧（每 250ms 一帧），扫“最后一帧比出结果早 Δ”
-  （0~600ms）；新 run 默认比参数行 `VIDEO_PIPE` 那条，按 `v_fpts` 逐帧取（只扫 PyAV 与手机时间戳之间 ±2 帧的常数差）。
+- `check`：旧 run（没有 `v_fpts`）默认比 `keyframe_legacy`，从出结果时刻往前推 12 帧（每 250ms 一帧），扫“最后一帧的取帧目标比出结果
+  早 Δ”（0~3000ms；旧版因为解码器积压，Δ 在 0.5~1.3 秒，最佳值落在扫描边上会报警）；新 run 默认比参数行 `VIDEO_PIPE` 那条，按 `v_fpts`
+  逐帧取（只扫 PyAV 与手机时间戳之间 ±2 帧的常数差）。
+  2026-10-14 runs_test 实测（Δ 只扫到 600ms 时）：6 部片 `keyframe_legacy` 的 MAE 0.007~0.021、判定一致 95.5~98.6%，“12 帧同一张图”
+  的窗口 MAE 0.004~0.017，确认旧版只取到关键帧。
   打出 MAE（三类概率平均绝对差）、分组判定一致率，以及“12 帧全是同一张图”的窗口单独的 MAE（不受时间差影响，最能说明像素管线对不对）。
   定下的 Δ 写进 `bench/rescored/video_alignment.json`，`rescore` 直接用。`--pipes keyframe_legacy,exact_legacy` 可以加对照。
   `--matrix bt601|bt709` 试 YUV→RGB 矩阵（默认 auto：码流标了按标的，没标时高清按 BT.709，同 Android）。
 - `rescore`：默认 `exact_crop`（修复后的 app），写到 `bench/rescored/video_<管线>_<runs 目录名>/`，同时写 `<run>.vframes.npz`
-  （用到的每一帧的 pts 和逐帧 logit）。之后用 `fusion_lab.py eval` / `arbiter_lab.py` 回放；换了视频输入，概率分布变了，
+  （用到的每一帧的 pts 和逐帧 logit）。旧 run 的取帧时刻：`exact` 管线按修复后 app 的时序（最后一帧比出结果早 200ms，没有旧解码器的
+  积压）；`keyframe` 管线（复现旧 app）用 check 扫出的 Δ；`--delta` 可以手动指定。之后用 `fusion_lab.py eval` / `arbiter_lab.py` 回放；换了视频输入，概率分布变了，
   比较前先按第 4 节重调阈值和融合参数。`--jobs N` 几部片并行；1080p 每个要用的帧约 30ms，一部 20 分钟的片子约 3 分钟。
 - 局限：训练素材经过 x264 重编码（crf 23、224×224），`train` 管线没有模拟；`--model` 只支持与现用模型同一结构的模型；
   网页模式（TextureView 截帧）没有对应的离线管线。
 
-**修完要做的**：
-1. 装新包，按第 2 节重录 13 部片（建议放进新目录，如 `bench/runs_v3/`），`video_rescore.py check --runs bench/runs_v3`：
-   `exact_crop` 的 MAE 应该很小（手机 GPU 的 YUV→RGB 和双线性与 PyAV/cv2 不完全相同，预计在 0.01~0.03），说明手机上跑的就是离线评估的那套；
-   `fusion_lab.py check` 照旧核对融合仲裁。
-2. 视频结果不再成串重复，原来按“结果个数”计的证据含义变了：按第 4 节用 `arbiter_lab.py lovo` 重调（视频阈值 `VIDEO_DO` /
-   `VIDEO_PLOT` 也要按 `metrics.py --diag` 重看），再和旧基线比。
-3. 在此之前，可以先用 `video_rescore.py rescore` 在旧 run 上离线估一下修复的收益。
+**修完要做的**（不用 13 部全部重录）：
+1. 用 `rescore` 把旧 run 的视频结果换成修复后的（`--pipe exact_crop`，runs_initial 和 runs_test 都做）。音频没改，旧 run 里的音频列照样有效；
+   run 都是从头播到尾、没有 seek 和暂停，离线重算基本等价于用新包重录。差别：出结果的时刻沿用旧 run 的；像素有手机 GPU 与 PyAV/cv2
+   的细小差异（见上面“12 帧同一张图”窗口的 MAE）。
+2. 视频结果不再成串重复、也不再晚 0.5~1.3 秒，原来按“结果个数”计的证据含义变了：在重算出的 run 上按第 4 节重调视频阈值
+   （`VIDEO_DO` / `VIDEO_PLOT`，用 `metrics.py --diag`）和融合仲裁（`arbiter_lab.py lovo`），再和旧基线比。
+3. 真机验收：装新包，重录 2~3 部（GOP 长的 v08/v11 和 GOP 短的 v03 各一部，放进新目录如 `bench/runs_v3/`），
+   `video_rescore.py check --runs bench/runs_v3`：`exact_crop` 应该能逐帧复现（说明手机上跑的就是离线评估的那套），
+   `fusion_lab.py check` 照旧核对融合仲裁；再看这几部的端到端指标是否与离线重算的一致。
 
 ## 时间线
 
