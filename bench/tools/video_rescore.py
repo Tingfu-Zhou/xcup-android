@@ -840,8 +840,7 @@ def cmd_rescore(a):
     print('视频重算 rescore：管线 %s，矩阵 %s → %s' % (a.pipe, a.matrix, os.path.relpath(out_dir)))
     for res in _jobs_map(rescore_one, jobs, a.jobs):
         print('\n'.join(res['lines']))
-    print('下一步：python3 bench/tools/fusion_lab.py eval bench/gt %s（换了视频输入，概率分布变了，'
-          '比较前先按 README 第 4 节重调阈值和融合参数）' % os.path.relpath(out_dir))
+    print('下一步：13 部按统一口径评测、对比用 python3 bench/tools/baseline.py（README 第 5 节；rescore 也可以用它两个 runs 目录一次做完）')
 
 
 # ======================================================================== Java 对拍数据

@@ -16,6 +16,7 @@ bench/
                           video_alignment.json 是 video_rescore.py check 定下的时间差
   videos/                 原始视频（不进 git；也可以放别处，用 --videos 指定）
   summary.csv             metrics.py --append 的汇总
+  baseline/               baseline.py 的报告（eval / compare 写的，要不要提交随意）
   tools/
     labeler.html          真值标注器，双击即用，纯本地无上传
     metrics.py            单部片：指标、误判定位、单模态诊断
@@ -25,6 +26,7 @@ bench/
     audio_rescore.py      音频离线重算：换音频模型不用上真机
     cue_lab.py            YAMNet 线索实验（第 6 节）：线索统计、误判归因、压力场景、留一视频选规则（app 用了其中的 a1bvid）
     video_rescore.py      视频离线重算（第 7 节）：换抽帧方式 / 预处理 / 视频模型不用上真机；复现真机的 v_p_*
+    baseline.py           统一评测基准：换视频模型 / 视频管线时只换视频结果，13 部片按同一口径比（check / rescore / eval / compare）
     test_labeler.js       标注器测试：node bench/tools/test_labeler.js
     yamnet_class_map.csv  YAMNet 的 AudioSet 521 类名（来自 tensorflow/models，Apache-2.0）
 ```
@@ -200,6 +202,23 @@ python3 bench/tools/arbiter_lab.py lovo     # 留一视频选参（--wide 连音
 默认 `bench/gt` + `bench/runs_initial`，也可以在命令后面给 `<gt 目录> <runs 目录>`。seek 模拟：每个够长的真值段里每 15 秒
 seek 一次，丢掉模型窗口还没重新攒满的结果（视频约 2.75 秒、音频 2 秒），再从全新状态回放 30 秒。
 
+### baseline.py（统一评测基准，2026-10-14 起）
+
+```bash
+python3 bench/tools/baseline.py eval phone                          # 手机原始 run（旧视频管线），与第 6 节 13 部的 a1bvid 一致
+python3 bench/tools/baseline.py check   --videos D:/xcup/videos     # 第一次 rescore 前核对原片（13 部）
+python3 bench/tools/baseline.py rescore --videos D:/xcup/videos     # 修复后的管线 + 现用模型 → exact_crop
+python3 bench/tools/baseline.py rescore --videos D:/xcup/videos --model new.tflite --name new1
+python3 bench/tools/baseline.py compare phone exact_crop new1       # 并排对比，第一个是参照
+```
+
+- 固定的部分：13 部片（`gt` v01~v13）、录像 `runs_initial` + `runs_test`、音频线索 `audio_old` + `test_audio_old`、
+  融合 `a1bvid`（= app 的 FusionArbiter v2）、代价 fp=1,fn=1,stop=3。变的只有视频结果（"变体"）：`phone` 读原始 run，
+  其余读 `rescored/video_<名字>_runs_initial`、`_runs_test`。不混用别的录像：同一部片两次录像差别就很大（v11：90.2% / 82.5%）。
+- 视频单独的指标（p_oral+p_sex 的 AUC、按现用阈值的准确率）逐 tick 算，与 `metrics.py --diag` 相同，另给 13 部合并。
+- 重算目录里的 `variant.json` 记下模型指纹，换了模型还写同一个名字会被拒绝（`--overwrite` 放行）。
+- 不含调参：给新模型调阈值和融合参数按第 4 节，最终比较时两边用同一套流程各自调好。
+
 ### audio_rescore.py
 
 依赖：`pip install numpy ai-edge-litert`（或已装的 tensorflow），ffmpeg / ffprobe 在 PATH 上（或 `--ffmpeg` 指定）。
@@ -231,6 +250,7 @@ python3 bench/tools/metrics.py --selftest      # 含与 BenchLogger 的 CSV 列�
 python3 bench/tools/audio_rescore.py --selftest
 python3 bench/tools/cue_lab.py --selftest      # 开关全关时与 v1 逐 tick 一致、对拍数据、线索接上的比例
 python3 bench/tools/video_rescore.py --selftest  # 预处理对拍数据、与 cv2.INTER_AREA 一致、合成视频上的取帧与对齐
+python3 bench/tools/baseline.py --selftest       # phone 与第 6 节一致、重算格式读对、模型指纹、check / rescore 的包装
 node bench/tools/test_labeler.js
 ```
 
@@ -376,7 +396,7 @@ python3 bench/tools/video_rescore.py --selftest
   `--matrix bt601|bt709` 试 YUV→RGB 矩阵（默认 auto：码流标了按标的，没标时高清按 BT.709，同 Android）。
 - `rescore`：默认 `exact_crop`（修复后的 app），写到 `bench/rescored/video_<管线>_<runs 目录名>/`，同时写 `<run>.vframes.npz`
   （用到的每一帧的 pts 和逐帧 logit）。旧 run 的取帧时刻：`exact` 管线按修复后 app 的时序（最后一帧比出结果早 200ms，没有旧解码器的
-  积压）；`keyframe` 管线（复现旧 app）用 check 扫出的 Δ；`--delta` 可以手动指定。之后用 `fusion_lab.py eval` / `arbiter_lab.py` 回放；换了视频输入，概率分布变了，
+  积压）；`keyframe` 管线（复现旧 app）用 check 扫出的 Δ；`--delta` 可以手动指定。之后用 `baseline.py` 按统一口径评测、对比（第 5 节；它也能把两个 runs 目录一次重算完）；换了视频输入，概率分布变了，
   比较前先按第 4 节重调阈值和融合参数。`--jobs N` 几部片并行；1080p 每个要用的帧约 30ms，一部 20 分钟的片子约 3 分钟。
 - 局限：训练素材经过 x264 重编码（crf 23、224×224），`train` 管线没有模拟；`--model` 只支持与现用模型同一结构的模型；
   网页模式（TextureView 截帧）没有对应的离线管线。
