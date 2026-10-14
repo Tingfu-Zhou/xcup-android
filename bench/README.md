@@ -11,7 +11,9 @@ bench/
   runs_initial/<id>_*.csv 真机 dump：app 1.2.5、融合仲裁 v1、现用音频分类头，7 部片（调参用的基线）
   runs_test/<id>_*.csv    同一个包录的新片 v08~v13（不参与调参，只做检验）
   rescored/               audio_rescore.py 的输出：audio_old / test_audio_old = runs_initial / runs_test 用现用分类头离线重算
-                          （与真机一致，另带 YAMNet 521 类分数 .yamnet.npz）；audio_new = 2026-10-09 评估过的新分类头（未采用）
+                          （与真机一致，另带 YAMNet 521 类分数 .yamnet.npz）；audio_new = 2026-10-09 评估过的新分类头（未采用）；
+                          video_<管线>_<runs 目录名>/ 是 video_rescore.py 的输出（不进 git 也行，随时能重算），
+                          video_alignment.json 是 video_rescore.py check 定下的时间差
   videos/                 原始视频（不进 git；也可以放别处，用 --videos 指定）
   summary.csv             metrics.py --append 的汇总
   tools/
@@ -22,6 +24,7 @@ bench/
     arbiter_lab.py        融合仲裁评测：逐片最差情况、seek 模拟、压力场景、慢手机、留一选参
     audio_rescore.py      音频离线重算：换音频模型不用上真机
     cue_lab.py            YAMNet 线索实验（第 6 节）：线索统计、误判归因、压力场景、留一视频选规则（app 用了其中的 a1bvid）
+    video_rescore.py      视频离线重算（第 7 节）：换抽帧方式 / 预处理 / 视频模型不用上真机；复现真机的 v_p_*
     test_labeler.js       标注器测试：node bench/tools/test_labeler.js
     yamnet_class_map.csv  YAMNet 的 AudioSet 521 类名（来自 tensorflow/models，Apache-2.0）
 ```
@@ -125,7 +128,8 @@ python3 bench/tools/metrics.py bench/gt/v01.csv bench/runs_initial/v01_base.csv 
 
 1. **拿到新模型的数据**
    - 音频模型：`audio_rescore.py rescore --classifier new.tflite` 在电脑上重算，输出目录直接给下面的工具用，不用上真机。
-   - 视频模型：装新包在真机上重录（目前没有离线重算视频的工具）。
+   - 视频模型：`video_rescore.py rescore --model new.tflite --pipe exact_crop` 在电脑上重算（第 7 节）。目前只支持与现用模型
+     同一结构的模型（逐帧特征 → 时间平均 → 线性层，输入 [1,12,160,160,3]）；换了时序头要先扩展工具。
    - 类别顺序（视频 `[plot, oral, sex]`、音频 `[sex, oral, noise]`）或类别数变了，要同时改两个 Activity 里的判定、`BenchLogger`
      的列和 bench 工具。
    - **别拿 bench 这几部片训练**，否则这里的数字就不再能代表新片子。
@@ -158,9 +162,10 @@ python3 bench/tools/metrics.py bench/gt/v01.csv bench/runs_initial/v01_base.csv 
 CP=junit-4.13.2.jar:hamcrest-core-1.3.jar
 J=app/src/main/java/com/example/helloworld; T=app/src/test/java/com/example/helloworld
 javac --release 11 -encoding UTF-8 -cp $CP -d /tmp/arbtest \
-  $J/AudioCue.java $J/FusionArbiter.java $T/FusionArbiterTest.java $T/AudioCueTest.java
+  $J/AudioCue.java $J/FusionArbiter.java $J/FramePreprocessor.java \
+  $T/FusionArbiterTest.java $T/AudioCueTest.java $T/FramePreprocessorTest.java
 java -cp /tmp/arbtest:app/src/test/resources:$CP org.junit.runner.JUnitCore \
-  com.example.helloworld.FusionArbiterTest com.example.helloworld.AudioCueTest
+  com.example.helloworld.FusionArbiterTest com.example.helloworld.AudioCueTest com.example.helloworld.FramePreprocessorTest
 ```
 
 ## 5. 工具参考
@@ -225,6 +230,7 @@ python3 bench/tools/fusion_lab.py --selftest
 python3 bench/tools/metrics.py --selftest      # 含与 BenchLogger 的 CSV 列名契约检查
 python3 bench/tools/audio_rescore.py --selftest
 python3 bench/tools/cue_lab.py --selftest      # 开关全关时与 v1 逐 tick 一致、对拍数据、线索接上的比例
+python3 bench/tools/video_rescore.py --selftest  # 预处理对拍数据、与 cv2.INTER_AREA 一致、合成视频上的取帧与对齐
 node bench/tools/test_labeler.js
 ```
 
@@ -238,6 +244,8 @@ node bench/tools/test_labeler.js
 | `a_ys_*` | AudioSet 类别分数（Speech、Music、Moan 等，见 `metrics.YS_CLASSES`），只有 `rescore` 写，4 位小数 |
 | `a_cue` | 该音频结果的线索（`dialog` / `music` / `quiet` / `blind` / `vocal` / `impact` / `other`，没有为空），2026-10-11 起的 app 写 |
 | `a_cue_*` | 线索用的 YAMNet 分组分数（`voc_core` `voc_ext` `speech` `speech_ext` `music` `silence` `impact`，全精度），同上 |
+| `v_pos` | 该视频结果窗口里最后一帧的时刻（离线模式是帧的 pts，网页模式是抓帧时的播放位置），2026-10-14 起的 app 写 |
+| `v_fpts` | 窗口里 12 帧各自的时刻（ms，分号隔开，从旧到新），同上。`video_rescore.py` 靠它逐帧还原模型输入 |
 
 ## 6. YAMNet 线索（cue_lab.py；app 2026-10-11 起用 `a1bvid`）
 
@@ -315,6 +323,65 @@ seek 启动不变慢；基线留一代价 996）：
   `audio_rescore.py check / rescore --runs bench/runs_test --tag test_audio_old` 算出 `.yamnet.npz`，然后
   `python3 bench/tools/cue_lab.py eval bench/gt bench/runs_test --npz bench/rescored/test_audio_old --preset a1b`。
 
+## 7. 视频抽帧与预处理（video_rescore.py；app 2026-10-14 起 `VIDEO_PIPE=exact_crop`）
+
+**2026-10-14 之前的两个问题**（视频模型的输入和训练时不一样，和 10-05 音频半速是同一类问题）：
+
+1. **离线模式只取到关键帧**。旧 `VideoFrameExtractor.getFrameAt(T)` 每次 `seekTo(T, SEEK_TO_CLOSEST_SYNC)` 后直接拿解码器吐出的
+   第一帧，也就是离 T 最近的关键帧（可能在 T 之后，最多差半个 GOP）。12 帧窗口里只有 1~2 张不同的图，视频结果每个 GOP 才变一次：
+   v01/v02/v04/v06/v07 每 ≈4.2 秒冻住 1~1.5 秒，v10/v12/v13 每 ≈8.3 秒（x264 默认 keyint=250）冻住 4.5~4.8 秒，
+   v08/v09/v11 每 ≈12 秒冻住 ≈8.5 秒（ffprobe 已确认 v08 的关键帧间隔是 12 秒）。融合仲裁按“新结果个数”计数，同一张关键帧的
+   9~17 个结果被当成了独立证据；现在的仲裁参数就是在这种输入上调出来的。网页模式（TextureView 截帧）和在线模式（截屏）不受影响。
+2. **三种模式都把整帧压扁成 160×160**。训练素材是 ffmpeg 短边缩到 224、居中裁 224×224，读帧时再 `cv2.INTER_AREA` 缩到 160；
+   app 却把 16:9 的整帧横向压扁 1.78 倍（训练时裁掉的左右两边也送进了模型），离线模式还是 GPU 一步采样到 160（1080p 时每个输出
+   像素只用到对应约 80 个原像素里的 4 个，有混叠）。
+
+**修复**（2026-10-14 起的 app，参数行带 `VIDEO_PIPE=`）：
+- `VideoFrameExtractor`：只在第一次、seek 之后、播放位置往回跳或往前跳太远时才 `seekTo(T, SEEK_TO_PREVIOUS_SYNC)` + flush；
+  平时顺着往后解，pts 不到 T 的帧丢掉不渲染，取 pts 不晚于 T + 半帧的最后一帧（离 T 最近的那一帧）。每次最多 150ms，seek 进
+  长 GOP 时分几次追上，追赶中不拿离目标太远的帧凑数。VideoView 的 seek 本身落在前一个关键帧上，所以通常不用追。
+- 抽帧挪到单独的抽帧线程（以前在主线程，每 250ms 占约 43ms）；`EGLRenderer` 用 SurfaceTexture 的变换矩阵（含裁边、旋转），
+  等 onFrameAvailable 并核对时间戳（以前 `sleep(20)` 赌帧已经到了）。
+- `FramePreprocessor`（纯 Java，三种模式共用）：居中裁正方形 → 面积平均缩到 224 → 再缩到 160，与训练相同；离线模式先在 GPU 上
+  把裁好的正方形画成 672×672（1080p 只缩 1.6 倍，双线性基本不混叠）。`FramePreprocessor.CENTER_CROP=false` 可改回整帧压扁
+  （A/B 对比用）。面积缩小与 `cv2.INTER_AREA` 逐位相同（2 倍整数缩小时差 ≤1），`FramePreprocessorTest` 与 Python 版对拍。
+- 评测 CSV：参数行加 `VIDEO_PIPE=exact_crop`（网页模式 `web_crop`；没有这一项的旧 run = keyframe 抽帧 + 整帧压扁），
+  列加 `v_pos`、`v_fpts`（第 5 节）。
+
+**视频模型的结构**（从 tflite 计算图读出来的）：12 份共享权重的 MobileNetV3Small（每帧 576 维）→ 时间平均 → 576×3 线性层 →
+softmax。平均和线性层可以交换，所以窗口输出 = softmax(12 帧各自 logit 的平均)，与帧的顺序无关。`video_rescore.py` 直接读出
+每帧的 576 维特征（模型里 PACK 的 12 个输入）算逐帧 logit：12 张不同的帧一次推理，窗口怎么组合都不用再跑模型（与模型输出差 < 1e-8）。
+
+**video_rescore.py**（依赖：`pip install numpy av ai-edge-litert opencv-python-headless`，opencv 可选，只为快）：
+
+```bash
+python3 bench/tools/video_rescore.py keyframes --videos D:/xcup/videos                      # 每部片的 GOP、冻住的时长占比
+python3 bench/tools/video_rescore.py check   --videos D:/xcup/videos --runs bench/runs_test  # 哪条管线能复现真机
+python3 bench/tools/video_rescore.py rescore --videos D:/xcup/videos --runs bench/runs_test  # 按 exact_crop 重算，写新 run
+python3 bench/tools/video_rescore.py --selftest
+```
+
+- 管线名 = 抽帧_预处理。抽帧：`keyframe`（旧）/ `exact`（新）；预处理：`legacy`（旧：整帧 GPU 一步到 160）/ `crop`（新）/
+  `squash`（不裁，A/B）/ `train`（训练素材做法的近似：ffmpeg 同样的双三次缩放 + 居中裁、BT.601 转 RGB，不含 x264 重编码；只作参照）。
+- `check`：旧 run（没有 `v_fpts`）默认比 `keyframe_legacy`，从出结果时刻往前推 12 帧（每 250ms 一帧），扫“最后一帧比出结果早 Δ”
+  （0~600ms）；新 run 默认比参数行 `VIDEO_PIPE` 那条，按 `v_fpts` 逐帧取（只扫 PyAV 与手机时间戳之间 ±2 帧的常数差）。
+  打出 MAE（三类概率平均绝对差）、分组判定一致率，以及“12 帧全是同一张图”的窗口单独的 MAE（不受时间差影响，最能说明像素管线对不对）。
+  定下的 Δ 写进 `bench/rescored/video_alignment.json`，`rescore` 直接用。`--pipes keyframe_legacy,exact_legacy` 可以加对照。
+  `--matrix bt601|bt709` 试 YUV→RGB 矩阵（默认 auto：码流标了按标的，没标时高清按 BT.709，同 Android）。
+- `rescore`：默认 `exact_crop`（修复后的 app），写到 `bench/rescored/video_<管线>_<runs 目录名>/`，同时写 `<run>.vframes.npz`
+  （用到的每一帧的 pts 和逐帧 logit）。之后用 `fusion_lab.py eval` / `arbiter_lab.py` 回放；换了视频输入，概率分布变了，
+  比较前先按第 4 节重调阈值和融合参数。`--jobs N` 几部片并行；1080p 每个要用的帧约 30ms，一部 20 分钟的片子约 3 分钟。
+- 局限：训练素材经过 x264 重编码（crf 23、224×224），`train` 管线没有模拟；`--model` 只支持与现用模型同一结构的模型；
+  网页模式（TextureView 截帧）没有对应的离线管线。
+
+**修完要做的**：
+1. 装新包，按第 2 节重录 13 部片（建议放进新目录，如 `bench/runs_v3/`），`video_rescore.py check --runs bench/runs_v3`：
+   `exact_crop` 的 MAE 应该很小（手机 GPU 的 YUV→RGB 和双线性与 PyAV/cv2 不完全相同，预计在 0.01~0.03），说明手机上跑的就是离线评估的那套；
+   `fusion_lab.py check` 照旧核对融合仲裁。
+2. 视频结果不再成串重复，原来按“结果个数”计的证据含义变了：按第 4 节用 `arbiter_lab.py lovo` 重调（视频阈值 `VIDEO_DO` /
+   `VIDEO_PLOT` 也要按 `metrics.py --diag` 重看），再和旧基线比。
+3. 在此之前，可以先用 `video_rescore.py rescore` 在旧 run 上离线估一下修复的收益。
+
 ## 时间线
 
 - 2026-10-05：发现离线模式喂给音频模型的是半速音频（`AudioDecoder` 没按声道下混），用 `PcmResampler` 修复；之前录的 run 的音频结论作废。
@@ -335,3 +402,7 @@ seek 启动不变慢；基线留一代价 996）：
   `FusionArbiter` v2（`start_video`、对白否决，线索未知时与 v1 相同）；两个 Activity 把线索传给仲裁、显示在音频行；
   `BenchLogger` 加 `a_cue`、`a_cue_*` 列和 `CUE=` 参数。`fusion_lab.py` 同步（check 核对线索、golden 带线索）、
   `audio_rescore.py` rescore 时重写线索列；对拍数据重新生成，新增 `AudioCueTest`。要用新包重录验证（第 3 节"上真机验证"）。
+- 2026-10-14：发现离线模式视频模型只看到关键帧（`VideoFrameExtractor` 用 `SEEK_TO_CLOSEST_SYNC` 取帧），以及三种模式都把整帧压扁
+  （训练是居中裁剪）。app 修复：顺序解码取当前帧、抽帧挪到单独线程、`FramePreprocessor` 与训练一致（第 7 节）；评测 CSV 加
+  `VIDEO_PIPE` 参数和 `v_pos`、`v_fpts` 列。新增 `video_rescore.py`（离线视频重算）和 `FramePreprocessorTest`。之前录的 run 的视频
+  结论（含融合仲裁的参数）都是在只看到关键帧的输入上得到的，要用新包重录、重调。
