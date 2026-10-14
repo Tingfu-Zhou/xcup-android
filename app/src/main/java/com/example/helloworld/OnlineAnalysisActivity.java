@@ -65,6 +65,8 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
 
     // 帧缓存环形缓冲：最近 3 秒、间隔 250ms 采样的 12 帧
     private final ArrayDeque<Bitmap> frameWindow = new ArrayDeque<>();
+    // 截屏帧转模型输入时复用的像素缓冲（只在视频线程用）
+    private int[] screenPixels;
     private static final int FRAME_WINDOW_SIZE = VideoClassifierHelper.NUM_FRAMES;
 
     // 视频推理步长：每 500ms 推理一次（与离线模式 VideoProcessActivity 保持一致）
@@ -382,9 +384,12 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
      */
     private void cacheFrameAndInfer(Bitmap frame) {
         synchronized (videoLock) {
-            // 缩放到模型输入尺寸后缓存
-            Bitmap scaled = Bitmap.createScaledBitmap(
-                    frame, VideoClassifierHelper.INPUT_SIZE, VideoClassifierHelper.INPUT_SIZE, true);
+            // 与训练一致：居中裁正方形、面积平均缩到 160（FramePreprocessor）。2026-10-14 之前是整屏直接压扁成 160×160，
+            // 竖屏看横屏视频时画面只占中间一条，压扁后几乎看不清；居中裁剪至少保住中间那块
+            if (screenPixels == null || screenPixels.length < frame.getWidth() * frame.getHeight()) {
+                screenPixels = new int[frame.getWidth() * frame.getHeight()];
+            }
+            Bitmap scaled = VideoClassifierHelper.toModelBitmap(frame, screenPixels);
             frameWindow.add(scaled);
             while (frameWindow.size() > FRAME_WINDOW_SIZE) {
                 frameWindow.poll();

@@ -21,6 +21,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -82,25 +83,28 @@ public class VideoProcessActivity extends AppCompatActivity {
 
     /**
      * 一次模型推理的结果快照。action 是分组概率判定（"do"/"Noise"/"" unclear），probs 为 null 表示推理失败。
-     * winEndPosMs 只有音频有（视频为 -1）：读 PCM 时的播放位置，写进评测 CSV 的 a_pos 列，
-     * bench/tools/audio_rescore.py 离线重算时靠它精确还原模型窗口。
-     * cue / cueFeat 也只有音频有：YAMNet AudioSet 分数判的线索（{@link AudioCue}）和分组分数，交给融合仲裁、写进评测 CSV。
+     * winEndPosMs：模型窗口结尾的播放位置。音频是读 PCM 时的播放位置（窗口 = [winEndPosMs-2s, winEndPosMs]），写进评测 CSV 的
+     * a_pos 列；视频是窗口里最后一帧的时刻，写进 v_pos 列。bench/tools/audio_rescore.py / video_rescore.py 离线重算时靠它们还原模型输入。
+     * framePosMs 只有视频有：窗口里 12 帧各自的时刻（离线模式是帧的 pts，网页模式是抓帧时的播放位置），写进 v_fpts 列。
+     * cue / cueFeat 只有音频有：YAMNet AudioSet 分数判的线索（{@link AudioCue}）和分组分数，交给融合仲裁、写进评测 CSV。
      */
     private static final class ResultSnap {
         final String action;
         final float conf;
         final float[] probs;
         final long tsMs;            // 结果产出时刻（墙钟）
-        final long winEndPosMs;     // 模型窗口 = [winEndPosMs-2s, winEndPosMs]
+        final long winEndPosMs;     // 模型窗口结尾的播放位置（见上）
         final int cue;              // AudioCue.*，视频 / 拿不到分数时 UNKNOWN
         final float[] cueFeat;      // AudioCue.features，拿不到时 null
-
-        ResultSnap(String action, float conf, float[] probs, long tsMs, long winEndPosMs) {
-            this(action, conf, probs, tsMs, winEndPosMs, AudioCue.UNKNOWN, null);
-        }
+        final long[] framePosMs;    // 视频窗口各帧的时刻（从旧到新），音频为 null
 
         ResultSnap(String action, float conf, float[] probs, long tsMs, long winEndPosMs,
                    int cue, float[] cueFeat) {
+            this(action, conf, probs, tsMs, winEndPosMs, cue, cueFeat, null);
+        }
+
+        ResultSnap(String action, float conf, float[] probs, long tsMs, long winEndPosMs,
+                   int cue, float[] cueFeat, long[] framePosMs) {
             this.action = action;
             this.conf = conf;
             this.probs = probs;
@@ -108,6 +112,7 @@ public class VideoProcessActivity extends AppCompatActivity {
             this.winEndPosMs = winEndPosMs;
             this.cue = cue;
             this.cueFeat = cueFeat;
+            this.framePosMs = framePosMs;
         }
     }
 
@@ -166,9 +171,24 @@ public class VideoProcessActivity extends AppCompatActivity {
     private final Object videoLock = new Object();
     private final Object audioLock = new Object();
 
-    // 帧缓存环形缓冲：最近 3 秒、间隔 250ms 采样的 12 帧
+    // 帧缓存环形缓冲：最近 3 秒、间隔 250ms 采样的 12 帧（已是模型输入 160×160），frameTimeWindow 是每帧的时刻
+    // （离线模式：帧的 pts；网页模式：抓帧时的播放位置），与 frameWindow 一一对应
     private final ArrayDeque<Bitmap> frameWindow = new ArrayDeque<>();
+    private final ArrayDeque<Long> frameTimeWindow = new ArrayDeque<>();
     private static final int FRAME_WINDOW_SIZE = VideoClassifierHelper.NUM_FRAMES;
+
+    // [抽帧] 离线模式的抽帧线程：VideoFrameExtractor（MediaCodec + EGL）只在这个线程里用（EGL 上下文绑定在线程上）。
+    // 2026-10-14 之前抽帧在主线程做（每 250ms 占约 43ms），而且拿到的只是关键帧（见 VideoFrameExtractor 类注释）。
+    private HandlerThread frameThread;
+    private Handler frameHandler;
+    // 上一帧还没取完（seek 后追赶时可能超过 250ms）就不再排新的请求，免得请求堆积、取到的都是过时的位置
+    private final AtomicBoolean frameRequestInFlight = new AtomicBoolean(false);
+    // seek 时加一：seek 之前请求、之后才送到视频线程的帧一律丢掉
+    private final AtomicInteger frameGeneration = new AtomicInteger(0);
+    // [网页视频] TextureView 截帧的暂存图（短边 448 = 2×224）和像素缓冲，只在主线程用
+    private static final int WEB_STAGE_SHORT_SIDE = 448;
+    private Bitmap webStageBitmap;
+    private int[] webStagePixels;
 
     // 视频推理步长：每 500ms 推理一次（推理约 110ms + 抽帧 43ms，2Hz 下 CPU 占用可接受）
     private long lastVideoInferenceTime = 0;
@@ -300,6 +320,7 @@ public class VideoProcessActivity extends AppCompatActivity {
             Log.d(TAG, "onCreate: 设置视频 URI: " + videoUri + " (offline)");
 
             try {
+                // 构造函数只打开 MediaExtractor；解码器和 EGL 在抽帧线程第一次取帧时创建，之后的调用也都在那个线程
                 videoFrameExtractor = new VideoFrameExtractor(this, videoUri, null);
                 Log.d(TAG, "onCreate: VideoFrameExtractor 初始化成功");
             } catch (IOException e) {
@@ -308,6 +329,9 @@ public class VideoProcessActivity extends AppCompatActivity {
                 finish();
                 return;
             }
+            frameThread = new HandlerThread("FrameExtractThread");
+            frameThread.start();
+            frameHandler = new Handler(frameThread.getLooper());
 
             videoView.setMediaController(new MediaController(this));
             videoView.requestFocus();
@@ -420,7 +444,7 @@ public class VideoProcessActivity extends AppCompatActivity {
 
     /**
      * 视频分析循环 - 在独立线程中运行。
-     * 每 250ms 抽取并缓存一帧；缓存窗口满 12 帧（3 秒）后，每 1000ms 执行一次推理。
+     * 每 250ms 抽取并缓存一帧；缓存窗口满 12 帧（3 秒）后，每 500ms 执行一次推理。
      */
     private void startVideoAnalysisLoop() {
         Runnable videoRunnable = new Runnable() {
@@ -439,32 +463,46 @@ public class VideoProcessActivity extends AppCompatActivity {
                 long t0 = System.currentTimeMillis();
 
                 try {
-                    long currentMs = getCurrentPlaybackPosMs();
-                    final long currentMsFinal = currentMs;
-
-                    // 在主线程抽帧：离线走 MediaCodec+EGLRenderer，网页模式直接读 TextureView
-                    mainHandler.post(() -> {
-                        try {
-                            long tExtractStart = System.currentTimeMillis();
-                            Bitmap frame;
-                            if (isWebVideoMode) {
-                                frame = captureWebVideoFrameBitmap();
-                            } else {
-                                frame = videoFrameExtractor.getFrameAt(currentMsFinal * 1000);
+                    final int gen = frameGeneration.get();
+                    if (isWebVideoMode) {
+                        // 网页模式：TextureView 只能在主线程读
+                        mainHandler.post(() -> {
+                            try {
+                                long tExtractStart = System.currentTimeMillis();
+                                long posMs = getCurrentPlaybackPosMs();
+                                Bitmap frame = captureWebVideoFrameBitmap();
+                                Log.d(TAG, "[计时] 📸 抽帧耗时: "
+                                        + (System.currentTimeMillis() - tExtractStart) + " ms");
+                                if (frame != null) {
+                                    videoHandler.post(() -> cacheFrameAndInfer(frame, posMs, gen));
+                                } else {
+                                    Log.w(TAG, "[主线程] [同步分析] 未能抽取到视频帧");
+                                }
+                            } catch (Exception e) {
+                                Log.e(TAG, "[主线程] 抽帧异常：", e);
                             }
-                            Log.d(TAG, "[计时] 📸 抽帧耗时: "
-                                    + (System.currentTimeMillis() - tExtractStart) + " ms");
-
-                            if (frame != null) {
-                                videoHandler.post(() -> cacheFrameAndInfer(frame));
-                            } else {
-                                Log.w(TAG, "[主线程] [同步分析] 未能抽取到视频帧");
+                        });
+                    } else if (frameHandler != null && frameRequestInFlight.compareAndSet(false, true)) {
+                        // 离线模式：抽帧线程取“此刻播放位置的那一帧”（位置在抽帧线程里读，排队等待不会让它过时）
+                        frameHandler.post(() -> {
+                            try {
+                                if (shouldStop.get()) return;
+                                long tExtractStart = System.currentTimeMillis();
+                                long posMs = getCurrentPlaybackPosMs();
+                                VideoFrameExtractor.Frame fr = videoFrameExtractor.getFrameAt(posMs * 1000L);
+                                Log.d(TAG, "[计时] 📸 抽帧耗时: " + (System.currentTimeMillis() - tExtractStart)
+                                        + " ms（位置 " + posMs + "ms"
+                                        + (fr == null ? "，未取到）" : "，取到 " + fr.ptsUs / 1000 + "ms 的帧）"));
+                                if (fr != null) {
+                                    videoHandler.post(() -> cacheFrameAndInfer(fr.bitmap, fr.ptsUs / 1000L, gen));
+                                }
+                            } catch (Exception e) {
+                                Log.e(TAG, "[抽帧线程] 抽帧异常：", e);
+                            } finally {
+                                frameRequestInFlight.set(false);
                             }
-                        } catch (Exception e) {
-                            Log.e(TAG, "[主线程] 抽帧异常：", e);
-                        }
-                    });
-
+                        });
+                    }
                 } catch (Exception e) {
                     Log.e(TAG, "[视频线程] 异常：", e);
                 }
@@ -479,16 +517,31 @@ public class VideoProcessActivity extends AppCompatActivity {
     }
 
     /**
-     * 缓存一帧到滑动窗口；窗口满 12 帧且距上次推理 ≥ 1000ms 时执行一次推理。
+     * 缓存一帧到滑动窗口；窗口满 12 帧且距上次推理 ≥ 500ms 时执行一次推理。
+     *
+     * @param frame      模型输入（160×160，已按 FramePreprocessor 裁剪缩放）
+     * @param framePosMs 这一帧的时刻（离线：pts；网页：抓帧时的播放位置）
+     * @param gen        请求这一帧时的 frameGeneration；之后发生过 seek 就丢掉
      */
-    private void cacheFrameAndInfer(Bitmap frame) {
+    private void cacheFrameAndInfer(Bitmap frame, long framePosMs, int gen) {
         synchronized (videoLock) {
-            // 缩放到模型输入尺寸后缓存
-            Bitmap scaled = Bitmap.createScaledBitmap(
-                    frame, VideoClassifierHelper.INPUT_SIZE, VideoClassifierHelper.INPUT_SIZE, true);
+            if (gen != frameGeneration.get()) {
+                Log.d(TAG, "[视频线程] seek 之前请求的帧（" + framePosMs + "ms），丢弃");
+                return;
+            }
+            // 同一帧不重复放（播放卡住时位置不动）：窗口应当是 12 个不同时刻
+            Long lastPos = frameTimeWindow.peekLast();
+            if (lastPos != null && lastPos == framePosMs) {
+                return;
+            }
+            Bitmap scaled = (frame.getWidth() == VideoClassifierHelper.INPUT_SIZE
+                    && frame.getHeight() == VideoClassifierHelper.INPUT_SIZE)
+                    ? frame : VideoClassifierHelper.toModelBitmap(frame, null);
             frameWindow.add(scaled);
+            frameTimeWindow.add(framePosMs);
             while (frameWindow.size() > FRAME_WINDOW_SIZE) {
                 frameWindow.poll();
+                frameTimeWindow.poll();
             }
 
             // 滑动窗口未满 3 秒，暂不推理
@@ -498,7 +551,7 @@ public class VideoProcessActivity extends AppCompatActivity {
                 return;
             }
 
-            // 推理步长 1000ms
+            // 推理步长 500ms
             long now = System.currentTimeMillis();
             if (now - lastVideoInferenceTime < VIDEO_INFERENCE_INTERVAL) {
                 return;
@@ -506,12 +559,15 @@ public class VideoProcessActivity extends AppCompatActivity {
             lastVideoInferenceTime = now;
 
             Bitmap[] frames = frameWindow.toArray(new Bitmap[0]);
+            long[] framePos = new long[frameTimeWindow.size()];
+            int k = 0;
+            for (long t : frameTimeWindow) framePos[k++] = t;
             long tInferStart = System.currentTimeMillis();
             VideoClassifierHelper.Result result = videoClassifier.predict(frames);
             Log.d(TAG, "[计时] 🧠 MobileNetV3Small 推理耗时: "
                     + (System.currentTimeMillis() - tInferStart) + " ms");
 
-            applyVideoResult(result);
+            applyVideoResult(result, framePos);
         }
     }
 
@@ -519,8 +575,10 @@ public class VideoProcessActivity extends AppCompatActivity {
      * 将三分类结果映射为视频动作并写入共享结果（分组概率决策）。
      * P(do)=P(oral)+P(sex) >= 阈值 -> "do"（转）；P(plot) >= 阈值 -> "Noise"（不转）；
      * 其余 -> unclear -> ""（置信度 0）。置信度取分组后的概率。
+     *
+     * @param framePos 窗口里各帧的时刻（从旧到新），写进评测 CSV 的 v_pos / v_fpts，离线重算靠它还原模型输入
      */
-    private void applyVideoResult(VideoClassifierHelper.Result result) {
+    private void applyVideoResult(VideoClassifierHelper.Result result, long[] framePos) {
         String actionClass;
         float confidence;
 
@@ -551,7 +609,8 @@ public class VideoProcessActivity extends AppCompatActivity {
         boolean probsOk = result != null && result.index >= 0
                 && result.probs != null && result.probs.length >= 3;
         latestVideoSnap.set(new ResultSnap(actionClass, confidence,
-                probsOk ? result.probs.clone() : null, resultTs, -1));
+                probsOk ? result.probs.clone() : null, resultTs,
+                framePos.length > 0 ? framePos[framePos.length - 1] : -1, AudioCue.UNKNOWN, null, framePos));
 
         final String displayText = actionClass.isEmpty()
                 ? "V: unclear"
@@ -816,7 +875,8 @@ public class VideoProcessActivity extends AppCompatActivity {
                             finalAction, finalFreq,
                             currentBluetoothState, currentLevel,
                             fusionArbiter.lastReason(),
-                            audioCue, aSnap == null ? null : aSnap.cueFeat);
+                            audioCue, aSnap == null ? null : aSnap.cueFeat,
+                            vSnap == null ? -1 : vSnap.winEndPosMs, vSnap == null ? null : vSnap.framePosMs);
                 }
 
                 // 更新UI, 显示蓝牙实际发送的动作
@@ -1156,13 +1216,15 @@ public class VideoProcessActivity extends AppCompatActivity {
         return String.format(Locale.US,
                 "VIDEO_DO=%.2f VIDEO_PLOT=%.2f AUDIO_DO=%.2f AUDIO_NOISE=%.2f "
                         + "BLE_MIN_DUR=%d BLE_GAP=%d LEVEL_STABLE=%d LEVEL_MIN_DUR=%d "
-                        + "FUSION_TICK=%d VIDEO_INFER=%d AUDIO_INFER=%d AUDIO_PIPE=%s ",
+                        + "FUSION_TICK=%d VIDEO_INFER=%d AUDIO_INFER=%d AUDIO_PIPE=%s VIDEO_PIPE=%s ",
                 VIDEO_DO_PROB_THRESHOLD, VIDEO_PLOT_PROB_THRESHOLD,
                 AUDIO_DO_PROB_THRESHOLD, AUDIO_NOISE_PROB_THRESHOLD,
                 BLUETOOTH_MIN_DURATION, BLUETOOTH_SEND_INTERVAL,
                 LEVEL_STABLE_MS, LEVEL_MIN_DUR_MS,
                 MAIN_FUSION_INTERVAL, VIDEO_INFERENCE_INTERVAL, AUDIO_INFERENCE_INTERVAL,
-                isWebVideoMode ? "web" : "fixed")
+                isWebVideoMode ? "web" : "fixed",
+                // 视频输入：抽帧方式_几何（exact_crop = 修复后的离线模式；没有这一项的旧 run 是 keyframe + 整帧压扁）
+                (isWebVideoMode ? "web_" : "exact_") + FramePreprocessor.geometryName())
                 + FusionArbiter.paramsLine() + " " + AudioCue.paramsLine();
     }
 
@@ -1195,9 +1257,11 @@ public class VideoProcessActivity extends AppCompatActivity {
         pendingSeekRunnable = () -> {
             Log.i(TAG, "执行最终seek处理，时间点：" + currentMs);
 
-            // 清空帧缓存和 pcm 缓冲，避免读取到“前一个时间点”的旧数据
+            // 清空帧缓存和 pcm 缓冲，避免读取到“前一个时间点”的旧数据；seek 之前请求、还在路上的帧也作废
             synchronized (videoLock) {
                 frameWindow.clear();
+                frameTimeWindow.clear();
+                frameGeneration.incrementAndGet();
                 lastVideoInferenceTime = 0;
             }
 
@@ -1208,8 +1272,10 @@ public class VideoProcessActivity extends AppCompatActivity {
             // [融合仲裁] seek 后清空证据：seek 之前产出的结果一律不算
             resetFusionArbiter(true, 0);
 
-            // 重置提取器, 通知视频帧抽取器：从当前时间开始解码
-            videoFrameExtractor.seekTo(currentMs * 1000);
+            // 抽帧器下一次取帧时按当时的播放位置重新定位（从前一个关键帧解到目标帧）。抽帧器只能在抽帧线程里用
+            if (frameHandler != null) {
+                frameHandler.post(videoFrameExtractor::requestSeek);
+            }
             // decoder 负责重新 seek 解码
             audioDecoder.seekTo(currentMs);
             Log.d(TAG, "🎯 audioDecoder.seekTo() 调用，当前视频播放时间: " + currentMs);
@@ -1368,6 +1434,8 @@ public class VideoProcessActivity extends AppCompatActivity {
     private void handleWebVideoSeekComplete(long newPositionMs) {
         synchronized (videoLock) {
             frameWindow.clear();
+            frameTimeWindow.clear();
+            frameGeneration.incrementAndGet();
             lastVideoInferenceTime = 0;
         }
         synchronized (audioLock) {
@@ -1419,18 +1487,34 @@ public class VideoProcessActivity extends AppCompatActivity {
     }
 
     /**
-     * [WebVideo] 从 PlayerView 的 TextureView 直接读一帧。失败返回 null。
+     * [WebVideo] 从 PlayerView 的 TextureView 读一帧，处理成模型输入（160×160）。失败返回 null。只能在主线程调用。
+     *
+     * <p>2026-10-14 之前直接 getBitmap(160, 160)：整帧压扁成正方形，与训练（居中裁正方形）不一致。现在按 TextureView 的
+     * 宽高比截一张短边 448（= 2×224）的图，再交给 FramePreprocessor 居中裁剪、面积缩小。TextureView 在 PlayerView 里按视频
+     * 宽高比摆放（resize_mode=fit），所以截到的就是完整的视频画面。</p>
      */
     private Bitmap captureWebVideoFrameBitmap() {
         if (playerView == null) return null;
         View surfaceView = playerView.getVideoSurfaceView();
         if (!(surfaceView instanceof TextureView)) return null;
         TextureView tv = (TextureView) surfaceView;
-        if (!tv.isAvailable()) return null;
+        if (!tv.isAvailable() || tv.getWidth() <= 0 || tv.getHeight() <= 0) return null;
         try {
-            // 直接按模型输入尺寸读，省一次 createScaledBitmap
-            return tv.getBitmap(VideoClassifierHelper.INPUT_SIZE,
-                                VideoClassifierHelper.INPUT_SIZE);
+            int vw = tv.getWidth(), vh = tv.getHeight();
+            int sw, sh;
+            if (vw >= vh) {
+                sh = WEB_STAGE_SHORT_SIDE;
+                sw = Math.round(WEB_STAGE_SHORT_SIDE * (float) vw / vh);
+            } else {
+                sw = WEB_STAGE_SHORT_SIDE;
+                sh = Math.round(WEB_STAGE_SHORT_SIDE * (float) vh / vw);
+            }
+            if (webStageBitmap == null || webStageBitmap.getWidth() != sw || webStageBitmap.getHeight() != sh) {
+                webStageBitmap = Bitmap.createBitmap(sw, sh, Bitmap.Config.ARGB_8888);
+                webStagePixels = new int[sw * sh];
+            }
+            tv.getBitmap(webStageBitmap);
+            return VideoClassifierHelper.toModelBitmap(webStageBitmap, webStagePixels);
         } catch (Exception e) {
             Log.w(TAG, "[网页视频] TextureView 抽帧失败", e);
             return null;
@@ -1676,6 +1760,20 @@ public class VideoProcessActivity extends AppCompatActivity {
             Log.i(TAG, "[退出] 已发送停止信号(Noise)");
         }
 
+        // 抽帧器（MediaCodec + EGL）必须在抽帧线程里释放；quitSafely 会先跑完已经排进去的消息
+        if (frameThread != null) {
+            final VideoFrameExtractor extractor = videoFrameExtractor;
+            if (extractor != null) {
+                frameHandler.post(extractor::release);
+            }
+            frameThread.quitSafely();
+            try {
+                frameThread.join(1000);
+            } catch (InterruptedException e) {
+                Log.e(TAG, "等待抽帧线程结束时被中断", e);
+            }
+        }
+
         // 停止所有线程
         if (videoThread != null) {
             videoThread.quitSafely();
@@ -1704,11 +1802,7 @@ public class VideoProcessActivity extends AppCompatActivity {
             playStateHandler.removeCallbacks(playStateChecker);
         }
 
-        // 释放资源
-        if (videoFrameExtractor != null) {
-            videoFrameExtractor.release();
-        }
-
+        // 释放资源（videoFrameExtractor 已在上面交给抽帧线程释放）
         if (videoClassifier != null) {
             videoClassifier.close();
         }

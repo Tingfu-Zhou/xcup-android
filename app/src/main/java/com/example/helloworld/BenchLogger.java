@@ -135,6 +135,9 @@ public final class BenchLogger {
      * @param arbReason  FusionArbiter 本 tick 的输出原因（start_both / start_video / hold_audio / stop_neg …）
      * @param aCue       该音频结果的线索（{@link AudioCue}），与 aProbs 来自同一个快照；没有结果时 AudioCue.UNKNOWN
      * @param aCueFeat   该音频结果的 YAMNet 分组分数（{@link AudioCue#features}），拿不到时 null
+     * @param vPosMs     该视频结果窗口里最后一帧的时刻（离线模式是帧的 pts，网页模式是抓帧时的播放位置），没有结果时 -1
+     * @param vFramePos  该视频结果窗口里 12 帧各自的时刻（从旧到新），没有时 null。bench/tools/video_rescore.py 靠它离线
+     *                   还原模型输入（逐帧对上，不用从出结果时刻反推）
      */
     public void tick(long posMs, long wallMs,
                      String vAction, float vConf, long vAgeMs, float[] vProbs,
@@ -143,12 +146,13 @@ public final class BenchLogger {
                      int loudLevel, float loudConf, boolean loudValid, long loudAgeMs,
                      String gated, int finalFreq,
                      String bleState, int bleLevel, String arbReason,
-                     int aCue, float[] aCueFeat) {
+                     int aCue, float[] aCueFeat,
+                     long vPosMs, long[] vFramePos) {
         if (!enabled || failed) return;
         if (out == null && !open()) return;
 
         float[] vp = vProbs, ap = aProbs;
-        StringBuilder sb = new StringBuilder(360);
+        StringBuilder sb = new StringBuilder(480);
         sb.append(posMs).append(',').append(wallMs).append(',');
         sb.append(csv(vAction)).append(',').append(f6(vConf)).append(',').append(age(vAgeMs)).append(',');
         sb.append(p(vp, 0)).append(',').append(p(vp, 1)).append(',').append(p(vp, 2)).append(',');
@@ -173,6 +177,14 @@ public final class BenchLogger {
         for (int i = 0; i < AudioCue.N_FEATURES; i++) {
             sb.append(',');
             if (aCueFeat != null && i < aCueFeat.length) sb.append(f6(aCueFeat[i]));
+        }
+        // 视频窗口各帧的时刻，分号隔开（列内不能有逗号）
+        sb.append(',').append(vPosMs < 0 ? -1 : vPosMs).append(',');
+        if (vFramePos != null) {
+            for (int i = 0; i < vFramePos.length; i++) {
+                if (i > 0) sb.append(';');
+                sb.append(vFramePos[i]);
+            }
         }
 
         if (queue.offer(sb.toString())) {
@@ -267,7 +279,9 @@ public final class BenchLogger {
                     // a_cue：音频结果的线索（AudioCue.name，没有为空）；a_cue_*：YAMNet AudioSet 分数按含义分组求和
                     // （顺序同 AudioCue.FEATURE_COLS；metrics.py 自检会逐字比对这里的列名）
                     + "a_cue,a_cue_voc_core,a_cue_voc_ext,a_cue_speech,a_cue_speech_ext,"
-                    + "a_cue_music,a_cue_silence,a_cue_impact\n");
+                    + "a_cue_music,a_cue_silence,a_cue_impact,"
+                    // v_pos：视频窗口最后一帧的时刻；v_fpts：12 帧各自的时刻（分号隔开）。2026-10-14 起
+                    + "v_pos,v_fpts\n");
             out.flush();
             writerThread = new Thread(this::drain, "BenchLoggerWriter");
             writerThread.setDaemon(true);

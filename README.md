@@ -52,8 +52,9 @@ flowchart TB
 | `VideoProcessActivity.java` | 本地视频播放、音视频分析、结果融合和 BLE 控制 |
 | `OnlineAnalysisActivity.java` | 在线分析界面，复用本地模式的推理与融合逻辑 |
 | `OnlineAnalysisService.java` | 前台服务；负责屏幕捕获、系统音频采集、静音检测和数据回调 |
-| `VideoFrameExtractor.java` | 基于 MediaExtractor、MediaCodec 与 SurfaceTexture 解码视频帧 |
-| `EGLRenderer.java` | 使用 OpenGL/EGL 将 SurfaceTexture 内容读取为 Bitmap |
+| `VideoFrameExtractor.java` | 基于 MediaExtractor、MediaCodec 与 SurfaceTexture 顺序解码，按播放位置取当前帧（在单独的抽帧线程里运行） |
+| `EGLRenderer.java` | 使用 OpenGL/EGL 按 SurfaceTexture 的变换矩阵把画面中央的正方形画到离屏缓冲并读回 |
+| `FramePreprocessor.java` | 视频模型输入的预处理（居中裁剪、面积平均缩小到 160×160），与训练素材的处理一致，三种模式共用 |
 | `VideoClassifierHelper.java` | MobileNetV3Small TFLite 推理封装 |
 | `AudioDecoder.java` | 按播放进度解码、重采样音频并写入 PCM 环形缓冲区 |
 | `PcmCircularBuffer.java` | 管理本地与在线模式的 PCM 数据写入和窗口读取 |

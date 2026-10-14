@@ -554,7 +554,9 @@ RUN_COLS_NEEDED = ['pos_ms', 'wall_ms',
                    # 音频结果的线索（AudioCue：dialog / music / quiet / blind / vocal / impact / other，没有为空）和
                    # YAMNet AudioSet 分数按含义分组求和（全精度，fusion_lab.py 回放时用）。2026-10-11 起的 app 才有
                    'a_cue', 'a_cue_voc_core', 'a_cue_voc_ext', 'a_cue_speech', 'a_cue_speech_ext',
-                   'a_cue_music', 'a_cue_silence', 'a_cue_impact']
+                   'a_cue_music', 'a_cue_silence', 'a_cue_impact',
+                   # 视频窗口最后一帧的时刻和 12 帧各自的时刻（分号隔开），给 video_rescore.py 还原模型输入用。2026-10-14 起的 app 才有
+                   'v_pos', 'v_fpts']
 
 
 def _java_header():
@@ -603,7 +605,7 @@ def _write_run_csv(path, rows):
                         r['gated'], r['ble_level'],
                         r['ble_state'], r['ble_level'],
                         1 if r['sent'] else 0, r['sent_action'], r['sent_level'],
-                        -1, '', '', '', '', '', '', '', '', '', ''])
+                        -1, '', '', '', '', '', '', '', '', '', '', -1, ''])
 
 
 def selftest():

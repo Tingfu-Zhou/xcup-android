@@ -36,8 +36,8 @@ public class VideoClassifierHelper {
 
     /** 单次推理消费的帧数（3 秒 / 250ms）。 */
     public static final int NUM_FRAMES = 12;
-    /** 模型输入的高/宽。 */
-    public static final int INPUT_SIZE = 160;
+    /** 模型输入的高/宽（预处理见 FramePreprocessor）。 */
+    public static final int INPUT_SIZE = FramePreprocessor.MODEL_SIZE;
 
     private static final int CHANNELS = 3;
     private static final int NUM_CLASSES = 3;
@@ -115,9 +115,9 @@ public class VideoClassifierHelper {
                 Log.e(TAG, "第 " + t + " 帧无效");
                 return new Result(-1, 0f, new float[NUM_CLASSES]);
             }
-            // 保证为 160x160（在线模式抓屏分辨率不固定）
+            // 三种模式送进来的都应该已经是 160x160（toModelBitmap）；兜底也按训练的方式裁剪缩放，不再整帧压扁
             if (frame.getWidth() != INPUT_SIZE || frame.getHeight() != INPUT_SIZE) {
-                frame = Bitmap.createScaledBitmap(frame, INPUT_SIZE, INPUT_SIZE, true);
+                frame = toModelBitmap(frame, null);
             }
             frame.getPixels(pixels, 0, INPUT_SIZE, 0, 0, INPUT_SIZE, INPUT_SIZE);
             for (int p : pixels) {
@@ -155,6 +155,20 @@ public class VideoClassifierHelper {
                 tPrepEnd - tPrepStart, tInferEnd - tPrepEnd, Arrays.toString(probs)));
 
         return new Result(bestIndex, bestProb, probs);
+    }
+
+    /**
+     * 任意尺寸的画面 → 模型输入（160×160）：按 {@link FramePreprocessor} 居中裁正方形、面积平均缩小，与训练一致。
+     * 网页模式（TextureView 截的帧）和在线模式（截屏）用它；离线模式在 VideoFrameExtractor 里已经处理好了。
+     *
+     * @param scratch 可复用的像素缓冲（长度不够或为 null 时新建），避免每帧分配几 MB
+     */
+    public static Bitmap toModelBitmap(Bitmap src, int[] scratch) {
+        int w = src.getWidth(), h = src.getHeight();
+        int[] px = (scratch != null && scratch.length >= w * h) ? scratch : new int[w * h];
+        src.getPixels(px, 0, w, 0, 0, w, h);
+        int[] out = FramePreprocessor.toModelInput(px, w, h, FramePreprocessor.cropRect(w, h));
+        return Bitmap.createBitmap(out, INPUT_SIZE, INPUT_SIZE, Bitmap.Config.ARGB_8888);
     }
 
     public void close() {
