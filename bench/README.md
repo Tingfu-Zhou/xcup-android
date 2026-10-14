@@ -381,16 +381,6 @@ python3 bench/tools/video_rescore.py --selftest
 - 局限：训练素材经过 x264 重编码（crf 23、224×224），`train` 管线没有模拟；`--model` 只支持与现用模型同一结构的模型；
   网页模式（TextureView 截帧）没有对应的离线管线。
 
-**修完要做的**（不用 13 部全部重录）：
-1. 用 `rescore` 把旧 run 的视频结果换成修复后的（`--pipe exact_crop`，runs_initial 和 runs_test 都做）。音频没改，旧 run 里的音频列照样有效；
-   run 都是从头播到尾、没有 seek 和暂停，离线重算基本等价于用新包重录。差别：出结果的时刻沿用旧 run 的；像素有手机 GPU 与 PyAV/cv2
-   的细小差异（见上面“12 帧同一张图”窗口的 MAE）。
-2. 视频结果不再成串重复、也不再晚 0.5~1.3 秒，原来按“结果个数”计的证据含义变了：在重算出的 run 上按第 4 节重调视频阈值
-   （`VIDEO_DO` / `VIDEO_PLOT`，用 `metrics.py --diag`）和融合仲裁（`arbiter_lab.py lovo`），再和旧基线比。
-3. 真机验收：装新包，重录 2~3 部（GOP 长的 v08/v11 和 GOP 短的 v03 各一部，放进新目录如 `bench/runs_v3/`），
-   `video_rescore.py check --runs bench/runs_v3`：`exact_crop` 应该能逐帧复现（说明手机上跑的就是离线评估的那套），
-   `fusion_lab.py check` 照旧核对融合仲裁；再看这几部的端到端指标是否与离线重算的一致。
-
 ## 时间线
 
 - 2026-10-05：发现离线模式喂给音频模型的是半速音频（`AudioDecoder` 没按声道下混），用 `PcmResampler` 修复；之前录的 run 的音频结论作废。
@@ -414,4 +404,4 @@ python3 bench/tools/video_rescore.py --selftest
 - 2026-10-14：发现离线模式视频模型只看到关键帧（`VideoFrameExtractor` 用 `SEEK_TO_CLOSEST_SYNC` 取帧），以及三种模式都把整帧压扁
   （训练是居中裁剪）。app 修复：顺序解码取当前帧、抽帧挪到单独线程、`FramePreprocessor` 与训练一致（第 7 节）；评测 CSV 加
   `VIDEO_PIPE` 参数和 `v_pos`、`v_fpts` 列。新增 `video_rescore.py`（离线视频重算）和 `FramePreprocessorTest`。之前录的 run 的视频
-  结论（含融合仲裁的参数）都是在只看到关键帧的输入上得到的，要用新包重录、重调。
+  结论（含融合仲裁的参数）都是在只看到关键帧的输入上得到的。
