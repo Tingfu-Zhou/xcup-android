@@ -10,13 +10,15 @@ bench/
   gt/<id>.csv             人工真值（v01~v13）
   runs_initial/<id>_*.csv 真机 dump：app 1.2.5、融合仲裁 v1、现用音频分类头，7 部片（调参用的基线）
   runs_test/<id>_*.csv    同一个包录的新片 v08~v13（不参与调参，只做检验）
+  runs_v2/<id>_*.csv      v2 包（加音频线索）重录的 v03/v09/v11：验证过真机 v2 与离线回放逐 tick 一致，不进统一基准
+  runs_v3/<id>_*.csv      修复视频抽帧后的包录的 v08：验证过真机与离线重算的 exact_crop 一致（第 7 节），不进统一基准
   rescored/               audio_rescore.py 的输出：audio_old / test_audio_old = runs_initial / runs_test 用现用分类头离线重算
                           （与真机一致，另带 YAMNet 521 类分数 .yamnet.npz）；audio_new = 2026-10-09 评估过的新分类头（未采用）；
-                          video_<管线>_<runs 目录名>/ 是 video_rescore.py 的输出（不进 git 也行，随时能重算），
+                          video_<名字>_<runs 目录名>/ 是视频离线重算的结果（video_exact_crop_* 是统一基准的对照，第 5 节），
                           video_alignment.json 是 video_rescore.py check 定下的时间差
   videos/                 原始视频（不进 git；也可以放别处，用 --videos 指定）
   summary.csv             metrics.py --append 的汇总
-  baseline/               baseline.py 的报告（eval / compare 写的，要不要提交随意）
+  baseline/               baseline.py 的报告（eval / compare 写的；phone、exact_crop 是现在的基准，第 5 节）
   tools/
     labeler.html          真值标注器，双击即用，纯本地无上传
     metrics.py            单部片：指标、误判定位、单模态诊断
@@ -98,6 +100,7 @@ python3 bench/tools/metrics.py bench/gt/v01.csv bench/runs_initial/v01_base.csv 
 | 旧融合 | 87.8% | 34.4% | 3.7% | 24 次 | 37.1% | 74.2% / 68.6% | 13.5s | 0.1s |
 | 融合仲裁 | 92.6% | 18.7% | 3.0% | 4 次 | 26.5% | 43.6% / 55.8% | 3.2s | 2.6s |
 
+- 本节和第 6 节的数字都是旧视频管线（`phone`：只取关键帧 + 整帧压扁）上的；修复后的对照见第 5 节 baseline.py。
 - 规则和参数是看着这 7 部片定的（样本内）；留一视频选参后是 92.6% / 19.0% / 3.0%。真正的验收要靠新片子。
 - v2（加音频线索）在全部 13 部片上：准确率 93.3% → 94.2%，误转 16.0% → 13.9%，漏转 2.4% → 2.1%，误停 6 → 7 次（第 6 节）。
 - 误转 = 剧情时长里马达在转的比例，漏转 = 动作时长里马达没转的比例。"停止后还转 / 启动后没转"取自拼接样本（同一部片的
@@ -130,16 +133,18 @@ python3 bench/tools/metrics.py bench/gt/v01.csv bench/runs_initial/v01_base.csv 
 
 1. **拿到新模型的数据**
    - 音频模型：`audio_rescore.py rescore --classifier new.tflite` 在电脑上重算，输出目录直接给下面的工具用，不用上真机。
-   - 视频模型：`video_rescore.py rescore --model new.tflite --pipe exact_crop` 在电脑上重算（第 7 节）。目前只支持与现用模型
-     同一结构的模型（逐帧特征 → 时间平均 → 线性层，输入 [1,12,160,160,3]）；换了时序头要先扩展工具。
+   - 视频模型：`baseline.py rescore --model new.tflite --name <名字>` 在电脑上重算 13 部，再 `baseline.py compare exact_crop <名字>`
+     和现在的基准比（第 5 节）。目前只支持与现用模型同一结构的模型（逐帧特征 → 时间平均 → 线性层，输入 [1,12,160,160,3]）；
+     换了时序头、帧数、分辨率或训练时的裁剪方式，要先扩展 `video_rescore.py`（和 app 的 `FramePreprocessor`）。
    - 类别顺序（视频 `[plot, oral, sex]`、音频 `[sex, oral, noise]`）或类别数变了，要同时改两个 Activity 里的判定、`BenchLogger`
      的列和 bench 工具。
    - **别拿 bench 这几部片训练**，否则这里的数字就不再能代表新片子。
    - 新旧模型要在各自调好的参数下比：换了模型，概率分布就变了（阈值、`A_FLOOR` 等都要跟着变），只用现有参数比不公平。
-     rescore 时用 `--tag` 给每个模型起单独的目录，免得互相覆盖。
+     rescore 时给每个模型起单独的名字（音频 `--tag`、视频 `--name`），免得互相覆盖。
 2. **先定各路的阈值**：`metrics.py --diag` 看每一路的 AUC 和阈值扫描，定 `VIDEO_DO_PROB_THRESHOLD` / `VIDEO_PLOT_PROB_THRESHOLD` /
    `AUDIO_DO_PROB_THRESHOLD` / `AUDIO_NOISE_PROB_THRESHOLD`（`VideoProcessActivity` 和 `OnlineAnalysisActivity` 里各一份）。
    这些阈值在采集时就判定好了，改了要重录（音频也可以改 run 文件头里的 `AUDIO_DO` / `AUDIO_NOISE` 再 rescore）。
+   视频离线重算时按原 run 文件头的 `VIDEO_DO` / `VIDEO_PLOT`（0.65 / 0.60）判定，离线试别的视频阈值要先给工具加参数。
 3. **看融合仲裁哪里不行**：`arbiter_lab.py report` 和 `stress`，按最差的片子看，不只看平均：
 
    | 现象 | 先看这些参数（`FusionArbiter.java` 顶部） |
@@ -218,6 +223,31 @@ python3 bench/tools/baseline.py compare phone exact_crop new1       # 并排对�
 - 视频单独的指标（p_oral+p_sex 的 AUC、按现用阈值的准确率）逐 tick 算，与 `metrics.py --diag` 相同，另给 13 部合并。
 - 重算目录里的 `variant.json` 记下模型指纹，换了模型还写同一个名字会被拒绝（`--overwrite` 放行）。
 - 不含调参：给新模型调阈值和融合参数按第 4 节，最终比较时两边用同一套流程各自调好。
+
+**现在的基准**（2026-10-15，报告在 `bench/baseline/`；13 部片，app 现用的阈值和融合参数）：
+
+| 视频结果 | 代价 | 准确率 | 误转 | 漏转 | 误停 | seek 进特写 p90 / 没启动 | 视频 AUC 合并 / 最差片 | 视频准确率 |
+|---|---|---|---|---|---|---|---|---|
+| `phone`：手机原始 run（旧管线） | 1164 | 94.2% | 13.9% | 2.1% | 7 | 7.2s / 0 | 0.913 / 0.467（v07） | 83.0% |
+| `exact_crop`：修复后的管线 + 现用模型 | 1219 | 93.6% | 16.5% | 1.7% | 5 | 13.1s / 2 | 0.935 / 0.671（v07） | 87.9% |
+
+- 修复后视频本身更准：AUC 0.913 → 0.935，v07 0.467 → 0.671、v01 0.871 → 0.979，按现用阈值的准确率 83.0% → 87.9%；
+  v12、v13 的 AUC 略降（0.919 → 0.870、0.950 → 0.874）。
+- 端到端反而略差（代价 +55：v04 +63、v03 +47、v09 +28，v11 −98），seek 进特写/低声音时启动变慢（这类 seek 按当时的
+  模型结果挑，两边样本不同：104 / 64 个）：融合仲裁的参数是在旧输入（同一张关键帧的一串重复结果）上调出来的。
+- `exact_crop` 是以后换视频模型的对照，`phone` 只作历史参照（README 里其余的数字都是它的口径）。
+
+**换视频模型后怎么比**：
+
+```bash
+python3 bench/tools/baseline.py rescore --videos D:/xcup/videos --model D:/models/new1.tflite --name new1 --jobs 4
+python3 bench/tools/baseline.py compare exact_crop new1
+```
+
+1. 先看视频 AUC（13 部合并、逐片平均、最差片）：只反映模型本身，不受阈值和融合参数影响，是比模型的主要依据。
+2. 再看端到端：两边都用现有参数，只能看方向。
+3. 决定换不换之前，按第 4 节给新模型调阈值和融合参数，`exact_crop` 也用同一套流程调一次，两边各自调好再比。
+4. 前提：新模型没用这 13 部片的任何片段训练或挑模型；结构与现用模型相同（见第 4 节）。
 
 ### audio_rescore.py
 
@@ -325,7 +355,7 @@ seek 启动不变慢；基线留一代价 996）：
   seek 不变；`bstart` 误转降得一样多，但 seek 进特写的启动 p90 7.1→12.1 秒。
 - 6 部新片里都没有"动作时被背景音乐盖住"，`a1` 在 12 部片上完全不变，只在 v03 上起作用。
 
-全部 13 部（固定参数）：
+全部 13 部（固定参数，旧视频管线 `phone`）：
 
 | | 代价 | 准确率 | 误转 | 漏转 | 误停 | seek 进特写 p90 | 逐片代价变化 |
 |---|---|---|---|---|---|---|---|
@@ -389,8 +419,9 @@ python3 bench/tools/video_rescore.py --selftest
 - `check`：旧 run（没有 `v_fpts`）默认比 `keyframe_legacy`，从出结果时刻往前推 12 帧（每 250ms 一帧），扫“最后一帧的取帧目标比出结果
   早 Δ”（0~3000ms；旧版因为解码器积压，Δ 在 0.5~1.3 秒，最佳值落在扫描边上会报警）；新 run 默认比参数行 `VIDEO_PIPE` 那条，按 `v_fpts`
   逐帧取（只扫 PyAV 与手机时间戳之间 ±2 帧的常数差）。
-  2026-10-14 runs_test 实测（Δ 只扫到 600ms 时）：6 部片 `keyframe_legacy` 的 MAE 0.007~0.021、判定一致 95.5~98.6%，“12 帧同一张图”
-  的窗口 MAE 0.004~0.017，确认旧版只取到关键帧。
+  2026-10-15 实测：13 部旧 run 的 `keyframe_legacy` 全部复现（MAE 0.003~0.016，Δ 0.6~1.4 秒），确认旧版只取到关键帧、而且滞后。
+  真机验收（`runs_v3/v08_check.csv`，修复后的包把 v08 整部播完）：`exact_crop` MAE 0.0024；视频结果每分钟 95 个（与旧版相同），
+  窗口里 12 帧全都不同，出结果比最后一帧晚中位 161ms（rescore 按 200ms 算）；`fusion_lab.py check` 逐 tick 100% 一致。
   打出 MAE（三类概率平均绝对差）、分组判定一致率，以及“12 帧全是同一张图”的窗口单独的 MAE（不受时间差影响，最能说明像素管线对不对）。
   定下的 Δ 写进 `bench/rescored/video_alignment.json`，`rescore` 直接用。`--pipes keyframe_legacy,exact_legacy` 可以加对照。
   `--matrix bt601|bt709` 试 YUV→RGB 矩阵（默认 auto：码流标了按标的，没标时高清按 BT.709，同 Android）。
@@ -425,3 +456,5 @@ python3 bench/tools/video_rescore.py --selftest
   （训练是居中裁剪）。app 修复：顺序解码取当前帧、抽帧挪到单独线程、`FramePreprocessor` 与训练一致（第 7 节）；评测 CSV 加
   `VIDEO_PIPE` 参数和 `v_pos`、`v_fpts` 列。新增 `video_rescore.py`（离线视频重算）和 `FramePreprocessorTest`。之前录的 run 的视频
   结论（含融合仲裁的参数）都是在只看到关键帧的输入上得到的。
+- 2026-10-15：统一评测基准 `baseline.py`（第 5 节）：13 部片和录像、音频线索、融合规则、代价固定，只换视频结果。13 部按修复后的
+  管线离线重算（`rescored/video_exact_crop_*`）：视频 AUC 0.913 → 0.935，现有参数下端到端代价 1164 → 1219。真机验收通过（`runs_v3`）。

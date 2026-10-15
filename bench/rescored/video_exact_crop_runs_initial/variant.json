@@ -1,0 +1,13 @@
+{
+ "created": "2026-10-15",
+ "model": {
+  "file": "mobilenetv3small_tap_3class_float32.tflite",
+  "path": "app/src/main/assets/mobilenetv3small_tap_3class_float32.tflite",
+  "sha1": "93851823e4a4",
+  "size": 4200080
+ },
+ "name": "exact_crop",
+ "note": "重算时没有生成，2026-10-15 补写：文件头记的模型就是 app 里这个文件（之后没改过）",
+ "pipe": "exact_crop",
+ "tool": "ab1bc84"
+}
