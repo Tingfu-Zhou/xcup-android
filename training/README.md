@@ -29,6 +29,26 @@ bench 端新增：`bench/tools/frame_diag.py`（逐帧诊断：窗口长度、�
 训练用的模型把 12 帧合成一批过 backbone（比 TimeDistributed 展开 12 份快），导出时再搭成和现用模型一模一样的
 TimeDistributed 结构（共享权重）；BN 始终冻结，两者数值相同（导出核对会查）。
 
+## 在哪个系统里跑
+
+| 步骤 | 在哪跑 |
+|---|---|
+| 0~2、4 的训练（`data_check.py scan/stats`、`train_video.py`） | Ubuntu（训练用的 venv 和 GPU 在那边，素材在 `~/ml/movinet/movinet_clips`） |
+| 3 的 bench（`baseline.py`、`frame_diag.py`、`retune.py`）和 `data_check.py leak` | 哪边都行，只要能读到 13 部原片和导出的 `.tflite` |
+
+13 部原片不用挪，`--videos` 指向它们现在的位置就行；按 `bench/gt/vNN.csv` 文件头的 `file_name`（`视频1.mp4` ~ `视频13.mp4`）
+找，文件名不同就用 `--pair v07=<路径>` 逐个指定。
+
+- Ubuntu 是 WSL2（Ubuntu 里 `uname -r` 带 `microsoft`）：Windows 的 D 盘就是 `/mnt/d`，全部在 Ubuntu 里做最省事，
+  `--videos "/mnt/d/视频/测试视频"`。bench 要多装一个包：`pip install av`；`data_check.py` 的自检和 `leak` 要 `sudo apt install ffmpeg`。
+- Ubuntu 是双系统：在 Ubuntu 的文件管理器里点一下 Windows 的分区就会挂到 `/media/<用户名>/<分区名>/`，只读也够用；
+  或者 bench 回到 Windows 的 PowerShell 里跑（下一条）。
+- 在 Windows PowerShell 里跑 bench：用 Windows 上的仓库（同样切到这个分支），`python3` 换成 `python`，路径用 Windows 的写法，例如
+  `python bench\tools\baseline.py rescore --videos "D:\视频\测试视频" --model <e1a.tflite 的路径> --name e1a --jobs 4`。
+  依赖：`pip install numpy av ai-edge-litert opencv-python-headless`。WSL 里训练出的模型在 Windows 下的路径是
+  `\\wsl$\Ubuntu\home\<用户名>\ml\movinet\runs\e1a\e1a.tflite`。
+- 第一次用某处的原片之前，先 `baseline.py check --videos <原片目录>`：确认 13 部都找得到、文件大小和录 run 时一样、离线能复现手机。
+
 ## 0. 准备（训练机，一次）
 
 ```bash
