@@ -37,3 +37,7 @@ bench/videos/
 bench/cache/
 __pycache__/
 *.pyc
+
+# === 视频模型训练输出（training/train_video.py；权重不进仓库）===
+/runs/
+*.weights.h5

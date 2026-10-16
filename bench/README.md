@@ -29,6 +29,8 @@ bench/
     cue_lab.py            YAMNet 线索实验（第 6 节）：线索统计、误判归因、压力场景、留一视频选规则（app 用了其中的 a1bvid）
     video_rescore.py      视频离线重算（第 7 节）：换抽帧方式 / 预处理 / 视频模型不用上真机；复现真机的 v_p_*
     baseline.py           统一评测基准：换视频模型 / 视频管线时只换视频结果，13 部片按同一口径比（check / rescore / eval / compare）
+    frame_diag.py         视频模型的逐帧诊断：窗口长度 / 聚合方式的 AUC、置信度分布、成段的高置信度错误，几个变体并排
+    retune.py             给一个视频变体留一视频重调视频阈值和与视频置信度有关的融合参数（label smoothing 之类改了概率分布时用）
     test_labeler.js       标注器测试：node bench/tools/test_labeler.js
     yamnet_class_map.csv  YAMNet 的 AudioSet 521 类名（来自 tensorflow/models，Apache-2.0）
 ```
@@ -245,9 +247,43 @@ python3 bench/tools/baseline.py compare exact_crop new1
 ```
 
 1. 先看视频 AUC（13 部合并、逐片平均、最差片）：只反映模型本身，不受阈值和融合参数影响，是比模型的主要依据。
+   `python3 bench/tools/frame_diag.py --name exact_crop --name new1` 再看错在哪：成段的高置信度错误、置信度分布、逐个窗口判错 → 判对多少秒。
 2. 再看端到端：两边都用现有参数，只能看方向。
 3. 决定换不换之前，按第 4 节给新模型调阈值和融合参数，`exact_crop` 也用同一套流程调一次，两边各自调好再比。
+   只是视频的概率分布变了（例如 label smoothing）时，`python3 bench/tools/retune.py compare exact_crop new1` 就够：
+   两边各自留一视频重调 `VIDEO_DO` / `VIDEO_PLOT` / `ARB_V_FLOOR` / `ARB_BV_CONF`，再按验收线比。
 4. 前提：新模型没用这 13 部片的任何片段训练或挑模型；结构与现用模型相同（见第 4 节）。
+   视频模型的训练见 `training/README.md`（`train_video.py` 导出的 tflite 与现用模型同结构，可以直接 rescore）。
+
+### frame_diag.py（视频模型的逐帧诊断，2026-10-16）
+
+```bash
+python3 bench/tools/frame_diag.py --name exact_crop                 # 一个变体
+python3 bench/tools/frame_diag.py --name exact_crop,e1a,e1b         # 并排，第一个是参照
+python3 bench/tools/frame_diag.py --selftest
+```
+
+- 读 rescore 写的逐帧 logit（`<run>.vframes.npz`）和每个结果的 12 帧时刻（`v_fpts`），按视频结果（约每 0.6 秒一个）算；
+  标签取出结果那一刻的真值，other_adult 不计。`phone` 没有逐帧 logit，不支持。
+- 报告：窗口长度（单帧 / 3 秒 / 6 秒 / 12 秒）和聚合方式（logit 平均 / 概率平均 / 中位数 / 投票）的 AUC；置信度分档的错误率；
+  成段的高置信度错误（以 ≥0.9 判错的结果连成 ≥8 秒的段，中间夹着的其它结果累计 ≤3 秒）；逐片 AUC 和按 app 阈值的误判；
+  并排时另给逐片 AUC 变好 / 变差几部、最差片、逐个窗口配对（判错 → 判对、判对 → 判错各多少秒）、两半片子各自的合并 AUC。
+- `exact_crop` 的结果（`bench/baseline/frame_diag_exact_crop.txt`）：单帧 / 3 秒 / 12 秒 AUC 0.924 / 0.935 / 0.942；置信度 ≥0.99
+  的窗口占 65%，其中 6.2% 判错，占全部错误的 31%；成段错误 19 段，误转 180 秒、漏转 310 秒（各占视频全部误转 / 漏转的一半多）。
+
+### retune.py（重调视频阈值，2026-10-16）
+
+```bash
+python3 bench/tools/retune.py run exact_crop [--grid video|conf]    # 现用参数 vs 留一视频选参 vs 样本内
+python3 bench/tools/retune.py compare exact_crop e1c                # 两边各自留一选参后按验收线比
+python3 bench/tools/retune.py --selftest
+```
+
+- 只调与视频置信度有关的 4 个：`VIDEO_DO`、`VIDEO_PLOT`（视频判定阈值）、`ARB_V_FLOOR`（视频强转）、`ARB_BV_CONF`（对白否决）；
+  `--grid video` 只调前两个（12 组），默认 `conf` 四个一起（108 组）。视频判定按 run 里的 `v_p_*` 用新阈值重判。
+- 留一视频选参的约束同 `cue_lab.py lovo`（训练片误停最多 +1、漏转不升、seek 启动不变慢），验收线同第 6 节。
+- `exact_crop`（`bench/baseline/retune_exact_crop_conf.txt`）：现用 1219，留一选参 1219，样本内 1198 —— 阈值已在平台上，
+  重调只会过拟合，与 2026-10-15 的结论相同。
 
 ### audio_rescore.py
 
@@ -281,6 +317,8 @@ python3 bench/tools/audio_rescore.py --selftest
 python3 bench/tools/cue_lab.py --selftest      # 开关全关时与 v1 逐 tick 一致、对拍数据、线索接上的比例
 python3 bench/tools/video_rescore.py --selftest  # 预处理对拍数据、与 cv2.INTER_AREA 一致、合成视频上的取帧与对齐
 python3 bench/tools/baseline.py --selftest       # phone 与第 6 节一致、重算格式读对、模型指纹、check / rescore 的包装
+python3 bench/tools/frame_diag.py --selftest     # 合成数据上的 AUC / 成段错误 / 配对；exact_crop 的逐帧 logit 与 CSV 对上
+python3 bench/tools/retune.py --selftest         # 现用参数的回放与 baseline.py 相同；exact_crop 只调视频阈值的留一结果
 node bench/tools/test_labeler.js
 ```
 
@@ -458,3 +496,6 @@ python3 bench/tools/video_rescore.py --selftest
   结论（含融合仲裁的参数）都是在只看到关键帧的输入上得到的。
 - 2026-10-15：统一评测基准 `baseline.py`（第 5 节）：13 部片和录像、音频线索、融合规则、代价固定，只换视频结果。13 部按修复后的
   管线离线重算（`rescored/video_exact_crop_*`）：视频 AUC 0.913 → 0.935，现有参数下端到端代价 1164 → 1219。真机验收通过（`runs_v3`）。
+- 2026-10-16：视频模型 P1（训练方法）的工具：`training/`（素材检查、新的训练脚本 `train_video.py`，见 `training/README.md`），
+  bench 端 `frame_diag.py`（逐帧诊断）和 `retune.py`（留一视频重调视频阈值）。`exact_crop` 的参照报告在 `bench/baseline/`
+  （`frame_diag_exact_crop.txt`、`retune_exact_crop_conf.txt`）。
