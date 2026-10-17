@@ -238,10 +238,12 @@ def export_and_check(net, out_dir, name, va, n_clips, log):
     idx = U.balanced_pick(va, n_clips, seed=1)
     clips = [U.read_clip(p) for p in va.paths[idx]]
     chk = U.check_tflite(m_exp, tfl, clips)
-    log('  %s Keras / TFLite 一致性（%d 个真实验证片段）：概率最大差 %.1e，bench 的逐帧 logit 算法重算差 %.1e，'
+    log('  %s Keras（CPU float32）/ TFLite 一致性（%d 个真实验证片段）：概率最大差 %.1e，bench 的逐帧 logit 算法重算差 %.1e，'
         'argmax 一致 %.0f%%，app 判定一致 %.0f%%' % ('✓' if chk['ok'] else '✗', chk['n'], chk['max_diff'],
                                                    chk['bench_diff'], 100 * chk['argmax_agree'],
                                                    100 * chk['do_agree']))
+    if 'gpu_diff' in chk:
+        log('    （GPU 上的 Keras 与 TFLite 差 %.1e：GPU 默认用 TF32 算卷积，精度低，只作参考，不参与判断）' % chk['gpu_diff'])
     res = dict(tflite=tfl, structure=st, parity=chk)
     with io.open(os.path.join(out_dir, 'export_check.json'), 'w', encoding='utf-8') as fh:
         json.dump(res, fh, ensure_ascii=False, indent=1, default=str)
@@ -363,10 +365,13 @@ def main(argv=None):
             continue
         vm = U.ValMetrics(m_eval, s, U.eval_dataset(s, U.EVAL_FRAMES, a.val_batch, a.image_size, a.workers),
                           prefix=split, log=log)
-        m, _, _ = vm.evaluate()
+        m, probs, ok = vm.evaluate()
+        worst = U.worst_films(probs[ok], s.labels[ok], s.film_keys()[ok], 10)
+        m['worst_films'] = worst
         summary[split] = m
         log('[%s] %s' % (split, U.fmt_metrics(m, split)))
         log('       混淆矩阵（行 = 真值 %s，列 = 预测）：%s' % ('/'.join(U.CLASS_NAMES), m['cm']))
+        log(U.fmt_worst(worst, '%s 里最差的 10 部' % split))
 
     # ---------------------------------------------------------------- 导出
     summary['export'] = export_and_check(net, a.out_dir, a.name, va, a.export_check_clips, log)

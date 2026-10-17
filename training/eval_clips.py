@@ -7,6 +7,8 @@ training/eval_clips.py — 在训练素材的某个 split 上评测 12 帧视频
 app 现用的模型也评一遍。注意：现用模型当初是按这份 val 集选的 checkpoint，它在 val 上的数字偏乐观，比 test。
 这些数字只是训练素材上的参考，比模型以 bench 的 13 部片为准（baseline.py / frame_diag.py）。
 
+另外按片子列出准确率最低的几部（--worst，默认 10）：整部几乎全错的，先人工看一眼是不是标错、混进了别的内容。
+
 用法（仓库根目录）
   python3 training/eval_clips.py --data_dir ~/ml/movinet/movinet_clips --split test \\
       --model app/src/main/assets/mobilenetv3small_tap_3class_float32.tflite --model runs/e1a/e1a.tflite
@@ -57,6 +59,7 @@ def main(argv=None):
     ap.add_argument('--max_clips', type=int, help='每类最多评多少个片段（快速看一眼用）')
     ap.add_argument('--workers', type=int, default=max(1, min(8, (os.cpu_count() or 2) - 1)))
     ap.add_argument('--threads', type=int, default=4, help='TFLite 线程数')
+    ap.add_argument('--worst', type=int, default=10, help='每个模型列出准确率最低的几部片（默认 10，0 = 不列）')
     ap.add_argument('--out', help='结果另存为 JSON')
     a = ap.parse_args(argv)
     data_dir = os.path.abspath(os.path.expanduser(a.data_dir))
@@ -85,6 +88,9 @@ def main(argv=None):
         print('\n%s（%.0f 秒）\n  %s' % (path, time.time() - t0, U.fmt_metrics(m, a.split)))
         print('  混淆矩阵（行 = 真值 %s，列 = 预测）：%s%s' % ('/'.join(U.CLASS_NAMES), m['cm'],
                                                     '  ⚠ %d 个片段读不出' % m['n_bad'] if m['n_bad'] else ''))
+        if a.worst:
+            m['worst_films'] = U.worst_films(probs[ok], s.labels[ok], keys[ok], a.worst)
+            print(U.fmt_worst(m['worst_films'], '%s 里最差的 %d 部' % (a.split, a.worst)))
     if len(results) > 1:
         print('\n══ 并排（%s，%d 个片段）══' % (a.split, results[0]['n']))
         rows = [('AUC(p_do)', 'auc_do', '%.4f'), ('准确率', 'acc', 'pct'), ('按片子平均的准确率', 'film_acc', 'pct'),

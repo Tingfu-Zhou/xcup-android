@@ -78,7 +78,8 @@ python3 training/data_check.py leak  --data_dir $D --videos <13 部原片目录>
 - `scan`：顺序解码每个片段。打不开、读不出帧、少于 30 帧（12fps 的 3 秒应为 36 帧）的记进 `bad_clips.txt`，
   `train_video.py` 自动剔除；几乎全黑的只报不剔（剧情里的黑场是正常素材）。
 - `stats`：每个 split / 类别有多少片段、多少部源视频、片段最多的几部占多少。同一个源视频名出现在两个 split 里会报警
-  （train/val/test 应按片子划分），人工确认一下是不是同一部片。
+  （train/val/test 应按片子划分），人工确认一下是不是同一部片。同一部片常被切成几段、文件名带时间（`SDDE-697-00.10.47.97`、
+  `SDDE-697-00.30.55.17`），所以还会按番号（从文件名里猜的）归并再查一遍跨 split 的，并数一下同一番号既有剧情又有动作的有几部。
 - `leak`（方案"开始前确认"的第 2 条）：测试片每 0.25 秒取一帧算画面指纹，和每个训练片段的 3 个指纹比，同一个源视频
   ≥3 个片段对上同一部测试片就报"疑似混入"。按 `bench/gt/vNN.csv` 文件头的 `file_name` 在 `--videos` 里找原片，名字对不上用
   `--pair v07=/path/视频7.mp4`。原片不在训练机上时，把 `$D/clip_index.csv` 拷到原片那台电脑，放进一个空目录当 `--data_dir` 就能查。
@@ -95,11 +96,16 @@ python3 training/train_video.py --preset e1a --data_dir $D --out_dir $R/e1a
   样本数与旧脚本相同（训练片段数 ÷ batch）。第一个 epoch 结束会打出用时，按它估总时间（早停前最多 30 个 epoch）。
 - 每个 epoch 结束打一行验证指标：`AUC(p_do)`、准确率、按片子平均的准确率（最差那部）、loss、按 app 阈值的误判率、置信度 ≥0.99 的占比。
   出现 `[读帧失败，跳过]` 说明有 scan 没查出来的坏片段，把它加进 `bad_clips.txt`。
-- 结束时：在 val / test（12 帧）上的最终指标，导出 `$R/e1a/e1a.tflite`，最后两行导出核对都要是 ✓。
+- 结束时：在 val / test（12 帧）上的最终指标和各自最差的 10 部片（整部几乎全错的先人工看一眼是不是标错），导出
+  `$R/e1a/e1a.tflite`，最后两行导出核对都要是 ✓。
+- 导出核对拿 CPU 上的 Keras（float32）当参照。GPU 上 RTX 30/40 系默认用 TF32 算卷积（只有约 3 位有效数字），GPU 上的 Keras 和
+  TFLite 能差到 1e-2，这一行只作参考。2026-10-17 之前的版本拿 GPU 结果当参照，会误报 ✗：`git pull` 后
+  `--export_only $R/e1a` 重新核对（几分钟，不用重训）。
 - 输出：`train.log`、`config.json`、`train_stage{1,2}_log.csv`、`best_stage{1,2}.weights.h5`、`e1a.tflite`、`e1a.keras`、`summary.json`。
   中断了重跑即可；只想重新导出用 `--export_only $R/e1a`。
 - 可选参照：`python3 training/eval_clips.py --data_dir $D --split test --model <仓库>/app/src/main/assets/mobilenetv3small_tap_3class_float32.tflite --model $R/e1a/e1a.tflite`
-  （现用模型当初按这份 val 集选的 checkpoint，所以比 test）。这些只是训练素材上的数字，比模型以 13 部片为准。
+  （现用模型当初按这份 val 集选的 checkpoint，所以比 test；`--split val` 也能跑，看两个模型是不是错在同几部片上）。
+  每个模型后面列出最差的 10 部片（`--worst N` 改个数）。这些只是训练素材上的数字，比模型以 13 部片为准。
 
 ## 3. 在 13 部测试片上比（放原片的电脑上，仓库根目录）
 
@@ -150,7 +156,8 @@ python3 bench/tools/retune.py compare exact_crop e1c          # 只有 E1c 需�
 
 ## 6. 做完发回来什么
 
-每个实验：`$R/<名字>/summary.json`、`train.log`、`train_stage1_log.csv`、`train_stage2_log.csv`，以及 bench 的报告
+每个实验：`$R/<名字>/summary.json`、`train.log`、`train_stage1_log.csv`、`train_stage2_log.csv`（可以像 E1a 那样拷进
+`training/results/<名字>/` 提交，权重和 tflite 不提交），以及 bench 的报告
 `bench/baseline/compare_*.txt`、`frame_diag_*.txt`（E1c 还有 `retune_compare_*.txt`）。也可以把
 `bench/rescored/video_<名字>_runs_initial|_runs_test`（每个变体约 7 MB）和 `bench/baseline/` 的报告提交到这个分支，
 这样逐帧诊断、重调都能直接复现。

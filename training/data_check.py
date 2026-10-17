@@ -106,6 +106,24 @@ def film_of(path):
     return parse_clip_name(path)[0]
 
 
+# 番号（猜的）：同一部片常被切成几段、文件名带时间（如 SDDE-697-00.10.47.97 和 SDDE-697-00.30.55.17），按源视频名
+# 查不出它们是同一部片。先去掉网站前缀（xxx.com@、_ThZu.Cc_ 这类），再按常见番号格式取。只用来报警、供人工核对
+_SITE_RE = re.compile(r'^.*@|[A-Za-z0-9_-]+\.(?:com|cc|net|org|me|tv|xyz|top|info|club|vip|la|in|cn)(?=[_@\-\s.]|$)', re.I)
+_ID_RES = ((re.compile(r'FC2[-_ ]?(?:PPV[-_ ]?)?(\d{5,8})(?!\d)', re.I), 'FC2-%s'),
+           (re.compile(r'(?<![A-Za-z0-9])([A-Za-z]{2,6})-(\d{2,5})(?!\d)'), '%s-%s'),
+           (re.compile(r'(?<!\d)(\d{6})[-_](\d{2,3})(?!\d)'), '%s-%s'))
+
+
+def film_id(name):
+    """源视频名 → 番号（大写，如 SDDE-697、FC2-2896873、101918-776）；认不出返回 None。"""
+    s = _SITE_RE.sub(' ', name)
+    for rx, fmt in _ID_RES:
+        m = rx.search(s)
+        if m:
+            return fmt % tuple(g.upper() for g in m.groups())
+    return None
+
+
 def rel_key(path, data_dir):
     """bad_clips.txt / clip_index.csv 里的路径：相对素材目录、用 / 分隔（换机器、换系统也对得上）。"""
     return os.path.relpath(os.path.abspath(path), os.path.abspath(data_dir)).replace('\\', '/')
@@ -388,12 +406,39 @@ def stats(data_dir, quiet=False):
             say('    … 其余 %d 个' % (len(overlap) - 15))
     else:
         say('  ✓ 没有源视频名同时出现在两个 split 里')
+    # 按番号归并再查一遍（同一部片的不同段文件名不同）
+    ids, noid = defaultdict(Counter), set()
+    for (sp, c), cnt in films.items():
+        for f, k in cnt.items():
+            fid = film_id(f)
+            if fid is None:
+                noid.add(f)
+            else:
+                ids[fid][(sp, c)] += k
+    n_named = len(set(f for cnt in films.values() for f in cnt)) - len(noid)
+    say('  按番号归并（从源视频名里猜的，只供人工核对）：%d 个源视频名归成 %d 个番号，%d 个认不出番号' % (
+        n_named, len(ids), len(noid)))
+    cross = sorted(((fid, cc) for fid, cc in ids.items() if len(set(sp for sp, _ in cc)) > 1),
+                   key=lambda x: (-sum(x[1].values()), x[0]))
+    if cross:
+        say('  ⚠ %d 个番号同时出现在几个 split 里（同一部片的不同段分到了 train 和 val / test）：' % len(cross))
+        for fid, cc in cross[:20]:
+            parts = sorted(cc.items(), key=lambda kv: (SPLITS.index(kv[0][0]), CLASS_NAMES.index(kv[0][1])
+                                                       if kv[0][1] in CLASS_NAMES else 9))
+            say('    %-14s %s' % (fid, '，'.join('%s/%s %d 个' % (sp, c, k) for (sp, c), k in parts)))
+        if len(cross) > 20:
+            say('    … 其余 %d 个' % (len(cross) - 20))
+    elif ids:
+        say('  ✓ 按番号归并后也没有跨 split 的')
+    both = sum(1 for cc in ids.values() if 'normal_plot' in set(c for _, c in cc) and len(set(c for _, c in cc)) > 1)
+    if ids:
+        say('  同一番号既有剧情又有动作片段的：%d 个（同一部片两类都有，能削弱"认片子"）' % both)
     if odd:
         say('  ⚠ %d 个片段的文件名不是 <源视频名>_s<起点>_<类别>，按整个文件名当源视频：%s'
             % (len(odd), ', '.join(odd[:3])))
     if n_bad:
         say('  （另有 %d 个坏片段，见 %s）' % (n_bad, BAD_LIST))
-    return dict(films=films, overlap=overlap, bad=n_bad)
+    return dict(films=films, overlap=overlap, bad=n_bad, ids=ids, cross_ids=cross)
 
 
 # ======================================================================== leak
@@ -590,6 +635,10 @@ def selftest():
           and parse_clip_name('x_s1.5_sex.mp4') == ('x', 1.5, 'sex')
           and parse_clip_name('weird name.mp4') == ('weird name', None, None),
           '文件名解析：源视频名带下划线 / _s 也能取对；不合规的整个文件名当源视频')
+    got = [film_id(x) for x in ('hhd800.com@START-529', 'hhd800.com@SONE-850-', 'FC2-2896873-00.13.27',
+                                'SDDE-697-00.10.47.97', '_ThZu.Cc_101918-776-', 'FC2-PPV-1234567', 'filmA', 'abc_123')]
+    check(got == ['START-529', 'SONE-850', 'FC2-2896873', 'SDDE-697', '101918-776', 'FC2-1234567', None, None],
+          '番号：去掉网站前缀和时间，取常见番号格式（%s）' % got)
     a = np.array([0, 0xFFFFFFFFFFFFFFFF, 0x0F], np.uint64)
     check(list(popcount64(a)) == [0, 64, 4], 'popcount64')
     tmp = tempfile.mkdtemp(prefix='data_check_')
