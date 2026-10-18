@@ -13,8 +13,8 @@ bench/tools/baseline.py — 统一评测基准：比视频模型 / 视频管线�
   代价         误转秒数 × 1 + 漏转秒数 × 1 + 动作中误停次数 × 3；other_adult 不计入
   视频结果     按"变体"的名字找：
                  phone       手机原始 run，旧视频管线（只取关键帧 + 整帧压扁）。README 里的数字都是这个口径
-                 exact_crop  video_rescore.py 按修复后的 app 离线重算，现用视频模型：以后换模型都和它比
-                 <名字>      rescore --model <新模型> --name <名字> 重算的
+                 exact_crop  video_rescore.py 按修复后的 app 离线重算，P1 之前的视频模型（录 run 的那个）：以后换模型都和它比
+                 <名字>      rescore --model <新模型> --name <名字> 重算的，如 e1d（P1 定的模型，2026-10-18 起 app 用它）
                phone 读 bench/runs_initial、bench/runs_test；其余读 bench/rescored/video_<名字>_runs_initial、_runs_test
   指标         端到端：代价、准确率、误转、漏转、误停、seek 进动作段多久启动（与 cue_lab.py eval 的"新："一段相同）；
                视频单独：p_oral+p_sex 的判别力 AUC（不受阈值影响，最能说明模型本身）和按现用阈值判定的准确率，
@@ -22,8 +22,8 @@ bench/tools/baseline.py — 统一评测基准：比视频模型 / 视频管线�
 
 用法（仓库根目录；Windows 把 python3 换成 python）
   python3 bench/tools/baseline.py eval phone                          # 旧管线，数字与 README 第 6 节一致
-  python3 bench/tools/baseline.py check   --videos D:/xcup/videos     # 第一次 rescore 之前：核对原片，离线能复现手机
-  python3 bench/tools/baseline.py rescore --videos D:/xcup/videos     # 修复后的管线 + 现用模型 → 变体 exact_crop
+  python3 bench/tools/baseline.py check   --videos D:/xcup/videos --model old.tflite   # 换一处原片后先核对：离线能复现手机
+  python3 bench/tools/baseline.py rescore --videos D:/xcup/videos     # 修复后的管线 + app 里的模型 → 变体 exact_crop（10-15 做的）
   python3 bench/tools/baseline.py eval exact_crop
   python3 bench/tools/baseline.py compare phone exact_crop            # 并排对比，括号里是相对第一个的变化
   python3 bench/tools/baseline.py rescore --videos D:/xcup/videos --model D:/models/new1.tflite --name new1
@@ -31,6 +31,7 @@ bench/tools/baseline.py — 统一评测基准：比视频模型 / 视频管线�
   python3 bench/tools/baseline.py --selftest
 check / rescore 包装 video_rescore.py，13 部（两个 runs 目录）一次做完；--jobs N 几部片并行，--only v01,v04 只做几部，
 原片名字对不上时 --pair v01=D:/xcup/视频1.mp4（可多次）。
+check 要用录 run 时的模型（= exact_crop 用的、P1 之前的模型）；app 换成 e1d 以后要用 --model 指向它（从 git 历史取，见 README 第 5 节）。
 eval / compare 的报告同时写进 bench/baseline/（UTF-8 文本；eval 另写 JSON），不用自己重定向。
 重算目录里的 variant.json 记下模型文件的指纹：换了模型还往同一个名字里写会被拒绝（防止 exact_crop 被悄悄换掉）。
 
@@ -483,14 +484,30 @@ def parse_check(lines):
     return res, flags
 
 
+def check_model(a):
+    """check 用的模型 → (路径, 提醒)。runs_initial / runs_test 是 exact_crop 用的那个模型录的；不是它就复现不了，先提醒。"""
+    model = os.path.abspath(a.model) if a.model else V.DEFAULT_MODEL
+    if not os.path.exists(model):
+        sys.exit('找不到模型文件：%s' % model)
+    want = ((read_manifest(variant_dirs(DEFAULT_PIPE)[0]) or {}).get('model') or {}).get('sha1')
+    got = model_info(model)['sha1']
+    if want and got != want:
+        return model, ('⚠ %s（sha1 %s）不是录这批 run 的模型（sha1 %s，%s 用的就是它），check 会对不上：'
+                       '把那个模型从 git 历史取出来，用 --model 指定（bench/README.md 第 5 节）' % (rel(model), got, want, DEFAULT_PIPE))
+    return model, None
+
+
 def cmd_check(a):
+    model, warn = check_model(a)
+    if warn:
+        print(warn, flush=True)
     res, flags, failed = {}, {}, []
     for runs in RUNS:
         args = _common_args(a, runs)
         if args is None:
             continue
         print('══ %s ══' % runs, flush=True)
-        rc, lines = run_tool(['check'] + args)
+        rc, lines = run_tool(['check'] + args + ['--model', model])
         if rc:
             failed.append(runs)
         r, fl = parse_check(lines)
@@ -516,6 +533,8 @@ def cmd_check(a):
         return 0
     print('结论：先别 rescore，把上面的输出发出来看看。'
           '（原片放错文件夹就换 --videos，或用 --pair v01=<视频路径> 单独指定）')
+    if warn:
+        print(warn)
     return 1
 
 
@@ -697,6 +716,16 @@ def selftest():
         os.remove(os.path.join(variant_dirs('selftest')[1], 'v08_base.csv'))
         r3 = evaluate('selftest')
         check(any('缺这几部' in w and 'v08' in w for w in r3['warnings']), '少了片子会警告')
+        m_old, m_new = os.path.join(tmp, 'old.tflite'), os.path.join(tmp, 'new.tflite')
+        for p, b in ((m_old, b'old'), (m_new, b'new')):
+            with open(p, 'wb') as fh:
+                fh.write(b)
+        d_ref = variant_dirs(DEFAULT_PIPE)[0]
+        os.makedirs(d_ref)
+        write_manifest(d_ref, dict(name=DEFAULT_PIPE, pipe='exact_crop', model=model_info(m_old)))
+        same_m, other_m = check_model(argparse.Namespace(model=m_old)), check_model(argparse.Namespace(model=m_new))
+        check(same_m == (m_old, None) and other_m[0] == m_new and model_info(m_old)['sha1'] in (other_m[1] or ''),
+              'check 用的模型：不是 exact_crop 那个（录 run 的）模型就提醒')
     finally:
         globals()['RESCORED'] = keep
         shutil.rmtree(tmp, ignore_errors=True)
@@ -766,6 +795,8 @@ def main():
         p.add_argument('--pair', action='append', help='逐个指定原片：v01=D:/xcup/视频1.mp4（可多次）')
         p.add_argument('--only', help='只做这几部，逗号分隔：v01,v04')
         p.add_argument('--jobs', type=int, default=1, help='几部片并行（每个进程各占 4 个线程）')
+        if cmd == 'check':
+            p.add_argument('--model', help='录 run 时的视频模型（默认 app 里的）；runs_initial / runs_test 是 P1 之前的模型录的')
         if cmd == 'rescore':
             p.add_argument('--model', help='视频模型（默认 app 里的）；给了就要给 --name')
             p.add_argument('--name', help='变体名（默认 = 管线名，即 exact_crop）')
