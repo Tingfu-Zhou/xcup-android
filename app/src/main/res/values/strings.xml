@@ -40,7 +40,7 @@
     <string name="online_status_subtitle">可以返回桌面，观看在线视频</string>
     <string name="online_tips_title">使用提示</string>
     <string name="online_tip_landscape">建议将手机横屏并全屏播放视频，识别效果最佳。</string>
-    <string name="online_tip_browser">Chrome、Firefox 等浏览器会把录屏中的视频画面遮黑。网页上的视频请改用「网页视频」模式，或在视频网站的官方 App 里播放（个别 App 禁止录屏或录音）。</string>
+    <string name="online_tip_browser">部分浏览器（如 Chrome、Firefox）出于安全考虑，会自动将屏幕共享中的视频画面遮黑，并显示 “为了安全起见，屏幕共享画面已隐藏此应用的内容” 等提示。\n\n为了保证分析的准确性，录屏模式建议使用对应视频网站的官方 App 直接观看视频(部分app会禁止屏幕/音频抓取)。</string>
     <string name="online_tip_exit">退出：回到本页面点左上角返回，或在系统的屏幕共享提示里点「停止」。</string>
 
     <!-- Manual control page -->
