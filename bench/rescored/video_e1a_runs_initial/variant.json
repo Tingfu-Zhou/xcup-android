@@ -1,0 +1,12 @@
+{
+ "created": "2026-10-18 11:07",
+ "model": {
+  "file": "e1a.tflite",
+  "path": "/home/tingfu/ml/movinet/runs/e1a/e1a.tflite",
+  "sha1": "84531d082a28",
+  "size": 4200080
+ },
+ "name": "e1a",
+ "pipe": "exact_crop",
+ "tool": "9b77666"
+}
