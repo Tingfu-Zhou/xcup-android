@@ -71,4 +71,18 @@
     <string name="manual_toast_disconnected">蓝牙未连接，请先返回主页面连接设备</string>
     <string name="manual_toast_resuming">正在恢复控制…</string>
     <string name="manual_footer_hint">离开本页面不会自动停机，如需停止请点击“紧急停止”。</string>
+
+    <!-- Manual control page: timed level boost for the video analysis modes -->
+    <string name="manual_section_boost">定时加档</string>
+    <string name="manual_boost_title">播放一段时间后自动加档</string>
+    <string name="manual_boost_subtitle">模拟临近高潮 · 只作用于视频分析模式</string>
+    <string name="manual_boost_delay_label">开始加档</string>
+    <string name="manual_boost_delay_value">%1$d 分钟后</string>
+    <string name="manual_boost_delay_min">1 分钟</string>
+    <string name="manual_boost_delay_max">30 分钟</string>
+    <string name="manual_boost_levels_label">加档幅度</string>
+    <string name="manual_boost_levels_1">+1 档</string>
+    <string name="manual_boost_levels_2">+2 档</string>
+    <string name="manual_boost_summary">累计播放满 %1$d 分钟后，视频分析给出的档位自动加 %2$d 档（0 档仍为停止，最高 10 档）。</string>
+    <string name="manual_boost_hint">适用于离线视频、在线录屏和网页视频模式。暂停或没有声音时不计时；退出当前模式、视频播放完毕后重新计时（在线模式无法得知视频何时播完，连续静音约 10 秒即视为播完）。</string>
 </resources>

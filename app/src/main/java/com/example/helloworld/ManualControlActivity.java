@@ -1,5 +1,6 @@
 package com.example.helloworld;
 
+import android.content.Context;
 import android.content.SharedPreferences;
 import android.os.Bundle;
 import android.os.Handler;
@@ -16,6 +17,7 @@ import com.google.android.material.appbar.MaterialToolbar;
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.button.MaterialButtonToggleGroup;
 import com.google.android.material.card.MaterialCardView;
+import com.google.android.material.materialswitch.MaterialSwitch;
 import com.google.android.material.slider.Slider;
 
 /**
@@ -26,11 +28,17 @@ import com.google.android.material.slider.Slider;
  *  - 顶部返回按钮 / 系统返回键均可回到主页面
  *  - 这里选择的变频模式同时作为「视频分析模式」的变频模式：分析链路只决定转/不转与强度，
  *    转动方式由本页决定（见 BLEManager#setAnalysisPattern）
+ *  - 「定时加档」开关与设置（默认关闭）：视频分析累计播放满选定的时间后，分析给出的档位自动加 1 / 2 档。
+ *    只存进 SharedPreferences、不下发，三种视频分析模式进入时用 {@link #loadLevelBoost} 读一次（规则见 LevelBoost）
  */
 public class ManualControlActivity extends AppCompatActivity {
 
     private static final String PREFS = "manual_control";
     private static final String KEY_PATTERN = "pattern";
+    // [定时加档] 视频分析模式的设置，和变频模式存在同一份 SharedPreferences 里
+    private static final String KEY_BOOST_ENABLED = "boost_enabled";
+    private static final String KEY_BOOST_DELAY_MIN = "boost_delay_min";
+    private static final String KEY_BOOST_LEVELS = "boost_levels";
 
     /** 拖动滑杆时的最小下发间隔，避免刷屏式写特征值把 BLE 链路打满 */
     private static final long SEND_MIN_INTERVAL_MS = 150L;
@@ -51,6 +59,13 @@ public class ManualControlActivity extends AppCompatActivity {
     private TextView tvSendStatus;
     private MaterialCardView cardPaused;
     private MaterialButton btnStopAll;
+
+    private MaterialSwitch switchBoost;
+    private View groupBoostSettings;
+    private Slider sliderBoostDelay;
+    private TextView tvBoostDelayValue;
+    private MaterialButtonToggleGroup toggleBoostLevels;
+    private TextView tvBoostSummary;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
 
@@ -178,6 +193,8 @@ public class ManualControlActivity extends AppCompatActivity {
                 toast(R.string.manual_toast_resuming);
             }
         });
+
+        setupLevelBoost(prefs);
 
         BLEManager ble = BLEManager.globalManager;
         if (ble != null) {
@@ -310,6 +327,76 @@ public class ManualControlActivity extends AppCompatActivity {
         }
         sliderLevel.setEnabled(canControl);
         btnStopAll.setEnabled(connected);
+    }
+
+    // ====== [定时加档] 视频分析模式的设置 ======
+
+    /**
+     * 读取「定时加档」设置（在本页修改）。离线视频 / 网页视频（VideoProcessActivity）、在线录屏（OnlineAnalysisActivity）
+     * 进入时各读一次，所以在本页改了之后，下次进入视频分析模式生效。
+     */
+    static LevelBoost loadLevelBoost(Context context) {
+        SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        return new LevelBoost(
+                prefs.getBoolean(KEY_BOOST_ENABLED, false),
+                prefs.getInt(KEY_BOOST_DELAY_MIN, LevelBoost.DEFAULT_DELAY_MIN),
+                prefs.getInt(KEY_BOOST_LEVELS, LevelBoost.DEFAULT_LEVELS));
+    }
+
+    /**
+     * 「定时加档」卡片：开关打开时才显示时间和幅度。改动立即存进 SharedPreferences，不下发任何指令，
+     * 所以不跟着蓝牙连接 / 本地按键锁定置灰。
+     */
+    private void setupLevelBoost(SharedPreferences prefs) {
+        switchBoost = findViewById(R.id.switchBoost);
+        groupBoostSettings = findViewById(R.id.groupBoostSettings);
+        sliderBoostDelay = findViewById(R.id.sliderBoostDelay);
+        tvBoostDelayValue = findViewById(R.id.tvBoostDelayValue);
+        toggleBoostLevels = findViewById(R.id.toggleBoostLevels);
+        tvBoostSummary = findViewById(R.id.tvBoostSummary);
+
+        // 先填好存储的值再挂监听，初始化不触发保存。存储里的值先钳到滑杆范围内（超范围 Slider 会抛异常）
+        boolean enabled = prefs.getBoolean(KEY_BOOST_ENABLED, false);
+        switchBoost.setChecked(enabled);
+        groupBoostSettings.setVisibility(enabled ? View.VISIBLE : View.GONE);
+        sliderBoostDelay.setValue(LevelBoost.clampDelayMin(
+                prefs.getInt(KEY_BOOST_DELAY_MIN, LevelBoost.DEFAULT_DELAY_MIN)));
+        toggleBoostLevels.check(boostLevelsToButtonId(LevelBoost.clampLevels(
+                prefs.getInt(KEY_BOOST_LEVELS, LevelBoost.DEFAULT_LEVELS))));
+        updateBoostText();
+
+        switchBoost.setOnCheckedChangeListener((button, isChecked) -> {
+            groupBoostSettings.setVisibility(isChecked ? View.VISIBLE : View.GONE);
+            prefs.edit().putBoolean(KEY_BOOST_ENABLED, isChecked).apply();
+        });
+
+        sliderBoostDelay.addOnChangeListener((slider, value, fromUser) -> {
+            updateBoostText();
+            if (fromUser) {
+                prefs.edit().putInt(KEY_BOOST_DELAY_MIN, Math.round(value)).apply();
+            }
+        });
+
+        toggleBoostLevels.addOnButtonCheckedListener((group, checkedId, isChecked) -> {
+            if (!isChecked) return;
+            prefs.edit().putInt(KEY_BOOST_LEVELS, buttonIdToBoostLevels(checkedId)).apply();
+            updateBoostText();
+        });
+    }
+
+    private void updateBoostText() {
+        int delayMin = Math.round(sliderBoostDelay.getValue());
+        int levels = buttonIdToBoostLevels(toggleBoostLevels.getCheckedButtonId());
+        tvBoostDelayValue.setText(getString(R.string.manual_boost_delay_value, delayMin));
+        tvBoostSummary.setText(getString(R.string.manual_boost_summary, delayMin, levels));
+    }
+
+    private static int boostLevelsToButtonId(int levels) {
+        return levels >= 2 ? R.id.btnBoost2 : R.id.btnBoost1;
+    }
+
+    private static int buttonIdToBoostLevels(int buttonId) {
+        return buttonId == R.id.btnBoost2 ? 2 : 1;
     }
 
     // ====== 模式与按钮 ID 映射 ======

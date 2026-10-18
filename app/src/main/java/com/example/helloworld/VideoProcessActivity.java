@@ -5,6 +5,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
 import android.widget.MediaController;
 import android.widget.TextView;
@@ -146,6 +147,11 @@ public class VideoProcessActivity extends AppCompatActivity {
     // 最近一次“已发送”档位（用于判断是否需要重发同一动作以更新档位）
     private int lastSentLevel = 0;                  // NEW: 记录上次发送出去的档位
 
+    // [定时加档] 分析累计播放满用户选定的时间后，发给设备的档位再加 1 / 2 档（设置在手动电子菜单，规则见 LevelBoost）。
+    // currentLevel 仍是分析档位，只在发送时加（boostLevel）；lastSentLevel 记的是加档后实际发出去的档位。只在主线程访问。
+    private LevelBoost levelBoost;
+    private int levelBoostNow = 0;                  // 此刻加几档（没打开 / 没到点为 0）：融合 tick 里更新，视频播完清零
+
     // ✅ 音频分析计时
     private long audioStartTime = 0;
     private boolean isAudioCompleted = false;
@@ -269,6 +275,9 @@ public class VideoProcessActivity extends AppCompatActivity {
         boolean debuggable = (getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0;
         findViewById(R.id.debugPanel).setVisibility(debuggable ? View.VISIBLE : View.GONE);
 
+        // [定时加档] 进入页面时读一次手动电子菜单里的设置
+        levelBoost = ManualControlActivity.loadLevelBoost(this);
+
         videoClassifier = new VideoClassifierHelper(this);
         Log.d(TAG, "onCreate: VideoClassifierHelper (MobileNetV3Small) 初始化完成");
 
@@ -339,6 +348,7 @@ public class VideoProcessActivity extends AppCompatActivity {
             videoView.setOnCompletionListener(mp -> {
                 isVideoCompleted = true;
                 pauseAnalysis();
+                resetLevelBoost(); // [定时加档] 视频播完，从头计时
                 Log.d(TAG, "视频播放完成！暂停同步分析，等待用户操作");
             });
 
@@ -776,6 +786,7 @@ public class VideoProcessActivity extends AppCompatActivity {
                 // 检查是否暂停
                 if (isAnalysisPaused.get()) {
                     Log.d(TAG, "[融合线程] 当前处于暂停状态，跳过本轮融合");
+                    levelBoost.pause(SystemClock.elapsedRealtime()); // [定时加档] 暂停期间不计时
                     mainHandler.postDelayed(this, MAIN_FUSION_INTERVAL);
                     return;
                 }
@@ -844,6 +855,8 @@ public class VideoProcessActivity extends AppCompatActivity {
                 // 临时采用音频节律作为最终节律
                 // 将“最终节律计算”封装为独立方法，便于后续替换为音视频融合节律
                 int finalFreq = computeFinalFreq(audioFreq, audioFreqConf);
+                // [定时加档] 接着计时，算出此刻该加几档（updateBluetoothState 发送时加在分析档位上）
+                updateLevelBoost();
 
                 // [修改] 检查BLE暂停状态，如果未暂停才发送
                 if (!finalAction.isEmpty()) {
@@ -882,7 +895,8 @@ public class VideoProcessActivity extends AppCompatActivity {
                 // 更新UI, 显示蓝牙实际发送的动作
                 String bluetoothAction = latestBluetoothAction.get();
                 if (!bluetoothAction.isEmpty()) {
-                    tvOverlay.setText("蓝牙: " + bluetoothAction + "节奏：" + currentLevel);
+                    tvOverlay.setText("蓝牙: " + bluetoothAction + "节奏：" + currentLevel
+                            + (levelBoostNow > 0 ? "（加档 +" + levelBoostNow + "）" : ""));
                 } else {
                     tvOverlay.setText("蓝牙发送等待识别...");
                 }
@@ -1108,21 +1122,23 @@ public class VideoProcessActivity extends AppCompatActivity {
                 // 切到 Noise 时，档位归 0
                 levelToSend = 0;
             }
+            // [定时加档] 实际发给设备的档位：到点后在分析档位上加档（0 档不加）；没打开 / 没到点时与 levelToSend 相同
+            int boostedLevel = boostLevel(levelToSend);
 
             Log.i(TAG, String.format(
                     "[蓝牙] [同步分析] ✅ 发送指令: action=%s, level=%d, 已稳定=%dms",
                     pendingBluetoothState,
-                    levelToSend,
+                    boostedLevel,
                     currentTime - pendingStateStartTime
             ));
 
             latestBluetoothAction.set(pendingBluetoothState);
-            BenchLogger.get().noteSend(pendingBluetoothState, levelToSend);
+            BenchLogger.get().noteSend(pendingBluetoothState, boostedLevel);
 
             if (BLEManager.globalManager != null && BLEManager.globalManager.isConnected()) {
-                BLEManager.globalManager.sendAction(pendingBluetoothState, levelToSend);
+                BLEManager.globalManager.sendAction(pendingBluetoothState, boostedLevel);
                 Log.i(TAG, "[蓝牙] [同步分析] ✅ 已通过BLE发送指令(动作切换/含档位)");
-                Log.d(TAG, "[音频节律] ✅ 发送节律：" + levelToSend);
+                Log.d(TAG, "[音频节律] ✅ 发送节律：" + boostedLevel);
             } else {
                 Log.w(TAG, "[蓝牙] BLE未连接，仅更新UI显示");
             }
@@ -1133,10 +1149,11 @@ public class VideoProcessActivity extends AppCompatActivity {
 
             // 关键同步：
             // 保证 currentLevel / lastSentLevel / 实际发送档位一致。
+            // [定时加档] currentLevel 记分析档位，lastSentLevel 记实际发出去的（加档后的）档位
             if (isSexAction(currentBluetoothState)) {
                 currentLevel = levelToSend;
                 currentLevelSinceMs = currentTime;
-                lastSentLevel = levelToSend;
+                lastSentLevel = boostedLevel;
             } else {
                 lastSentLevel = 0;
             }
@@ -1148,14 +1165,17 @@ public class VideoProcessActivity extends AppCompatActivity {
         // =====================[ 情况 B：动作未变，但档位变化 ]=====================
         // 动作不变，例如 do -> do，但档位从 8 降到 4。
         // 这种情况需要重发同一个动作，携带新档位。
-        boolean levelChanged = supportsLevel && (currentLevel != lastSentLevel);
+        // [定时加档] 比较的是发给设备的档位：到点加档时分析档位没变，也会在这里按发送间隔补发一次
+        int boostedLevel = boostLevel(currentLevel);
+        boolean levelChanged = supportsLevel && (boostedLevel != lastSentLevel);
         boolean gapOk = (currentTime - lastBluetoothSendTime) >= BLUETOOTH_SEND_INTERVAL;
 
         Log.d(TAG, String.format(
-                "[档位发送判断] action=%s, supportsLevel=%s, currentLevel=%d, lastSentLevel=%d, levelChanged=%s, gapOk=%s, gap=%dms",
+                "[档位发送判断] action=%s, supportsLevel=%s, currentLevel=%d, boost=%d, lastSentLevel=%d, levelChanged=%s, gapOk=%s, gap=%dms",
                 currentBluetoothState,
                 supportsLevel,
                 currentLevel,
+                levelBoostNow,
                 lastSentLevel,
                 levelChanged,
                 gapOk,
@@ -1163,7 +1183,7 @@ public class VideoProcessActivity extends AppCompatActivity {
         ));
 
         if (levelChanged && gapOk) {
-            int levelToSend = currentLevel;
+            int levelToSend = boostedLevel;
 
             Log.i(TAG, String.format(
                     "[蓝牙] 同动作更新档位：%s -> level=%d",
@@ -1225,7 +1245,9 @@ public class VideoProcessActivity extends AppCompatActivity {
                 isWebVideoMode ? "web" : "fixed",
                 // 视频输入：抽帧方式_几何（exact_crop = 修复后的离线模式；没有这一项的旧 run 是 keyframe + 整帧压扁）
                 (isWebVideoMode ? "web_" : "exact_") + FramePreprocessor.geometryName())
-                + FusionArbiter.paramsLine() + " " + AudioCue.paramsLine();
+                + FusionArbiter.paramsLine() + " " + AudioCue.paramsLine()
+                // 定时加档：打开时到点后 sent_level 是加档后的档位（final_freq / ble_level 仍是分析档位）
+                + " " + levelBoost.paramsLine();
     }
 
 
@@ -1240,6 +1262,24 @@ public class VideoProcessActivity extends AppCompatActivity {
         long now = System.currentTimeMillis();
         fusionArbiter.reset(now, warmupMs);
         BenchLogger.get().noteArbReset(now, warmupMs, seek);
+    }
+
+    /** [定时加档] 融合循环在跑：接着计时，更新此刻该加几档。计时用单调时钟，改系统时间不影响 */
+    private void updateLevelBoost() {
+        long now = SystemClock.elapsedRealtime();
+        levelBoost.resume(now);
+        levelBoostNow = levelBoost.boostAt(now);
+    }
+
+    /** [定时加档] 视频播完：从头计时，之后发出去的档位不再加 */
+    private void resetLevelBoost() {
+        levelBoost.reset();
+        levelBoostNow = 0;
+    }
+
+    /** [定时加档] 分析档位 → 发给设备的档位：到点后加 levelBoostNow 档（0 档不加，最高 BLEManager.LEVEL_MAX） */
+    private int boostLevel(int level) {
+        return LevelBoost.apply(level, levelBoostNow, BLEManager.LEVEL_MAX);
     }
 
     /**
@@ -1337,6 +1377,7 @@ public class VideoProcessActivity extends AppCompatActivity {
                 } else if (state == Player.STATE_ENDED) {
                     isVideoCompleted = true;
                     pauseAnalysis();
+                    resetLevelBoost(); // [定时加档] 视频播完，从头计时
                     Log.d(TAG, "[网页视频] 视频播放完成，暂停同步分析");
                 }
             }
@@ -1630,11 +1671,13 @@ public class VideoProcessActivity extends AppCompatActivity {
 
             if (BLEManager.globalManager != null && BLEManager.globalManager.isConnected()
                     && !BLEManager.globalManager.isPausedByLocal()) {
-                BLEManager.globalManager.sendAction(suspendedBluetoothState, suspendedLevel);
+                // [定时加档] 暂停不清零计时：已经到点的，恢复后接着按加档后的档位转
+                int boostedLevel = boostLevel(suspendedLevel);
+                BLEManager.globalManager.sendAction(suspendedBluetoothState, boostedLevel);
                 lastBluetoothSendTime = System.currentTimeMillis();
-                lastSentLevel = suspendedLevel;
+                lastSentLevel = boostedLevel;
                 Log.i(TAG, "[恢复] 已发送恢复动作: " + suspendedBluetoothState
-                        + " 档位: " + suspendedLevel);
+                        + " 档位: " + boostedLevel);
             }
 
             suspendedBluetoothState = "";

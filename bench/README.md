@@ -354,6 +354,10 @@ node bench/tools/test_labeler.js
 | `v_pos` | 该视频结果窗口里最后一帧的时刻（离线模式是帧的 pts，网页模式是抓帧时的播放位置），2026-10-14 起的 app 写 |
 | `v_fpts` | 窗口里 12 帧各自的时刻（ms，分号隔开，从旧到新），同上。`video_rescore.py` 靠它逐帧还原模型输入 |
 
+参数行里的 `BOOST=`（2026-10-18 起的 app）记手动电子菜单里的「定时加档」设置：`BOOST=off`，或 `BOOST=+<档数>@<分钟>min`
+（规则见 `LevelBoost.java`）。打开时，到点后 `sent_level` 是加档后的档位，到点那一刻还会多一次补发（`final_freq` / `ble_level`
+仍是分析档位），`fusion_lab.py check` 的 `sent` 列从那之后会对不上。录评测数据时请关掉定时加档（默认就是关的）。
+
 ## 6. YAMNet 线索（cue_lab.py；app 2026-10-11 起用 `a1bvid`）
 
 YAMNet 的第 0 个输出（AudioSet 521 类分数）以前 app 没读。`cue_lab.py` 把 `rescored/audio_old/*.yamnet.npz` 按结果时间戳
