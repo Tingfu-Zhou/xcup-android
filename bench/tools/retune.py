@@ -20,8 +20,8 @@ bench/tools/retune.py — 给一个视频变体重调视频阈值和与视频置
 
 用法（仓库根目录；Windows 把 python3 换成 python）
   python3 bench/tools/retune.py run exact_crop                # 现用参数 vs 留一选参 vs 样本内
-  python3 bench/tools/retune.py run e1c --grid video --jobs 4
-  python3 bench/tools/retune.py compare exact_crop e1c        # 两边各自留一选参后并排比（第一个是参照），按验收线检查
+  python3 bench/tools/retune.py run e1d --grid video --jobs 4
+  python3 bench/tools/retune.py compare exact_crop e1d        # 两边各自留一选参后并排比（第一个是参照），按验收线检查
   python3 bench/tools/retune.py --selftest
 报告写进 bench/baseline/retune_<名字>_<网格>.txt / retune_compare_<名字>_vs_<名字>_<网格>.txt。
 数据与 baseline.py 相同：13 部片、runs_initial + runs_test 的录像、音频线索、融合 a1bvid（= app 的 FusionArbiter v2）、

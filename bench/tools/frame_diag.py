@@ -25,8 +25,8 @@ bench/tools/frame_diag.py — 视频模型的逐帧诊断：同一套录像、�
 
 用法（仓库根目录；Windows 把 python3 换成 python）
   python3 bench/tools/frame_diag.py --name exact_crop
-  python3 bench/tools/frame_diag.py --name exact_crop --name e1a          # 并排比，第一个是参照
-  python3 bench/tools/frame_diag.py --name exact_crop,e1a,e1b --segments 20
+  python3 bench/tools/frame_diag.py --name exact_crop --name e1d          # 并排比，第一个是参照
+  python3 bench/tools/frame_diag.py --name exact_crop,e1d,new1 --segments 20
   python3 bench/tools/frame_diag.py --selftest
 报告同时写进 bench/baseline/frame_diag_<名字>[_vs_<名字>…].txt。
 """

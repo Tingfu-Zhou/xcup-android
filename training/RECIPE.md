@@ -19,7 +19,8 @@ python3 training/train_video.py --data_dir $D --out_dir $R/v2             # 正�
 
 - 输出在 `$R/v2/`：`v2.tflite`（与 app 现用模型同结构、同输入输出，可以直接放进 `app/src/main/assets/`）、
   `best_stage{1,2}.weights.h5`、`train.log`、`summary.json` 等。最后两行"导出核对"都应是 ✓。
-- 换素材后（Phase 2）也用同一条命令，只改 `--out_dir`。和现用模型比按 `training/README.md` 第 3 节（`baseline.py rescore` → `compare`）。
+- 换素材后（Phase 2）也用同一条命令，只改 `--out_dir`。在 13 部测试片上和 `e1d`（app 现用）、`exact_crop`（P1 之前的模型）比，
+  按 `training/README.md` 的"在 13 部测试片上比"（`baseline.py rescore` → `compare exact_crop e1d <名字>`）。
 - TensorFlow 用 2.20（现用模型就是 2.20.0 导出的；app 的运行时是 TFLite 2.13）。
 
 ## 配方
@@ -49,9 +50,10 @@ python3 training/train_video.py --data_dir $D --out_dir $R/v2             # 正�
 
 - 训练（2026-10-18，118 分钟）：stage 1 第 8 个 epoch 最好（val AUC 0.9410），stage 2 第 11 个 epoch 最好（0.9537）；
   test AUC 0.9826、准确率 88.1%。记录在 `training/results/e1d/`。
-- 13 部测试片（`bench/baseline/compare_exact_crop_vs_e1a_vs_e1b_vs_e1c_vs_e1d.txt` 等），对现用模型 exact_crop：
+- 13 部测试片，对 P1 之前的模型 `exact_crop`（报告：`bench/baseline/compare_exact_crop_vs_e1d.txt`、
+  `frame_diag_exact_crop_vs_e1d.txt`、`retune_compare_exact_crop_vs_e1d_conf.txt`）：
 
-| | 现用模型 | E1d |
+| | exact_crop（P1 之前的模型） | E1d |
 |---|---|---|
 | 视频 AUC：合并 / 逐片平均 / 最差片 v07 | 0.935 / 0.930 / 0.671 | 0.948 / 0.943 / 0.715 |
 | 逐片 AUC 变好 / 变差 | | 5 部（v01 v03 v07 v12 v13）/ 0 部 |
@@ -59,8 +61,11 @@ python3 training/train_video.py --data_dir $D --out_dir $R/v2             # 正�
 | 端到端代价（现用参数） | 1219 | 1099（−10%；v09 +25，是对白否决阈值边上的偶然波动） |
 | 端到端代价（两边各自留一视频重调参数） | 1219 | 1073（−12%），验收线全部通过 |
 
-- 换进 app 时：留一重调里 12/13 折选了 `BV_CONF 0.80`（对白否决，FusionArbiter）和 `VIDEO_PLOT 0.75`（视频"不转"阈值，
-  两个 Activity），其余不变；按 `bench/README.md` 第 4 节改代码、重新生成对拍数据，再上真机复验。
+- 2026-10-18 起 app 用的就是 E1d（`app/src/main/assets/mobilenetv3small_tap_3class_float32.tflite`，sha1 63f3e033cf38），
+  阈值和融合参数没改，即上表"现用参数"一行。
+  - 留一重调里 12/13 折选了 `BV_CONF 0.80`（对白否决，FusionArbiter）和 `VIDEO_PLOT 0.75`（视频"不转"阈值，两个 Activity）。
+  - 但对 E1d 自己的现用参数只降 2.4%（1099 → 1073），特写 seek p90 还慢 1.5 秒，没过验收线，所以先不改。
+  - Phase 4 换上最终模型时按同样流程再定。要改就按 `bench/README.md` 第 4 节改代码、重新生成对拍数据，再上真机复验。
 
 ## 试过、没采用的
 
@@ -69,6 +74,9 @@ python3 training/train_video.py --data_dir $D --out_dir $R/v2             # 正�
 | E1a | 训练用 12 帧 | 与 E1d 效果相当（两次独立训练提升一致，说明这组改动有效），但训练慢 37% |
 | E1b | 从中段解冻 + AdamW lr 1e-4 + cosine | 训练不稳（val AUC 在 0.92~0.96 之间跳，最好的是第 1 个 epoch）；最差片 v07 好得最多，但动作判成剧情变多、v05 多一次误停、v04 变差。lr 降到 3e-5 可以再试 |
 | E1c | label smoothing 0.05 | 置信度被压低（≥0.99 的窗口 65% → 10%），融合里按置信度的规则失效，端到端变差（1375），重调也救不回来 |
+
+这三个的训练记录和 13 部片上的报告 2026-10-18 从仓库删了，要看就从 git 历史取回：记录和报告在提交 `e8848b0`
+（如 `git checkout e8848b0 -- training/results/e1b`），重算数据（`bench/rescored/video_e1{a,b,c}_*`）在 `aa9defc`。
 
 ## 已知的问题（留给 Phase 2）
 

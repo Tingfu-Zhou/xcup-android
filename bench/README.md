@@ -14,11 +14,11 @@ bench/
   runs_v3/<id>_*.csv      修复视频抽帧后的包录的 v08：验证过真机与离线重算的 exact_crop 一致（第 7 节），不进统一基准
   rescored/               audio_rescore.py 的输出：audio_old / test_audio_old = runs_initial / runs_test 用现用分类头离线重算
                           （与真机一致，另带 YAMNet 521 类分数 .yamnet.npz）；audio_new = 2026-10-09 评估过的新分类头（未采用）；
-                          video_<名字>_<runs 目录名>/ 是视频离线重算的结果（video_exact_crop_* 是统一基准的对照，第 5 节），
-                          video_alignment.json 是 video_rescore.py check 定下的时间差
+                          video_<名字>_<runs 目录名>/ 是视频离线重算的结果（video_exact_crop_* 是统一基准的对照、
+                          video_e1d_* 是 2026-10-18 起 app 用的模型，第 5 节），video_alignment.json 是 video_rescore.py check 定下的时间差
   videos/                 原始视频（不进 git；也可以放别处，用 --videos 指定）
   summary.csv             metrics.py --append 的汇总
-  baseline/               baseline.py 的报告（eval / compare 写的；phone、exact_crop 是现在的基准，第 5 节）
+  baseline/               baseline.py / frame_diag.py / retune.py 的报告（phone、exact_crop、e1d 是现在的基准，第 5 节）
   tools/
     labeler.html          真值标注器，双击即用，纯本地无上传
     metrics.py            单部片：指标、误判定位、单模态诊断
@@ -213,11 +213,20 @@ seek 一次，丢掉模型窗口还没重新攒满的结果（视频约 2.75 秒
 
 ```bash
 python3 bench/tools/baseline.py eval phone                          # 手机原始 run（旧视频管线），与第 6 节 13 部的 a1bvid 一致
-python3 bench/tools/baseline.py check   --videos D:/xcup/videos     # 第一次 rescore 前核对原片（13 部）
-python3 bench/tools/baseline.py rescore --videos D:/xcup/videos     # 修复后的管线 + 现用模型 → exact_crop
+python3 bench/tools/baseline.py check   --videos D:/xcup/videos --model old.tflite   # 换一处原片后，rescore 前先核对（13 部）
+python3 bench/tools/baseline.py rescore --videos D:/xcup/videos     # 修复后的管线 + app 里的模型 → exact_crop（10-15 做的）
 python3 bench/tools/baseline.py rescore --videos D:/xcup/videos --model new.tflite --name new1
 python3 bench/tools/baseline.py compare phone exact_crop new1       # 并排对比，第一个是参照
 ```
+
+- **2026-10-18 起 app 里的视频模型是 E1d**（P1 定的，sha1 63f3e033cf38，`training/RECIPE.md`），阈值和融合参数没改。
+  - `exact_crop` 还是固定对照：P1 之前的模型（sha1 93851823e4a4）+ 修复后的管线，也就是录 `runs_initial` / `runs_test` 的那个模型。
+  - `e1d` 是 app 现在的水平。新模型两个都比：`compare exact_crop e1d new1`。
+  - 现在不带 `--model` 跑 `rescore`，会因为模型指纹不同被拒绝写进 `exact_crop`。
+- **`check` 要用录 run 时的旧模型。** 它核对的是离线能不能复现 `runs_initial` / `runs_test`，不带 `--model` 会提醒"对不上"。
+  旧模型从 git 历史取：
+  `git show 11bf834:app/src/main/assets/mobilenetv3small_tap_3class_float32.tflite > old.tflite`。
+  `runs_v2`、`runs_v3` 也是旧模型录的，对它们跑 `video_rescore.py check` 同样要加 `--model old.tflite`。
 
 - 固定的部分：13 部片（`gt` v01~v13）、录像 `runs_initial` + `runs_test`、音频线索 `audio_old` + `test_audio_old`、
   融合 `a1bvid`（= app 的 FusionArbiter v2）、代价 fp=1,fn=1,stop=3。变的只有视频结果（"变体"）：`phone` 读原始 run，
@@ -231,19 +240,22 @@ python3 bench/tools/baseline.py compare phone exact_crop new1       # 并排对�
 | 视频结果 | 代价 | 准确率 | 误转 | 漏转 | 误停 | seek 进特写 p90 / 没启动 | 视频 AUC 合并 / 最差片 | 视频准确率 |
 |---|---|---|---|---|---|---|---|---|
 | `phone`：手机原始 run（旧管线） | 1164 | 94.2% | 13.9% | 2.1% | 7 | 7.2s / 0 | 0.913 / 0.467（v07） | 83.0% |
-| `exact_crop`：修复后的管线 + 现用模型 | 1219 | 93.6% | 16.5% | 1.7% | 5 | 13.1s / 2 | 0.935 / 0.671（v07） | 87.9% |
+| `exact_crop`：修复后的管线 + P1 之前的模型 | 1219 | 93.6% | 16.5% | 1.7% | 5 | 13.1s / 2 | 0.935 / 0.671（v07） | 87.9% |
+| `e1d`：修复后的管线 + E1d（2026-10-18 起 app 用） | 1099 | 94.3% | 15.0% | 1.4% | 5 | 9.1s / 0 | 0.948 / 0.715（v07） | 89.1% |
 
 - 修复后视频本身更准：AUC 0.913 → 0.935，v07 0.467 → 0.671、v01 0.871 → 0.979，按现用阈值的准确率 83.0% → 87.9%；
   v12、v13 的 AUC 略降（0.919 → 0.870、0.950 → 0.874）。
 - 端到端反而略差（代价 +55：v04 +63、v03 +47、v09 +28，v11 −98），seek 进特写/低声音时启动变慢（这类 seek 按当时的
   模型结果挑，两边样本不同：104 / 64 个）：融合仲裁的参数是在旧输入（同一张关键帧的一串重复结果）上调出来的。
 - `exact_crop` 是以后换视频模型的对照，`phone` 只作历史参照（README 里其余的数字都是它的口径）。
+- `e1d` 一行是 2026-10-18 补的（`bench/baseline/compare_exact_crop_vs_e1d.txt`）。两边各自留一视频重调后：exact_crop 1219、e1d 1073
+  （`retune_compare_exact_crop_vs_e1d_conf.txt`）。
 
 **换视频模型后怎么比**：
 
 ```bash
 python3 bench/tools/baseline.py rescore --videos D:/xcup/videos --model D:/models/new1.tflite --name new1 --jobs 4
-python3 bench/tools/baseline.py compare exact_crop new1
+python3 bench/tools/baseline.py compare exact_crop e1d new1
 ```
 
 1. 先看视频 AUC（13 部合并、逐片平均、最差片）：只反映模型本身，不受阈值和融合参数影响，是比模型的主要依据。
@@ -253,13 +265,14 @@ python3 bench/tools/baseline.py compare exact_crop new1
    只是视频的概率分布变了（例如 label smoothing）时，`python3 bench/tools/retune.py compare exact_crop new1` 就够：
    两边各自留一视频重调 `VIDEO_DO` / `VIDEO_PLOT` / `ARB_V_FLOOR` / `ARB_BV_CONF`，再按验收线比。
 4. 前提：新模型没用这 13 部片的任何片段训练或挑模型；结构与现用模型相同（见第 4 节）。
-   视频模型的训练见 `training/README.md`（`train_video.py` 导出的 tflite 与现用模型同结构，可以直接 rescore）。
+   视频模型的训练见 `training/RECIPE.md`（配方）和 `training/README.md`（脚本怎么用）。`train_video.py` 导出的 tflite 与现用模型
+   同结构，可以直接 rescore。
 
 ### frame_diag.py（视频模型的逐帧诊断，2026-10-16）
 
 ```bash
 python3 bench/tools/frame_diag.py --name exact_crop                 # 一个变体
-python3 bench/tools/frame_diag.py --name exact_crop,e1a,e1b         # 并排，第一个是参照
+python3 bench/tools/frame_diag.py --name exact_crop,e1d,new1        # 并排，第一个是参照
 python3 bench/tools/frame_diag.py --selftest
 ```
 
@@ -270,12 +283,14 @@ python3 bench/tools/frame_diag.py --selftest
   并排时另给逐片 AUC 变好 / 变差几部、最差片、逐个窗口配对（判错 → 判对、判对 → 判错各多少秒）、两半片子各自的合并 AUC。
 - `exact_crop` 的结果（`bench/baseline/frame_diag_exact_crop.txt`）：单帧 / 3 秒 / 12 秒 AUC 0.924 / 0.935 / 0.942；置信度 ≥0.99
   的窗口占 65%，其中 6.2% 判错，占全部错误的 31%；成段错误 19 段，误转 180 秒、漏转 310 秒（各占视频全部误转 / 漏转的一半多）。
+- `e1d` 对 `exact_crop`（`bench/baseline/frame_diag_exact_crop_vs_e1d.txt`）：成段错误 18 段，误转 120 秒、漏转 271 秒；
+  逐片 AUC 5 部变好（v01 v03 v07 v12 v13）、0 部变差。
 
 ### retune.py（重调视频阈值，2026-10-16）
 
 ```bash
 python3 bench/tools/retune.py run exact_crop [--grid video|conf]    # 现用参数 vs 留一视频选参 vs 样本内
-python3 bench/tools/retune.py compare exact_crop e1c                # 两边各自留一选参后按验收线比
+python3 bench/tools/retune.py compare exact_crop new1               # 两边各自留一选参后按验收线比
 python3 bench/tools/retune.py --selftest
 ```
 
@@ -284,6 +299,10 @@ python3 bench/tools/retune.py --selftest
 - 留一视频选参的约束同 `cue_lab.py lovo`（训练片误停最多 +1、漏转不升、seek 启动不变慢），验收线同第 6 节。
 - `exact_crop`（`bench/baseline/retune_exact_crop_conf.txt`）：现用 1219，留一选参 1219，样本内 1198 —— 阈值已在平台上，
   重调只会过拟合，与 2026-10-15 的结论相同。
+- `e1d`（`bench/baseline/retune_compare_exact_crop_vs_e1d_conf.txt`）：
+  - 现用参数 1099，留一选参 1073，12/13 折选了 `VIDEO_PLOT 0.75`、`ARB_BV_CONF 0.80`。
+  - 对它自己的现用参数只降 2.4%，特写 seek p90 还慢 1.5 秒，没过验收线，所以 app 先不改参数。
+  - 两边各自留一选参后，e1d 对 exact_crop（1219 → 1073）验收线全过。
 
 ### audio_rescore.py
 
@@ -499,7 +518,10 @@ python3 bench/tools/video_rescore.py --selftest
 - 2026-10-16：视频模型 P1（训练方法）的工具：`training/`（素材检查、新的训练脚本 `train_video.py`，见 `training/README.md`），
   bench 端 `frame_diag.py`（逐帧诊断）和 `retune.py`（留一视频重调视频阈值）。`exact_crop` 的参照报告在 `bench/baseline/`
   （`frame_diag_exact_crop.txt`、`retune_exact_crop_conf.txt`）。
-- 2026-10-18：P1 的 4 个候选在 13 部片上比完（`training/README.md` 第 5 节"P1 的结果"）：配方定为 E1d。`retune.py` 的验收线
+- 2026-10-18：P1 的 4 个候选在 13 部片上比完（`training/RECIPE.md`）：配方定为 E1d。`retune.py` 的验收线
   对 seek 启动留容差（中位数 / p90 0.1 秒、特写 0.5 秒）：不同模型的结果时刻差几毫秒，零容差会误判"变慢"；`frame_diag.py`
   按逐片 AUC 数两半各有几部变好 / 变差（只看合并 AUC 时，v08~v13 本来接近 1，会误报"只在一半上变好"）。
-  只留 `exact_crop` 和 `e1d` 的重算数据，E1a~E1c 的数字存成 `bench/baseline/e1{a,b,c}.json`（compare 读得到，数据目录从 git 历史取回）。
+  只留 `exact_crop` 和 `e1d` 的重算数据（E1a~E1c 的在 git 历史 `aa9defc` 里）。
+- 2026-10-18：app 的视频模型换成 E1d，阈值、融合参数不变（第 5 节）。`baseline.py check` 加 `--model`：`runs_initial` / `runs_test`
+  是旧模型录的，核对要用旧模型。P1 用完的文件删除（git 历史 `e8848b0` 里可找回）：E1a~E1c 的训练记录、报告和
+  `bench/baseline/e1{a,b,c}.json`；P1 的对比报告只留 exact_crop 对 e1d 的（`compare_` / `frame_diag_` / `retune_compare_exact_crop_vs_e1d*`）。

@@ -11,7 +11,7 @@ app 现用的模型也评一遍。注意：现用模型当初是按这份 val �
 
 用法（仓库根目录）
   python3 training/eval_clips.py --data_dir ~/ml/movinet/movinet_clips --split test \\
-      --model app/src/main/assets/mobilenetv3small_tap_3class_float32.tflite --model runs/e1a/e1a.tflite
+      --model app/src/main/assets/mobilenetv3small_tap_3class_float32.tflite --model runs/new1/new1.tflite
 """
 import argparse
 import io

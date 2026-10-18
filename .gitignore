@@ -18,6 +18,8 @@ local.properties
 *.apk
 *.aab
 captures/
+# Android Studio "Generate Signed App Bundle / APK" 的输出目录（含 baselineProfiles/*.dm）
+/app/release/
 
 # === Logs & Profiling ===
 *.log
