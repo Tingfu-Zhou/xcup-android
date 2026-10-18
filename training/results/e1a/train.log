@@ -56,3 +56,8 @@
   python3 bench/tools/baseline.py compare exact_crop e1a
   python3 bench/tools/frame_diag.py --name exact_crop --name e1a
 ⚠ 导出核对没过（见上面），先别拿去 rescore
+从 /home/tingfu/ml/movinet/runs/e1a/best_stage2.weights.h5 重新导出
+
+══ 导出 /home/tingfu/ml/movinet/runs/e1a/e1a.tflite ══
+  结构：✓ 与 app 现用模型相同（1 个 PACK × 12 + 1 个 FULLY_CONNECTED，bench 可直接用）；1293 个算子，4.2 MB；TF 2.20.0 转换，min_runtime_version 2.3.0
+  ✗ Keras / TFLite 一致性（48 个真实验证片段）：概率最大差 9.1e-03，bench 的逐帧 logit 算法重算差 4.8e-07，argmax 一致 100%，app 判定一致 100%
