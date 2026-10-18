@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-training/train_video.py — 视频模型训练（P1：E1a~E1d），替代 train_mobilenetv3_tap_3class.py
+training/train_video.py — 视频模型训练（默认用 P1 定下的 E1d 配方，见 training/RECIPE.md），替代 train_mobilenetv3_tap_3class.py
 
 模型结构不变（MobileNetV3Small、12 帧时间平均、160×160、类别 [normal_plot, oral, sex]），换的是训练方法：
   · 坏片段：读 data_check.py scan 写的 bad_clips.txt 剔除；训练中读帧失败就跳过并报出来，不再用全黑帧顶替
@@ -10,17 +10,19 @@ training/train_video.py — 视频模型训练（P1：E1a~E1d），替代 train_
   · 选模型：验证集 12 帧的 p_oral+p_sex AUC（val_auc_do），不再用 val_acc
   · 导出：与 app 现用模型同结构的 12 帧 tflite，用真实验证片段核对 Keras / TFLite，并检查 bench 能直接用
 
-预设（--preset；其余参数都可以单独覆盖，例如 --preset e1b --label_smoothing 0.05）
-  e1a     新基线：上面几条，微调设置不变（stage 2 解冻最后 30 层，BN 冻结，Adam lr 1e-5）
+预设（--preset；其余参数都可以单独覆盖，例如 --preset e1d --seed 7）。P1 比完（2026-10-18）定下的配方是 e1d，也是默认值，
+配方的完整说明见 training/RECIPE.md
+  e1d     （默认）e1a + 训练时每个片段只抽 4 帧（TSN：等分 4 段，每段随机一帧）；验证、选模型、导出都是 12 帧
+  e1a     新基线：上面几条，微调设置不变（stage 2 解冻最后 30 层，BN 冻结，Adam lr 1e-5），训练用 12 帧
   e1b     e1a + 加深微调：从中段 expanded_conv_6 起解冻（BN 仍冻结），AdamW lr 1e-4，cosine，1 个 epoch warmup
-  e1c     e1a + label smoothing 0.05
-  e1d     e1a + 训练时每个片段只抽 4 帧（TSN：等分 4 段，每段随机一帧）；验证、选模型、导出都是 12 帧
+          （P1 里 lr 1e-4 训练不稳，没有采用）
+  e1c     e1a + label smoothing 0.05（P1 里端到端变差，不采用）
   legacy  旧脚本的做法（打乱采样 + class_weight、不增强、按 val_acc 选），只换了读帧。可选：量"同样的配方重训一次"的波动
 
 用法（训练机，仓库根目录）
-  python3 training/train_video.py --preset e1a --data_dir ~/ml/movinet/movinet_clips --out_dir runs/e1a --dry_run
-  python3 training/train_video.py --preset e1a --data_dir ~/ml/movinet/movinet_clips --out_dir runs/e1a
-  python3 training/train_video.py --export_only runs/e1a                      # 只从最好的权重重新导出 tflite
+  python3 training/train_video.py --data_dir ~/ml/movinet/movinet_clips --out_dir ~/ml/movinet/runs/v2 --dry_run
+  python3 training/train_video.py --data_dir ~/ml/movinet/movinet_clips --out_dir ~/ml/movinet/runs/v2   # 默认 e1d
+  python3 training/train_video.py --export_only ~/ml/movinet/runs/v2          # 只从最好的权重重新导出 tflite
 
 --dry_run：每个 stage 1 个 epoch × 5 步、验证 / 测试各取 60 个片段，几分钟内把读数据 → 训练 → 选模型 → 导出 → 核对整条走一遍
 （输出写到 <out_dir>_dry），正式跑之前先用它确认环境没问题。
@@ -93,7 +95,8 @@ def parse_args(argv=None):
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--data_dir', help='movinet_clips 目录（下面是 train/val/test/<类别>）')
     ap.add_argument('--out_dir', help='输出目录（每个实验一个，如 runs/e1a）')
-    ap.add_argument('--preset', default='e1a', choices=sorted(PRESETS))
+    ap.add_argument('--preset', default='e1d', choices=sorted(PRESETS),
+                    help='训练配方（默认 e1d = P1 定下的配方，见 training/RECIPE.md）')
     ap.add_argument('--name', help='导出的模型文件名（默认 = out_dir 的名字）')
     ap.add_argument('--bad_list', default='auto',
                     help='坏片段清单（默认 <data_dir>/bad_clips.txt，没有就先跑 data_check.py scan；none = 不剔除）')

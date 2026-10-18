@@ -1,14 +1,18 @@
 # training/ — 视频模型训练（P1：训练方法）
 
+> **以后训练只看 [`RECIPE.md`](RECIPE.md)**：P1 定下的配方是 E1d，`python3 training/train_video.py --data_dir … --out_dir …`
+> 不带 `--preset` 就是它。下面第 0~5 节是 P1 当时的操作步骤和结果，留作记录。
+
 对应《Xcup 视频动作识别：精度提升方案（2026-10-16）》的 Phase 1：模型结构不变（MobileNetV3Small、12 帧时间平均、
 160×160、类别 `[normal_plot, oral, sex]`），训练素材不变（`movinet_clips`），只改训练方法；13 部测试片（v01~v13）只用来
 比做完的候选，选 checkpoint 只看训练素材自己的验证集。
 
 | 文件 | 作用 |
 |---|---|
+| `RECIPE.md` | 定下的训练配方（E1d）：怎么训、每一项设定、P1 的结果 |
 | `data_check.py` | 素材检查：`scan` 找坏片段 → `bad_clips.txt`；`stats` 按 split / 类别 / 源视频统计；`leak` 查 13 部测试片有没有混进训练素材 |
 | `train_utils.py` | 训练积木：顺序读帧、片段级增强、按源视频均衡采样、按 p_do AUC 选模型、12 帧导出与 Keras / TFLite 一致性检查 |
-| `train_video.py` | 训练入口，替代 `train_mobilenetv3_tap_3class.py`；`--preset e1a / e1b / e1c / e1d / legacy` |
+| `train_video.py` | 训练入口，替代 `train_mobilenetv3_tap_3class.py`；`--preset e1d`（默认）/ `e1a / e1b / e1c / legacy` |
 | `eval_clips.py` | 在训练素材的 val / test 上评任意 12 帧 tflite（包括 app 现用的），给新模型的数字一个参照 |
 
 bench 端新增：`bench/tools/frame_diag.py`（逐帧诊断：窗口长度、置信度分布、成段的高置信度错误，几个变体并排）、
@@ -158,6 +162,9 @@ python3 bench/tools/retune.py compare exact_crop e1c          # 只有 E1c 需�
 
 训练记录在 `training/results/e1{a,b,c,d}/`，报告在 `bench/baseline/`（`compare_exact_crop_vs_e1a_vs_e1b_vs_e1c_vs_e1d.txt`、
 `frame_diag_…`、`retune_compare_exact_crop_vs_e1?_conf.txt`）。视频 AUC 用 baseline.py 的口径（按 tick），成段错误用 frame_diag。
+E1a~E1c 的重算数据（`bench/rescored/video_e1{a,b,c}_*`）2026-10-18 删了，数字存在 `bench/baseline/e1{a,b,c}.json`，
+`baseline.py compare` 照样能比；要逐帧诊断或重调，从 git 历史取回，例如
+`git checkout aa9defc -- bench/rescored/video_e1b_runs_initial bench/rescored/video_e1b_runs_test`。
 
 | | exact_crop（现用） | E1a | E1b | E1c | E1d |
 |---|---|---|---|---|---|

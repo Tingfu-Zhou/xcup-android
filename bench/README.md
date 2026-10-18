@@ -502,3 +502,4 @@ python3 bench/tools/video_rescore.py --selftest
 - 2026-10-18：P1 的 4 个候选在 13 部片上比完（`training/README.md` 第 5 节"P1 的结果"）：配方定为 E1d。`retune.py` 的验收线
   对 seek 启动留容差（中位数 / p90 0.1 秒、特写 0.5 秒）：不同模型的结果时刻差几毫秒，零容差会误判"变慢"；`frame_diag.py`
   按逐片 AUC 数两半各有几部变好 / 变差（只看合并 AUC 时，v08~v13 本来接近 1，会误报"只在一半上变好"）。
+  只留 `exact_crop` 和 `e1d` 的重算数据，E1a~E1c 的数字存成 `bench/baseline/e1{a,b,c}.json`（compare 读得到，数据目录从 git 历史取回）。
