@@ -1,14 +1,18 @@
 # training/ — 视频模型训练（P1：训练方法）
 
+> **以后训练只看 [`RECIPE.md`](RECIPE.md)**：P1 定下的配方是 E1d，`python3 training/train_video.py --data_dir … --out_dir …`
+> 不带 `--preset` 就是它。下面第 0~5 节是 P1 当时的操作步骤和结果，留作记录。
+
 对应《Xcup 视频动作识别：精度提升方案（2026-10-16）》的 Phase 1：模型结构不变（MobileNetV3Small、12 帧时间平均、
 160×160、类别 `[normal_plot, oral, sex]`），训练素材不变（`movinet_clips`），只改训练方法；13 部测试片（v01~v13）只用来
 比做完的候选，选 checkpoint 只看训练素材自己的验证集。
 
 | 文件 | 作用 |
 |---|---|
+| `RECIPE.md` | 定下的训练配方（E1d）：怎么训、每一项设定、P1 的结果 |
 | `data_check.py` | 素材检查：`scan` 找坏片段 → `bad_clips.txt`；`stats` 按 split / 类别 / 源视频统计；`leak` 查 13 部测试片有没有混进训练素材 |
 | `train_utils.py` | 训练积木：顺序读帧、片段级增强、按源视频均衡采样、按 p_do AUC 选模型、12 帧导出与 Keras / TFLite 一致性检查 |
-| `train_video.py` | 训练入口，替代 `train_mobilenetv3_tap_3class.py`；`--preset e1a / e1b / e1c / e1d / legacy` |
+| `train_video.py` | 训练入口，替代 `train_mobilenetv3_tap_3class.py`；`--preset e1d`（默认）/ `e1a / e1b / e1c / legacy` |
 | `eval_clips.py` | 在训练素材的 val / test 上评任意 12 帧 tflite（包括 app 现用的），给新模型的数字一个参照 |
 
 bench 端新增：`bench/tools/frame_diag.py`（逐帧诊断：窗口长度、置信度分布、成段的高置信度错误，几个变体并排）、
@@ -78,7 +82,8 @@ python3 training/data_check.py leak  --data_dir $D --videos <13 部原片目录>
 - `scan`：顺序解码每个片段。打不开、读不出帧、少于 30 帧（12fps 的 3 秒应为 36 帧）的记进 `bad_clips.txt`，
   `train_video.py` 自动剔除；几乎全黑的只报不剔（剧情里的黑场是正常素材）。
 - `stats`：每个 split / 类别有多少片段、多少部源视频、片段最多的几部占多少。同一个源视频名出现在两个 split 里会报警
-  （train/val/test 应按片子划分），人工确认一下是不是同一部片。
+  （train/val/test 应按片子划分），人工确认一下是不是同一部片。同一部片常被切成几段、文件名带时间（`SDDE-697-00.10.47.97`、
+  `SDDE-697-00.30.55.17`），所以还会按番号（从文件名里猜的）归并再查一遍跨 split 的，并数一下同一番号既有剧情又有动作的有几部。
 - `leak`（方案"开始前确认"的第 2 条）：测试片每 0.25 秒取一帧算画面指纹，和每个训练片段的 3 个指纹比，同一个源视频
   ≥3 个片段对上同一部测试片就报"疑似混入"。按 `bench/gt/vNN.csv` 文件头的 `file_name` 在 `--videos` 里找原片，名字对不上用
   `--pair v07=/path/视频7.mp4`。原片不在训练机上时，把 `$D/clip_index.csv` 拷到原片那台电脑，放进一个空目录当 `--data_dir` 就能查。
@@ -95,11 +100,16 @@ python3 training/train_video.py --preset e1a --data_dir $D --out_dir $R/e1a
   样本数与旧脚本相同（训练片段数 ÷ batch）。第一个 epoch 结束会打出用时，按它估总时间（早停前最多 30 个 epoch）。
 - 每个 epoch 结束打一行验证指标：`AUC(p_do)`、准确率、按片子平均的准确率（最差那部）、loss、按 app 阈值的误判率、置信度 ≥0.99 的占比。
   出现 `[读帧失败，跳过]` 说明有 scan 没查出来的坏片段，把它加进 `bad_clips.txt`。
-- 结束时：在 val / test（12 帧）上的最终指标，导出 `$R/e1a/e1a.tflite`，最后两行导出核对都要是 ✓。
+- 结束时：在 val / test（12 帧）上的最终指标和各自最差的 10 部片（整部几乎全错的先人工看一眼是不是标错），导出
+  `$R/e1a/e1a.tflite`，最后两行导出核对都要是 ✓。
+- 导出核对拿 CPU 上的 Keras（float32）当参照。GPU 上 RTX 30/40 系默认用 TF32 算卷积（只有约 3 位有效数字），GPU 上的 Keras 和
+  TFLite 能差到 1e-2，这一行只作参考。2026-10-17 之前的版本拿 GPU 结果当参照，会误报 ✗：`git pull` 后
+  `--export_only $R/e1a` 重新核对（几分钟，不用重训）。
 - 输出：`train.log`、`config.json`、`train_stage{1,2}_log.csv`、`best_stage{1,2}.weights.h5`、`e1a.tflite`、`e1a.keras`、`summary.json`。
   中断了重跑即可；只想重新导出用 `--export_only $R/e1a`。
 - 可选参照：`python3 training/eval_clips.py --data_dir $D --split test --model <仓库>/app/src/main/assets/mobilenetv3small_tap_3class_float32.tflite --model $R/e1a/e1a.tflite`
-  （现用模型当初按这份 val 集选的 checkpoint，所以比 test）。这些只是训练素材上的数字，比模型以 13 部片为准。
+  （现用模型当初按这份 val 集选的 checkpoint，所以比 test；`--split val` 也能跑，看两个模型是不是错在同几部片上）。
+  每个模型后面列出最差的 10 部片（`--worst N` 改个数）。这些只是训练素材上的数字，比模型以 13 部片为准。
 
 ## 3. 在 13 部测试片上比（放原片的电脑上，仓库根目录）
 
@@ -148,9 +158,45 @@ python3 bench/tools/retune.py compare exact_crop e1c          # 只有 E1c 需�
   `--preset legacy`（旧配方，只换了读帧）重训一次和 exact_crop 比，或者对最好的候选换个 `--seed` 再训一次。
 - P1 的结果决定 Phase 2（补素材）重训时用的配方；Phase 4 的逐帧特征缓存先用现模型做。
 
+### P1 的结果（2026-10-18）
+
+训练记录在 `training/results/e1{a,b,c,d}/`，报告在 `bench/baseline/`（`compare_exact_crop_vs_e1a_vs_e1b_vs_e1c_vs_e1d.txt`、
+`frame_diag_…`、`retune_compare_exact_crop_vs_e1?_conf.txt`）。视频 AUC 用 baseline.py 的口径（按 tick），成段错误用 frame_diag。
+E1a~E1c 的重算数据（`bench/rescored/video_e1{a,b,c}_*`）2026-10-18 删了，数字存在 `bench/baseline/e1{a,b,c}.json`，
+`baseline.py compare` 照样能比；要逐帧诊断或重调，从 git 历史取回，例如
+`git checkout aa9defc -- bench/rescored/video_e1b_runs_initial bench/rescored/video_e1b_runs_test`。
+
+| | exact_crop（现用） | E1a | E1b | E1c | E1d |
+|---|---|---|---|---|---|
+| 视频 AUC：合并 / 逐片平均 / 最差片 v07 | 0.935 / 0.930 / 0.671 | 0.947 / 0.942 / 0.716 | 0.947 / 0.942 / 0.780 | 0.943 / 0.940 / 0.768 | 0.948 / 0.943 / 0.715 |
+| 逐片 AUC 变好 / 变差（±0.005） | | 5 / 0 | 6 / 1（v04 −0.08） | 4 / 3 | 5 / 0 |
+| 成段高置信度错误：误转 / 漏转（秒） | 180 / 310 | 136 / 258 | 61 / 360 | 34 / 58（置信度被压低，不可比） | 120 / 271 |
+| 置信度 ≥0.99 的错误占全部错误 | 31% | 20% | 24% | 2% | 21% |
+| 端到端代价：现用参数 / 两边各自留一重调 | 1219 / 1219 | 1174 / 1169 | 1065 / 1050 | 1375 / 1471 | 1099 / 1073 |
+| 验收线（各自留一重调后对 exact_crop） | | ✗ 代价只降 4% | ✗ v05、v12 变差，漏转升 | ✗ | ✓ 全过 |
+| 训练用时 | | 186 分钟 | 136 | 116 | 118 |
+
+- **E1a 的打包改动有效**：E1a 和 E1d 是两次独立训练，模型级的提升几乎一样（合并 AUC +0.012 / +0.013，最差片 +0.044，
+  同样的 5 部变好、没有变差，两半都有变好），不是重训的偶然。
+- **E1d（训练只抽 4 帧）不差于 E1a，还快 37%**：保留。现用参数下 v09 代价 +25，是一个结果的置信度刚好掉到对白否决的
+  0.90 以下、音频提前 5 秒启动（视频在 v09 上的判别力没变）；两边各自重调后（12/13 折选 `BV_CONF 0.80`、`VIDEO_PLOT 0.75`）消失。
+- **E1b 没有定论**：lr 1e-4 时训练不稳（stage 2 的 val AUC 在 0.92~0.96 之间跳、val loss 翻倍，最好的是 warmup 刚结束的第 1 个
+  epoch）。它让最差的 v07 好得最多（误转 −103），但动作判成剧情变多（v05 多一次误停、v04 AUC −0.08）。
+- **E1c（label smoothing）不要**：模型级提升最小、3 部片变差；置信度被压低（≥0.99 的窗口 65% → 10%），融合里按置信度的规则
+  （对白否决 0.90、视频强转 0.85）失效，v09 +120，重调也救不回来（留一 1471）。
+- **P1 的配方 = E1d**（E1a 的打包改动 + 训练抽 4 帧），已经训好，不用再"组合"重训。可选再试一次温和的 E1b（见下），
+  不比 E1d 好就用 E1d。
+
+```bash
+# 可选：E1d 上加深微调，lr 降到 3e-5；stage 1 与 E1d 完全相同，直接复用
+python3 training/train_video.py --preset e1b --train_frames 4 --stage2_lr 3e-5 \
+    --init $R/e1d/best_stage1.weights.h5 --stage1_epochs 0 --data_dir $D --out_dir $R/e1bd
+```
+
 ## 6. 做完发回来什么
 
-每个实验：`$R/<名字>/summary.json`、`train.log`、`train_stage1_log.csv`、`train_stage2_log.csv`，以及 bench 的报告
+每个实验：`$R/<名字>/summary.json`、`train.log`、`train_stage1_log.csv`、`train_stage2_log.csv`（可以像 E1a 那样拷进
+`training/results/<名字>/` 提交，权重和 tflite 不提交），以及 bench 的报告
 `bench/baseline/compare_*.txt`、`frame_diag_*.txt`（E1c 还有 `retune_compare_*.txt`）。也可以把
 `bench/rescored/video_<名字>_runs_initial|_runs_test`（每个变体约 7 MB）和 `bench/baseline/` 的报告提交到这个分支，
 这样逐帧诊断、重调都能直接复现。

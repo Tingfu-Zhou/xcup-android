@@ -51,6 +51,10 @@ GRIDS = OrderedDict([
                           ('ARB_V_FLOOR', (0.85, 0.75, 0.92)), ('ARB_BV_CONF', (0.90, 0.80, 0.95))])),
 ])
 SHORT = OrderedDict([('VIDEO_DO', '转'), ('VIDEO_PLOT', '不转'), ('ARB_V_FLOOR', 'V_FLOOR'), ('ARB_BV_CONF', 'BV_CONF')])
+# 验收线里"seek 进动作段启动不变慢"的容差。cue_lab.acceptance 比的是同一个模型上的融合规则，值一模一样才算不变；
+# 两个视频模型比时，结果时刻差几毫秒中位数就会动（实测 4.0125 vs 4.0130 秒），那不算变慢
+SEEK_TOL_S = 0.1          # 中位数、p90
+HARD_TOL_S = 0.5          # 特写 / 低声音的 p90（只有六十来个样本）
 
 
 def combos(grid):
@@ -218,6 +222,17 @@ def retune(name, grid='conf', cost=None, jobs=1, log=print):
                 insample=best, insample_cost=totals[best], current_cost=totals[0])
 
 
+def acceptance(new_pv, base_pv, base_total, new_total, new_sum, base_sum):
+    """README 第 6 节的验收线（cue_lab.acceptance），seek 那一条留容差（见 SEEK_TOL_S）。→ (全部通过, 每条一行)"""
+    _, lines = C.acceptance(new_pv, base_pv, base_total, new_total, new_sum, base_sum)
+    c4 = (new_sum['seek_med'] <= base_sum['seek_med'] + SEEK_TOL_S
+          and new_sum['seek_p90'] <= base_sum['seek_p90'] + SEEK_TOL_S
+          and new_sum['seek_never'] <= base_sum['seek_never']
+          and new_sum['hard_p90'] <= base_sum['hard_p90'] + HARD_TOL_S)
+    lines[3] = ('✓' if c4 else '✗') + lines[3][1:] + '（容差：中位数 / p90 %.1f 秒，特写 %.1f 秒）' % (SEEK_TOL_S, HARD_TOL_S)
+    return all(x.startswith('✓') for x in lines), lines
+
+
 def _line(s):
     return ('代价 %.0f，准确率 %s，误转 %s，漏转 %s，误停 %d 次，seek 进动作段 p90 %.1fs（特写/低声音 %.1fs），没启动 %d'
             % (s['cost'], A._pct(s['acc']).strip(), A._pct(s['fp']).strip(), A._pct(s['fn']).strip(), s['stops'],
@@ -241,7 +256,7 @@ def report_run(r):
         b, n = r['base_pv'][vid], r['pv'][vid]
         out.append('    %s  %7.1f → %7.1f  (%+.1f)%s' % (vid, b, n, n - b,
                                                        '' if r['chosen'][vid] == 0 else '   ' + combo_str(cs[r['chosen'][vid]])))
-    ok, lines = C.acceptance(r['pv'], r['base_pv'], r['base_rep']['cost'], r['rep']['cost'], r['sum'], r['base_sum'])
+    ok, lines = acceptance(r['pv'], r['base_pv'], r['base_rep']['cost'], r['rep']['cost'], r['sum'], r['base_sum'])
     out += ['', '  验收线（留一选参 vs 现用参数，同一个模型）：'] + ['    ' + x for x in lines]
     out.append('    结论：%s' % ('重调有用（全部通过）' if ok else '重调不值得（没过验收线），用现用参数'))
     return '\n'.join(out) + '\n'
@@ -257,7 +272,7 @@ def report_compare(ra, rb):
     for vid in ra['vids']:
         if vid in rb['pv']:
             out.append('    %s  %7.1f → %7.1f  (%+.1f)' % (vid, ra['pv'][vid], rb['pv'][vid], rb['pv'][vid] - ra['pv'][vid]))
-    ok, lines = C.acceptance(rb['pv'], ra['pv'], ra['rep']['cost'], rb['rep']['cost'], rb['sum'], ra['sum'])
+    ok, lines = acceptance(rb['pv'], ra['pv'], ra['rep']['cost'], rb['rep']['cost'], rb['sum'], ra['sum'])
     out += ['', '  验收线（%s 对 %s，两边都是留一选参）：' % (rb['name'], ra['name'])] + ['    ' + x for x in lines]
     out.append('    结论：%s' % ('%s 全部通过' % rb['name'] if ok else '%s 没过验收线' % rb['name']))
     return '\n'.join(out) + '\n'
@@ -323,6 +338,13 @@ def selftest():
         check(abs(r['base_rep']['cost'] - ref) < 1e-6 and r['rep']['cost'] == r['rep']['cost'] and '验收线' in text,
               'exact_crop 只调视频阈值：现用 %.0f，留一选参 %.0f，样本内 %.0f（%.0f 秒；2026-10-15 的结果是 1219 / 1219 / 1218）'
               % (r['base_rep']['cost'], r['rep']['cost'], r['insample_cost'], time.time() - t0))
+        same = dict(r['base_sum'])
+        ok, lines = acceptance(r['base_pv'], r['base_pv'], r['base_rep']['cost'], r['base_rep']['cost'] * 0.9, same,
+                               dict(same, seek_med=same['seek_med'] - 0.05, hard_p90=same['hard_p90'] - 0.4))
+        slow = dict(same, seek_med=same['seek_med'] + 0.5)
+        ok2, _ = acceptance(r['base_pv'], r['base_pv'], r['base_rep']['cost'], r['base_rep']['cost'] * 0.9, slow, same)
+        check(lines[3].startswith('✓') and not ok2,
+              '验收线的 seek 一条：差几十毫秒不算变慢，慢 0.5 秒算')
     if fails:
         print('selftest: %d 项失败' % len(fails))
         return 1

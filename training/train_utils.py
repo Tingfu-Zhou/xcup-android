@@ -721,12 +721,23 @@ def tflite_structure(path, frames=EVAL_FRAMES, size=IMAGE_SIZE):
                 n_ops=len(ops), **meta)
 
 
+def keras_probs_cpu(model, x, batch=8):
+    """在 CPU 上逐批直接调用 Keras 模型（eager，不走 XLA），float32。导出核对用它当参照：GPU 上 Ampere 及以后的卡
+    （RTX 30/40 系）TensorFlow 默认用 TF32 算卷积和矩阵乘（只有约 3 位有效数字），再加上 Keras 在 GPU 上默认 XLA 编译，
+    和 TFLite（CPU float32）比概率能差到 1e-2，那是参照不准，不是导出有问题。"""
+    out = []
+    with tf.device('/CPU:0'):
+        for i in range(0, len(x), batch):
+            out.append(np.asarray(model(x[i:i + batch], training=False), np.float32))
+    return np.concatenate(out)
+
+
 def check_tflite(keras_model, path, clips, atol=1e-4, log=print):
-    """真实片段（[12, S, S, 3] uint8 的列表）上比 Keras 导出模型和 TFLite：概率最大差、argmax 一致；
+    """真实片段（[12, S, S, 3] uint8 的列表）上比 Keras 导出模型（CPU float32）和 TFLite：概率最大差、argmax 一致；
     再按 bench 的 video_rescore.VideoModel 的方法（读 PACK 的 12 个输入 × 线性层 → 逐帧 logit → 平均 → softmax）重算，
-    应与 TFLite 的输出相同。→ dict（ok、各项差值）。"""
+    应与 TFLite 的输出相同。有 GPU 时另给 GPU 上 Keras 的差（gpu_diff，TF32，只作参考，不参与判断）。→ dict。"""
     x = np.stack(clips).astype(np.float32)
-    pk = np.asarray(keras_model.predict(x, batch_size=8, verbose=0), np.float32)
+    pk = keras_probs_cpu(keras_model, x)
     it = _interp(path, preserve=True)
     inp, out = it.get_input_details()[0]['index'], it.get_output_details()[0]['index']
     ops = it._get_ops_details()
@@ -746,9 +757,40 @@ def check_tflite(keras_model, path, clips, atol=1e-4, log=print):
     pt, pd = np.stack(pt), np.stack(pd)
     r = dict(n=len(x), max_diff=float(np.abs(pk - pt).max()), bench_diff=float(np.abs(pd - pt).max()),
              argmax_agree=float(np.mean(pk.argmax(1) == pt.argmax(1))),
-             do_agree=float(np.mean(((pk[:, 1] + pk[:, 2]) >= APP_DO) == ((pt[:, 1] + pt[:, 2]) >= APP_DO))))
+             do_agree=float(np.mean(((pk[:, 1] + pk[:, 2]) >= APP_DO) == ((pt[:, 1] + pt[:, 2]) >= APP_DO))),
+             reference='keras_cpu_float32')
+    if tf.config.list_physical_devices('GPU'):
+        pg = np.asarray(keras_model.predict(x, batch_size=8, verbose=0), np.float32)
+        r['gpu_diff'] = float(np.abs(pg - pt).max())
     r['ok'] = r['max_diff'] <= atol and r['bench_diff'] <= atol and r['argmax_agree'] == 1.0
     return r
+
+
+def worst_films(probs, labels, film_keys, n=10, classes=CLASS_NAMES):
+    """按片子（类别 + 源视频）的准确率从低到高 → [(类别名, 源视频, 片段数, 准确率, 平均 p_do, 判错时多判成哪类)]。
+    整部片几乎全错的，先人工看一眼是不是标错 / 混进了别的内容。"""
+    probs, labels, keys = np.asarray(probs), np.asarray(labels), np.asarray(film_keys)
+    rows = []
+    for k in sorted(set(keys)):
+        m = keys == k
+        c = int(labels[m][0])
+        pred = probs[m].argmax(axis=1)
+        wrong = Counter(int(x) for x in pred[pred != c])
+        rows.append((float(np.mean(pred == c)), -int(m.sum()), classes[c], k.split('|', 1)[1], int(m.sum()),
+                     float(np.mean(probs[m, 1] + probs[m, 2])),
+                     classes[wrong.most_common(1)[0][0]] if wrong else ''))
+    rows.sort()
+    return [(cn, film, cnt, acc, pdo, w) for acc, _, cn, film, cnt, pdo, w in rows[:n]]
+
+
+def fmt_worst(rows, title):
+    out = ['  %s（按片子的准确率从低到高；整部几乎全错的先人工看一眼是不是标错）：' % title,
+           '    ' + D.lpad('真值', 12) + D.lpad('源视频', 42) + D.rpad('片段', 6) + D.rpad('准确率', 8) +
+           D.rpad('平均 p_do', 10) + '  多判成']
+    for cn, film, cnt, acc, pdo, w in rows:
+        out.append('    ' + D.lpad(cn, 12) + D.lpad(film[:40], 42) + D.rpad(str(cnt), 6) +
+                   D.rpad('%.0f%%' % (100 * acc), 8) + D.rpad('%.3f' % pdo, 10) + '  ' + w)
+    return '\n'.join(out)
 
 
 def balanced_pick(samples, n, seed=0):
@@ -794,6 +836,11 @@ def selftest():
     t = [tsn_indices(36, 4, rng) for _ in range(200)]
     check(all(9 * k <= x[k] < 9 * (k + 1) for x in t for k in range(4)) and len(set(int(x[0]) for x in t)) == 9,
           'TSN 取 4 帧：每段一帧，段内随机')
+    wf = worst_films(np.array([[.9, .05, .05], [.2, .1, .7], [.1, .1, .8], [.1, .8, .1], [.6, .2, .2]]),
+                     np.array([0, 0, 0, 1, 1]), np.array(['0|a', '0|b', '0|b', '1|c', '1|d']), 3)
+    check([(r[1], r[2], r[3], r[5]) for r in wf] == [('b', 2, 0.0, 'sex'), ('d', 1, 0.0, 'normal_plot'),
+                                                    ('a', 1, 1.0, '')],
+          '按片子列出最差的几部（全错的在前，同样全错时片段多的在前）')
     check(abs(auc([0.9, 0.8, 0.7, 0.6], [1, 1, 0, 0]) - 1.0) < 1e-12 and abs(auc([0.5, 0.5], [1, 0]) - 0.5) < 1e-12
           and abs(auc([1.0, 0.8, 0.6, 0.7, 0.2], [1, 1, 1, 0, 0]) - 5 / 6.0) < 1e-12, 'AUC（与 metrics._auc 同口径）')
     tmp = tempfile.mkdtemp(prefix='train_utils_')

@@ -1,0 +1,118 @@
+{
+ "preset": "e1a",
+ "name": "e1a",
+ "stages": {
+  "1": {
+   "weights": "/home/tingfu/ml/movinet/runs/e1a/best_stage1.weights.h5",
+   "monitor": "val_auc_do",
+   "best_epoch": 8,
+   "best": 0.9412201071239973
+  },
+  "2": {
+   "weights": "/home/tingfu/ml/movinet/runs/e1a/best_stage2.weights.h5",
+   "monitor": "val_auc_do",
+   "best_epoch": 7,
+   "best": 0.9531153901382092
+  }
+ },
+ "final_weights": "/home/tingfu/ml/movinet/runs/e1a/best_stage2.weights.h5",
+ "read_failures": {},
+ "val": {
+  "n": 6159,
+  "auc_do": 0.9531153901382092,
+  "acc": 0.8593927585647021,
+  "bin_acc": 0.9087514206851761,
+  "loss": 0.6356079264934514,
+  "cm": [
+   [
+    1595,
+    86,
+    412
+   ],
+   [
+    28,
+    1861,
+    139
+   ],
+   [
+    40,
+    161,
+    1837
+   ]
+  ],
+  "app_fp": 0.21978021978021978,
+  "app_fn": 0.011067388096409248,
+  "app_unclear": 0.014937489852248742,
+  "conf99": 0.8515992855983114,
+  "film_acc": 0.8410626563698271,
+  "film_acc_worst": 0.0,
+  "n_films": 215,
+  "n_bad": 0
+ },
+ "test": {
+  "n": 6091,
+  "auc_do": 0.9833666818754256,
+  "acc": 0.8811361024462322,
+  "bin_acc": 0.9428665243802331,
+  "loss": 0.3736914311718107,
+  "cm": [
+   [
+    1820,
+    87,
+    96
+   ],
+   [
+    41,
+    1860,
+    166
+   ],
+   [
+    126,
+    208,
+    1687
+   ]
+  ],
+  "app_fp": 0.07688467299051423,
+  "app_fn": 0.03498043052837573,
+  "app_unclear": 0.018059431948776884,
+  "conf99": 0.8039730750287309,
+  "film_acc": 0.8525115942054335,
+  "film_acc_worst": 0.0,
+  "n_films": 194,
+  "n_bad": 0
+ },
+ "export": {
+  "tflite": "/home/tingfu/ml/movinet/runs/e1a/e1a.tflite",
+  "structure": {
+   "ok": true,
+   "problems": [],
+   "ops": {
+    "TRANSPOSE": 2,
+    "STRIDED_SLICE": 12,
+    "MUL": 228,
+    "ADD": 84,
+    "CONV_2D": 492,
+    "HARD_SWISH": 216,
+    "DEPTHWISE_CONV_2D": 132,
+    "MEAN": 121,
+    "PACK": 1,
+    "FULLY_CONNECTED": 1,
+    "SOFTMAX": 1,
+    "DELEGATE": 3
+   },
+   "size": 4200080,
+   "n_ops": 1293,
+   "min_runtime_version": "2.3.0",
+   "converter_tf": "2.20.0"
+  },
+  "parity": {
+   "n": 48,
+   "max_diff": 0.009500980377197266,
+   "bench_diff": 4.76837158203125e-07,
+   "argmax_agree": 1.0,
+   "do_agree": 1.0,
+   "ok": false
+  }
+ },
+ "minutes": 185.55945974588394
+}

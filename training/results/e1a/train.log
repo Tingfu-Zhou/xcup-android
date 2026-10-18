@@ -1,0 +1,63 @@
+
+████ train_video.py 2026-10-17 18:50  preset=e1a  → /home/tingfu/ml/movinet/runs/e1a ████
+[INFO] GPU：/physical_device:GPU:0
+[INFO] 版本：python 3.10.12，tensorflow 2.20.0，keras 3.12.2，numpy 2.2.6，opencv 4.13.0
+[数据] train：30446 个片段（normal_plot 10113 个 / 109 部，oral 10100 个 / 225 部，sex 10233 个 / 229 部）
+[数据] val：6159 个片段（normal_plot 2093 个 / 48 部，oral 2028 个 / 70 部，sex 2038 个 / 97 部）
+[数据] test：6091 个片段（normal_plot 2003 个 / 19 部，oral 2067 个 / 79 部，sex 2021 个 / 96 部）
+[数据] 采样：类别等权；类别内按 片段数^0.5 选源视频
+  normal_plot 109 部；片段最多的 hhd800.com@START-529 占片段 7% → 采样 3%，hhd800.com@SONE-850- 占片段 6% → 采样 3%，hhd800.com@START-451 占片段 4% → 采样 2%
+  oral        225 部；片段最多的 hhd800.com@SONE-763- 占片段 3% → 采样 1%，FC2-2896873-00.13.27 占片段 2% → 采样 1%，hhd800.com@SONE-720- 占片段 2% → 采样 1%
+  sex         229 部；片段最多的 SDDE-697-00.10.47.97 占片段 2% → 采样 1%，SDDE-697-00.30.55.17 占片段 2% → 采样 1%，_ThZu.Cc_101918-776- 占片段 2% → 采样 1%
+
+══ Stage 1：只训线性层（backbone 冻结），Adam lr 0.001 ══
+  可训练参数 1731（backbone 0）；每个 epoch 3805 步 × 8 个片段 × 12 帧；按 val_auc_do 选，早停 patience 4
+  [epoch 1] val：AUC(p_do) 0.9336  准确率 82.4%  按片子 79.5%（最差 0%）  loss 0.527  app 阈值：剧情判转 24.3% 动作判不转 1.5% unclear 3.5%  置信≥0.99 45%（57 秒）
+  [epoch 2] val：AUC(p_do) 0.9341  准确率 82.6%  按片子 80.0%（最差 0%）  loss 0.516  app 阈值：剧情判转 23.7% 动作判不转 2.0% unclear 3.1%  置信≥0.99 50%（37 秒）
+  [epoch 3] val：AUC(p_do) 0.9274  准确率 82.5%  按片子 80.3%（最差 0%）  loss 0.519  app 阈值：剧情判转 22.6% 动作判不转 2.7% unclear 3.7%  置信≥0.99 49%（37 秒）
+  [epoch 4] val：AUC(p_do) 0.9382  准确率 82.0%  按片子 79.3%（最差 0%）  loss 0.508  app 阈值：剧情判转 21.4% 动作判不转 2.6% unclear 3.8%  置信≥0.99 50%（46 秒）
+  [epoch 5] val：AUC(p_do) 0.9353  准确率 83.1%  按片子 81.6%（最差 0%）  loss 0.544  app 阈值：剧情判转 25.3% 动作判不转 1.2% unclear 2.9%  置信≥0.99 54%（41 秒）
+  [epoch 6] val：AUC(p_do) 0.9389  准确率 80.5%  按片子 76.5%（最差 0%）  loss 0.569  app 阈值：剧情判转 25.3% 动作判不转 1.4% unclear 2.8%  置信≥0.99 58%（42 秒）
+  [epoch 7] val：AUC(p_do) 0.9336  准确率 82.5%  按片子 80.1%（最差 0%）  loss 0.510  app 阈值：剧情判转 21.7% 动作判不转 2.6% unclear 3.9%  置信≥0.99 50%（47 秒）
+  [epoch 8] val：AUC(p_do) 0.9412  准确率 79.0%  按片子 75.2%（最差 0%）  loss 0.585  app 阈值：剧情判转 26.2% 动作判不转 0.9% unclear 3.2%  置信≥0.99 57%（44 秒）
+  [epoch 9] val：AUC(p_do) 0.9408  准确率 82.5%  按片子 79.9%（最差 0%）  loss 0.528  app 阈值：剧情判转 23.8% 动作判不转 1.3% unclear 3.0%  置信≥0.99 54%（44 秒）
+  [epoch 10] val：AUC(p_do) 0.9311  准确率 82.0%  按片子 79.8%（最差 0%）  loss 0.516  app 阈值：剧情判转 21.4% 动作判不转 3.5% unclear 4.2%  置信≥0.99 49%（40 秒）
+  stage 1 用时 77 分钟；最好的一轮：epoch 8，val_auc_do = 0.9412
+
+══ Stage 2：解冻 last:30（backbone 第 128/158 层 expanded_conv_9_depthwise_bn 起，BN 冻结），adam lr 1e-05，ReduceLROnPlateau ══
+  可训练参数 570531（backbone 568800）；每个 epoch 3805 步 × 8 个片段 × 12 帧；按 val_auc_do 选，早停 patience 6
+  [epoch 1] val：AUC(p_do) 0.9500  准确率 84.3%  按片子 82.1%（最差 0%）  loss 0.498  app 阈值：剧情判转 23.1% 动作判不转 1.4% unclear 2.4%  置信≥0.99 67%（55 秒）
+  [epoch 2] val：AUC(p_do) 0.9504  准确率 85.0%  按片子 83.0%（最差 0%）  loss 0.543  app 阈值：剧情判转 23.9% 动作判不转 1.0% unclear 1.8%  置信≥0.99 76%（41 秒）
+  [epoch 3] val：AUC(p_do) 0.9523  准确率 85.2%  按片子 83.2%（最差 0%）  loss 0.605  app 阈值：剧情判转 24.4% 动作判不转 0.8% unclear 1.5%  置信≥0.99 82%（41 秒）
+  [epoch 4] val：AUC(p_do) 0.9500  准确率 85.4%  按片子 83.4%（最差 0%）  loss 0.656  app 阈值：剧情判转 24.2% 动作判不转 0.9% unclear 1.3%  置信≥0.99 85%（42 秒）
+  [epoch 5] val：AUC(p_do) 0.9527  准确率 85.5%  按片子 83.5%（最差 0%）  loss 0.611  app 阈值：剧情判转 22.5% 动作判不转 1.0% unclear 1.4%  置信≥0.99 84%（45 秒）
+  [epoch 6] val：AUC(p_do) 0.9521  准确率 86.1%  按片子 84.4%（最差 0%）  loss 0.626  app 阈值：剧情判转 22.8% 动作判不转 1.0% unclear 1.3%  置信≥0.99 85%（43 秒）
+  [epoch 7] val：AUC(p_do) 0.9531  准确率 85.9%  按片子 84.1%（最差 0%）  loss 0.636  app 阈值：剧情判转 22.0% 动作判不转 1.1% unclear 1.5%  置信≥0.99 85%（44 秒）
+  [epoch 8] val：AUC(p_do) 0.9526  准确率 86.0%  按片子 84.2%（最差 0%）  loss 0.645  app 阈值：剧情判转 22.5% 动作判不转 1.1% unclear 1.4%  置信≥0.99 85%（41 秒）
+  [epoch 9] val：AUC(p_do) 0.9526  准确率 86.2%  按片子 84.5%（最差 0%）  loss 0.647  app 阈值：剧情判转 22.6% 动作判不转 1.1% unclear 1.3%  置信≥0.99 86%（44 秒）
+  [epoch 10] val：AUC(p_do) 0.9524  准确率 86.2%  按片子 84.5%（最差 0%）  loss 0.654  app 阈值：剧情判转 22.6% 动作判不转 1.1% unclear 1.3%  置信≥0.99 86%（43 秒）
+  [epoch 11] val：AUC(p_do) 0.9529  准确率 86.1%  按片子 84.2%（最差 0%）  loss 0.647  app 阈值：剧情判转 22.3% 动作判不转 1.2% unclear 1.3%  置信≥0.99 86%（43 秒）
+  [epoch 12] val：AUC(p_do) 0.9526  准确率 86.1%  按片子 84.2%（最差 0%）  loss 0.652  app 阈值：剧情判转 22.5% 动作判不转 1.2% unclear 1.3%  置信≥0.99 86%（44 秒）
+  [epoch 13] val：AUC(p_do) 0.9525  准确率 86.2%  按片子 84.4%（最差 0%）  loss 0.655  app 阈值：剧情判转 22.7% 动作判不转 1.1% unclear 1.3%  置信≥0.99 86%（43 秒）
+  stage 2 用时 106 分钟；最好的一轮：epoch 7，val_auc_do = 0.9531
+
+最终用 best_stage2.weights.h5（val_auc_do = 0.9531）
+[val] val：AUC(p_do) 0.9531  准确率 85.9%  按片子 84.1%（最差 0%）  loss 0.636  app 阈值：剧情判转 22.0% 动作判不转 1.1% unclear 1.5%  置信≥0.99 85%
+       混淆矩阵（行 = 真值 normal_plot/oral/sex，列 = 预测）：[[1595, 86, 412], [28, 1861, 139], [40, 161, 1837]]
+[test] test：AUC(p_do) 0.9834  准确率 88.1%  按片子 85.3%（最差 0%）  loss 0.374  app 阈值：剧情判转 7.7% 动作判不转 3.5% unclear 1.8%  置信≥0.99 80%
+       混淆矩阵（行 = 真值 normal_plot/oral/sex，列 = 预测）：[[1820, 87, 96], [41, 1860, 166], [126, 208, 1687]]
+
+══ 导出 /home/tingfu/ml/movinet/runs/e1a/e1a.tflite ══
+  结构：✓ 与 app 现用模型相同（1 个 PACK × 12 + 1 个 FULLY_CONNECTED，bench 可直接用）；1293 个算子，4.2 MB；TF 2.20.0 转换，min_runtime_version 2.3.0
+  ✗ Keras / TFLite 一致性（48 个真实验证片段）：概率最大差 9.5e-03，bench 的逐帧 logit 算法重算差 4.8e-07，argmax 一致 100%，app 判定一致 100%
+
+完成，用时 186 分钟。下一步（仓库根目录，在放 13 部原片的电脑上）：
+  python3 bench/tools/baseline.py rescore --videos <原片目录> --model /home/tingfu/ml/movinet/runs/e1a/e1a.tflite --name e1a --jobs 4
+  python3 bench/tools/baseline.py compare exact_crop e1a
+  python3 bench/tools/frame_diag.py --name exact_crop --name e1a
+⚠ 导出核对没过（见上面），先别拿去 rescore
+从 /home/tingfu/ml/movinet/runs/e1a/best_stage2.weights.h5 重新导出
+
+══ 导出 /home/tingfu/ml/movinet/runs/e1a/e1a.tflite ══
+  结构：✓ 与 app 现用模型相同（1 个 PACK × 12 + 1 个 FULLY_CONNECTED，bench 可直接用）；1293 个算子，4.2 MB；TF 2.20.0 转换，min_runtime_version 2.3.0
+  ✗ Keras / TFLite 一致性（48 个真实验证片段）：概率最大差 9.1e-03，bench 的逐帧 logit 算法重算差 4.8e-07，argmax 一致 100%，app 判定一致 100%

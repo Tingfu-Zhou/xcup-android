@@ -461,11 +461,11 @@ def report_compare(results, films_by_name):
                 '判对 → 判错 %.0f 秒（剧情 %.0f、动作 %.0f）' % (
                     pr['n'], pr['fix_fp'] + pr['fix_fn'], pr['fix_fp'], pr['fix_fn'],
                     pr['break_fp'] + pr['break_fn'], pr['break_fp'], pr['break_fn'])]
-        h0 = [base['auc'][('half', h)][0] for h, _ in HALVES]
-        h1 = [r['auc'][('half', h)][0] for h, _ in HALVES]
-        d = [b - a for a, b in zip(h0, h1)]
-        if (d[0] > 0.005) != (d[1] > 0.005):
-            out.append('  ⚠ 只在一半片子上变好（合并 AUC 变化：v01~v07 %+.3f，v08~v13 %+.3f），要谨慎' % tuple(d))
+        # 两半各有几部变好 / 变差（按逐片 AUC；只看合并 AUC 不行：v08~v13 本来就接近 1，合并 AUC 动不了多少）
+        halves = [(h, sum(1 for v in vids if v in better), sum(1 for v in vids if v in worse)) for h, vids in HALVES]
+        out.append('  两半：%s' % '；'.join('%s 变好 %d 部、变差 %d 部' % x for x in halves))
+        if (halves[0][1] > 0) != (halves[1][1] > 0) or any(b == 0 and w > 0 for _, b, w in halves):
+            out.append('  ⚠ 只在一半片子上变好，要谨慎')
     return '\n'.join(out) + '\n'
 
 
