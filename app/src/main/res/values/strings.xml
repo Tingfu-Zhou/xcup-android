@@ -29,17 +29,19 @@
     <string name="web_video_status_found">已嗅探到视频流，可点击开始分析</string>
     <string name="web_video_start_analyze">开始分析</string>
     <string name="web_video_back">返回</string>
+    <string name="web_video_ad_tip_title">抓到的可能是广告</string>
+    <string name="web_video_ad_tip_body">部分网站会先插播广告，嗅探到的可能是广告而不是正片。建议等正片开始播放后再点「开始分析」；若仍抓到广告，可改用主页的「在线分析」（录屏），在该网站的官方 App 里播放。</string>
+    <string name="web_video_ad_tip_close">关闭提示</string>
 
     <!-- Online analysis page -->
     <string name="online_back">返回</string>
     <string name="online_status_waiting">进入在线分析状态，分析启动需等待数秒</string>
     <string name="online_status_running">在线分析已启动</string>
     <string name="online_status_subtitle">可以返回桌面，观看在线视频</string>
-    <string name="online_orientation_tip_title">推荐观看方式</string>
-    <string name="online_orientation_tip_body">建议将手机横屏并全屏播放视频，识别效果最佳。</string>
-    <string name="online_browser_notice_title">温馨提示</string>
-    <string name="online_browser_notice_body">部分浏览器（如 Chrome、Firefox）出于安全考虑，会自动将屏幕共享中的视频画面遮黑，并显示 “为了安全起见，屏幕共享画面已隐藏此应用的内容” 等提示。\n\n为了保证分析的准确性，录屏模式建议使用对应视频网站的官方 App 直接观看视频(部分app会禁止屏幕/音频抓取)。</string>
-    <string name="online_exit_tip">如需退出在线分析，可点击屏幕上方通知栏 “屏幕共享 共享中” ，并点击停止按钮。</string>
+    <string name="online_tips_title">使用提示</string>
+    <string name="online_tip_landscape">请横屏并全屏播放视频。画面识别只看屏幕中央，竖屏小窗播放会认不准。</string>
+    <string name="online_tip_browser">Chrome、Firefox 等浏览器会把录屏中的视频画面遮黑。网页上的视频请改用「网页视频」模式，或在视频网站的官方 App 里播放（个别 App 禁止录屏或录音）。</string>
+    <string name="online_tip_exit">退出：回到本页面点左上角返回，或在系统的屏幕共享提示里点「停止」。</string>
 
     <!-- Manual control page -->
     <string name="manual_title">手动电子菜单</string>

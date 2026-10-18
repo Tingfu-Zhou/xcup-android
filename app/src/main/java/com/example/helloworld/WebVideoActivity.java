@@ -2,6 +2,7 @@ package com.example.helloworld;
 
 import android.annotation.SuppressLint;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.net.Uri;
 import android.os.Build;
@@ -61,6 +62,10 @@ public class WebVideoActivity extends AppCompatActivity {
     public static final String EXTRA_HTTP_COOKIE = "HTTP_COOKIE";
     /** WebView 里 &lt;video&gt;.currentTime 的当前播放位置（ms），分析页开局 seek 到这里 */
     public static final String EXTRA_START_POSITION_MS = "START_POSITION_MS";
+
+    /** 「抓到的可能是广告」提示卡被用户关掉后记一笔，以后不再显示 */
+    private static final String PREFS = "web_video";
+    private static final String KEY_AD_TIP_DISMISSED = "ad_tip_dismissed";
 
     /** 常见广告/分析域名黑名单。命中即在 shouldInterceptRequest 里返回空响应。 */
     private static final Set<String> AD_HOSTS = new HashSet<>(Arrays.asList(
@@ -197,6 +202,7 @@ public class WebVideoActivity extends AppCompatActivity {
         btnAnalyze = findViewById(R.id.btnAnalyze);
         tvStatus = findViewById(R.id.tvStatus);
 
+        setupAdTip();
         configureWebView();
 
         btnOpen.setOnClickListener(v -> openCurrentUrl());
@@ -221,6 +227,23 @@ public class WebVideoActivity extends AppCompatActivity {
             }
         };
         jsPollHandler.postDelayed(jsPollRunnable, JS_POLL_INTERVAL_MS);
+    }
+
+    /**
+     * 「抓到的可能是广告」提示卡：部分网站先插播广告，嗅探到的可能是广告片段，提示等正片再分析，
+     * 或改用在线分析（录屏）。用户点关闭后不再显示（记在 SharedPreferences 里）。
+     */
+    private void setupAdTip() {
+        View cardAdTip = findViewById(R.id.cardAdTip);
+        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        if (prefs.getBoolean(KEY_AD_TIP_DISMISSED, false)) {
+            cardAdTip.setVisibility(View.GONE);
+            return;
+        }
+        findViewById(R.id.btnCloseAdTip).setOnClickListener(v -> {
+            cardAdTip.setVisibility(View.GONE);
+            prefs.edit().putBoolean(KEY_AD_TIP_DISMISSED, true).apply();
+        });
     }
 
     private void openCurrentUrl() {
