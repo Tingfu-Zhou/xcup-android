@@ -39,7 +39,7 @@
     <string name="online_status_running">在线分析已启动</string>
     <string name="online_status_subtitle">可以返回桌面，观看在线视频</string>
     <string name="online_tips_title">使用提示</string>
-    <string name="online_tip_landscape">请横屏并全屏播放视频。画面识别只看屏幕中央，竖屏小窗播放会认不准。</string>
+    <string name="online_tip_landscape">建议将手机横屏并全屏播放视频，识别效果最佳。</string>
     <string name="online_tip_browser">Chrome、Firefox 等浏览器会把录屏中的视频画面遮黑。网页上的视频请改用「网页视频」模式，或在视频网站的官方 App 里播放（个别 App 禁止录屏或录音）。</string>
     <string name="online_tip_exit">退出：回到本页面点左上角返回，或在系统的屏幕共享提示里点「停止」。</string>
 
