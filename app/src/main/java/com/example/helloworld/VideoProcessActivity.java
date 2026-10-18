@@ -234,10 +234,13 @@ public class VideoProcessActivity extends AppCompatActivity {
             new java.util.concurrent.atomic.AtomicBoolean(false);
 
     // [WebVideo] 网页视频模式相关
-    // 网页视频模式下没有 seek，没有 MediaController，分析的开/停由音频 VAD（参考在线模式）决定
+    // 网页视频模式没有 MediaController 和播放状态轮询：分析的开/停由音频 VAD（参考在线模式）决定，
+    // 播放器暂停（用户暂停、来电等）另外处理，见 onWebPlayerPlayIntentChanged
     private boolean isWebVideoMode = false;
-    // VAD 状态
-    private boolean webVadActive = false;
+    // VAD 状态（音频线程写，主线程也读写）
+    private volatile boolean webVadActive = false;
+    // [网页视频] 播放器是否处于暂停（用户暂停，或来电等抢走音频焦点）。只在主线程访问
+    private boolean webPlayerPaused = false;
     private long webVadLastActiveMs = 0;
     private int webVadConsecutiveSilentTicks = 0;
     // VAD 参数（音频循环每秒一次，5 个 silent tick ≈ 5 秒静音才暂停）
@@ -1383,6 +1386,16 @@ public class VideoProcessActivity extends AppCompatActivity {
             }
 
             @Override
+            public void onPlayWhenReadyChanged(boolean playWhenReady, int reason) {
+                onWebPlayerPlayIntentChanged(player);
+            }
+
+            @Override
+            public void onPlaybackSuppressionReasonChanged(int playbackSuppressionReason) {
+                onWebPlayerPlayIntentChanged(player);
+            }
+
+            @Override
             public void onPositionDiscontinuity(Player.PositionInfo oldPosition,
                                                 Player.PositionInfo newPosition,
                                                 int reason) {
@@ -1426,6 +1439,28 @@ public class VideoProcessActivity extends AppCompatActivity {
         player.setPlayWhenReady(true);
         exoPlayerEngine.setUri(videoUri.toString());
         Log.d(TAG, "[网页视频] ExoPlayer 已 prepare: " + videoUri);
+    }
+
+    /**
+     * [网页视频] 播放器"要不要播"变了：用户暂停 / 继续，或来电等抢走音频焦点（ExoPlayer 暂缓播放，playWhenReady 不变）。
+     *
+     * <p>暂停后 PCM 不再写入，VAD 和音频模型读到的一直是暂停前最后那几秒，靠 VAD 判断不出暂停：原来分析会接着跑，
+     * 暂停在动作上时马达也接着转。这里和离线模式一样处理：暂停时 pauseAnalysis（有证据的动作挂起、发 Noise）；
+     * 继续播放时 VAD 若还认为有声（暂停前在响）就直接 resumeAnalysis 接着转，否则照旧等 VAD 听到声音再恢复。
+     * 网络卡顿缓冲不算暂停（ExoPlayer 自己会接着播）。onPlayWhenReadyChanged 会重复报同一个值，这里只看状态变化。</p>
+     */
+    private void onWebPlayerPlayIntentChanged(Player player) {
+        boolean paused = !player.getPlayWhenReady()
+                || player.getPlaybackSuppressionReason() != Player.PLAYBACK_SUPPRESSION_REASON_NONE;
+        if (paused == webPlayerPaused) return;
+        webPlayerPaused = paused;
+        if (paused) {
+            Log.i(TAG, "[网页视频] 播放器暂停，暂停分析");
+            pauseAnalysis();
+        } else if (webVadActive) {
+            Log.i(TAG, "[网页视频] 播放器继续播放，恢复分析");
+            resumeAnalysis(false);
+        }
     }
 
     /**
@@ -1603,7 +1638,10 @@ public class VideoProcessActivity extends AppCompatActivity {
             if (!webVadActive) {
                 webVadActive = true;
                 Log.i(TAG, "[网页VAD] 检测到音频活动，恢复分析");
-                mainHandler.post(() -> resumeAnalysis(true));
+                mainHandler.post(() -> {
+                    // 播放器暂停期间不由 VAD 恢复（PCM 不再更新，VAD 听到的是暂停前的声音），继续播放时再处理
+                    if (!webPlayerPaused) resumeAnalysis(true);
+                });
             }
         } else {
             webVadConsecutiveSilentTicks++;
