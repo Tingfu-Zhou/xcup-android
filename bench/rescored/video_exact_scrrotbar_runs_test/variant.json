@@ -1,0 +1,13 @@
+{
+ "created": "2026-10-19 20:34",
+ "model": {
+  "file": "mobilenetv3small_tap_3class_float32.tflite",
+  "path": "app/src/main/assets/mobilenetv3small_tap_3class_float32.tflite",
+  "sha1": "63f3e033cf38",
+  "size": 4200080
+ },
+ "name": "exact_scrrotbar",
+ "pipe": "exact_scrrotbar",
+ "screen": "2756x1268",
+ "tool": "f750061"
+}
