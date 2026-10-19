@@ -27,7 +27,8 @@ bench/
     arbiter_lab.py        融合仲裁评测：逐片最差情况、seek 模拟、压力场景、慢手机、留一选参
     audio_rescore.py      音频离线重算：换音频模型不用上真机
     cue_lab.py            YAMNet 线索实验（第 6 节）：线索统计、误判归因、压力场景、留一视频选规则（app 用了其中的 a1bvid）
-    video_rescore.py      视频离线重算（第 7 节）：换抽帧方式 / 预处理 / 视频模型不用上真机；复现真机的 v_p_*
+    video_rescore.py      视频离线重算（第 7 节）：换抽帧方式 / 预处理 / 视频模型不用上真机；复现真机的 v_p_*；
+                          模拟在线模式（录屏）截到的画面
     baseline.py           统一评测基准：换视频模型 / 视频管线时只换视频结果，13 部片按同一口径比（check / rescore / eval / compare）
     frame_diag.py         视频模型的逐帧诊断：窗口长度 / 聚合方式的 AUC、置信度分布、成段的高置信度错误，几个变体并排
     retune.py             给一个视频变体留一视频重调视频阈值和与视频置信度有关的融合参数（label smoothing 之类改了概率分布时用）
@@ -334,7 +335,8 @@ python3 bench/tools/fusion_lab.py --selftest
 python3 bench/tools/metrics.py --selftest      # 含与 BenchLogger 的 CSV 列名契约检查
 python3 bench/tools/audio_rescore.py --selftest
 python3 bench/tools/cue_lab.py --selftest      # 开关全关时与 v1 逐 tick 一致、对拍数据、线索接上的比例
-python3 bench/tools/video_rescore.py --selftest  # 预处理对拍数据、与 cv2.INTER_AREA 一致、合成视频上的取帧与对齐
+python3 bench/tools/video_rescore.py --selftest  # 预处理 / ScreenCropper 对拍数据、与 cv2.INTER_AREA 一致、在线模式截图的几何、
+                                                # 合成视频上的取帧与对齐
 python3 bench/tools/baseline.py --selftest       # phone 与第 6 节一致、重算格式读对、模型指纹、check / rescore 的包装
 python3 bench/tools/frame_diag.py --selftest     # 合成数据上的 AUC / 成段错误 / 配对；exact_crop 的逐帧 logit 与 CSV 对上
 python3 bench/tools/retune.py --selftest         # 现用参数的回放与 baseline.py 相同；exact_crop 只调视频阈值的留一结果
@@ -493,6 +495,49 @@ python3 bench/tools/video_rescore.py --selftest
 - 局限：训练素材经过 x264 重编码（crf 23、224×224），`train` 管线没有模拟；`--model` 只支持与现用模型同一结构的模型；
   网页模式（TextureView 截帧）没有对应的离线管线。
 
+### 在线模式（录屏）的画面（2026-10-19）
+
+**问题**：训练素材是视频文件本身的居中正方形；在线模式截的是整个屏幕，取的是截图的居中正方形。只有横屏全屏播放、截图也是横屏
+尺寸时两者才相同。2026-10-19 之前 `OnlineAnalysisService` 只在启动时读一次屏幕尺寸（截图是屏幕的一半），之后不跟着转屏：竖屏
+打开在线分析、再转横屏全屏播放（最常见的用法）时，系统把横屏画面等比缩进竖屏尺寸的截图、上下补黑。2400×1080 的手机看 16:9
+的视频，模型输入（160×160）里是这样的：
+
+| 场景（管线） | 视频在模型输入里 | 与训练比 |
+|---|---|---|
+| 训练 / 离线模式（`exact_crop`） | 视频的居中正方形，占满 160×160 | — |
+| 横屏全屏，截图跟着转屏（`exact_scrland`） | 同上 | 一致（只是截图是屏幕一半的分辨率） |
+| 竖屏开始、转横屏全屏，截图还是竖屏尺寸（`exact_scrrot`，2026-10-19 之前） | 整幅 16:9 画面（含训练时裁掉的左右两边）缩成中间约 128×72，其余是黑的 | 画面缩到 0.45 倍，64% 是黑边 |
+| 竖屏全屏播放（`exact_scrport`） | 整幅画面缩成中间 160×90，上下是黑的 | 缩到 0.56 倍，44% 是黑边 |
+
+**修复**（app 2026-10-19）：
+1. `OnlineAnalysisService`：截图尺寸跟着被录的画面变。Android 14+ 用 `MediaProjection.Callback.onCapturedContentResize`
+   （"只共享一个应用"时也对），Android 13 及以下用 `DisplayListener` + `onConfigurationChanged`；先 `VirtualDisplay.setSurface`
+   换成新尺寸的 `ImageReader` 再 `resize`，都在截图线程上做；初始尺寸用屏幕的实际尺寸（含导航栏）。`OnlineAnalysisActivity`
+   看到截图尺寸变了就清空 12 帧窗口。
+2. `ScreenCropper`（纯 Java）：先在截图里找出视频画面（去掉对称的纯黑边），再取它的居中正方形。竖屏全屏、横屏看竖屏视频、
+   以及截图仍没跟上转屏的设备，都取回视频自己的居中正方形；横屏全屏看 16:9 时结果与不去黑边逐位相同。黑边不对称（画面上沿暗、
+   贴着视频的控制条）不裁；亮着的范围没超出上次裁剩的范围（暗场景、黑边里的字幕）就沿用；片源自己带的对称黑边（宽银幕压在 16:9
+   里）也会被裁掉。`ScreenCropper.ENABLED=false` 可关掉做 A/B。`ScreenCropperTest` 与 `video_rescore.py` 里的 Python 版逐帧对拍。
+
+**离线量化**：`video_rescore.py` 的 `scr*` 预处理在电脑上模拟在线模式的截图（见文件头；屏幕默认 2400×1080，`--screen` 改），
+只换视频结果，录像的 tick 时间轴、音频、融合都与统一基准相同，所以直接和 `e1d`（离线模式、app 现用模型）比：
+
+```bash
+for p in scrland scrrot scrport scrrotbar scrportbar; do
+  python3 bench/tools/baseline.py rescore --videos D:/xcup/videos --pipe exact_$p --jobs 4    # 每个和重算 e1d 差不多久
+done
+python3 bench/tools/baseline.py compare e1d exact_scrland exact_scrrot exact_scrrotbar exact_scrport exact_scrportbar
+python3 bench/tools/frame_diag.py --name e1d,exact_scrland,exact_scrrot,exact_scrport,exact_scrportbar
+```
+
+- 不带 `--model` 就是 app 里的模型（E1d），变体名默认就是管线名。PowerShell 里循环写成
+  `foreach ($p in 'scrland','scrrot','scrport','scrrotbar','scrportbar') { python bench/tools/baseline.py rescore --videos D:/xcup/videos --pipe "exact_$p" --jobs 4 }`。
+- 预期：`exact_scrland` ≈ `e1d`；`exact_scrrot` / `exact_scrport` 量出缩小加黑边让视频 AUC 和端到端差了多少；`…bar` 取回多少
+  （截图分辨率低、缩得多时 GPU 双线性有混叠，可能比 `exact_scrland` 略差）。`exact_scrlandbar` 与 `exact_scrland` 逐位相同，不用算。
+- 局限：没有模拟播放器的界面（状态栏、控制条、竖屏不全屏时周围的页面），视频以外全是纯黑；视频按 SurfaceFlinger 一次双线性合成进
+  截图（`gl_linear`），用 TextureView 的播放器中间多一次缩放没有模拟。在线模式不写评测 CSV，这些数字还没有真机对照；真机上用 logcat
+  看 `[录屏]`（转屏后的截图尺寸）和 `[视频线程] 截图 … 里的视频画面`（去黑边的结果）。
+
 ## 时间线
 
 - 2026-10-05：发现离线模式喂给音频模型的是半速音频（`AudioDecoder` 没按声道下混），用 `PcmResampler` 修复；之前录的 run 的音频结论作废。
@@ -529,3 +574,7 @@ python3 bench/tools/video_rescore.py --selftest
 - 2026-10-18：app 的视频模型换成 E1d，阈值、融合参数不变（第 5 节）。`baseline.py check` 加 `--model`：`runs_initial` / `runs_test`
   是旧模型录的，核对要用旧模型。P1 用完的文件删除（git 历史 `e8848b0` 里可找回）：E1a~E1c 的训练记录、报告和
   `bench/baseline/e1{a,b,c}.json`；P1 的对比报告只留 exact_crop 对 e1d 的（`compare_` / `frame_diag_` / `retune_compare_exact_crop_vs_e1d*`）。
+- 2026-10-19：在线模式（录屏）送进视频模型的画面与训练不一致：截图尺寸只在启动时定一次，竖屏开始、转横屏后系统把横屏画面缩进
+  竖屏尺寸的截图、上下补黑，模型看到的是缩成中间一条的整幅画面；竖屏全屏播放时也是上下黑边（第 7 节"在线模式（录屏）的画面"）。
+  app：截图尺寸跟着转屏（`OnlineAnalysisService`），新增 `ScreenCropper` 去黑边后再居中裁；`video_rescore.py` 加在线模式的
+  `scr*` 预处理，`golden` 同时生成 `ScreenCropperTest` 的对拍数据；`baseline.py rescore` 加 `--screen`。13 部片上的量化和真机验证待做。

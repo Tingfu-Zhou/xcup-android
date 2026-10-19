@@ -159,7 +159,7 @@ public class VideoClassifierHelper {
 
     /**
      * 任意尺寸的画面 → 模型输入（160×160）：按 {@link FramePreprocessor} 居中裁正方形、面积平均缩小，与训练一致。
-     * 网页模式（TextureView 截的帧）和在线模式（截屏）用它；离线模式在 VideoFrameExtractor 里已经处理好了。
+     * 网页模式（TextureView 截的帧）用它；在线模式先去黑边，用下面的重载；离线模式在 VideoFrameExtractor 里已经处理好了。
      *
      * @param scratch 可复用的像素缓冲（长度不够或为 null 时新建），避免每帧分配几 MB
      */
@@ -167,7 +167,15 @@ public class VideoClassifierHelper {
         int w = src.getWidth(), h = src.getHeight();
         int[] px = (scratch != null && scratch.length >= w * h) ? scratch : new int[w * h];
         src.getPixels(px, 0, w, 0, 0, w, h);
-        int[] out = FramePreprocessor.toModelInput(px, w, h, FramePreprocessor.cropRect(w, h));
+        return toModelBitmap(px, w, h, FramePreprocessor.cropRect(w, h));
+    }
+
+    /**
+     * 已经取出来的像素（ARGB，宽 w、高 h）里 region {x0, y0, w, h} 这一块 → 模型输入（160×160）。
+     * 在线模式：先用 ScreenCropper 在截屏里找出视频画面，region 是其中的居中正方形。
+     */
+    public static Bitmap toModelBitmap(int[] px, int w, int h, int[] region) {
+        int[] out = FramePreprocessor.toModelInput(px, w, h, region);
         return Bitmap.createBitmap(out, INPUT_SIZE, INPUT_SIZE, Bitmap.Config.ARGB_8888);
     }
 

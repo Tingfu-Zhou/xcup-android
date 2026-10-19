@@ -28,6 +28,7 @@ import androidx.core.content.ContextCompat;
 import com.google.android.material.appbar.MaterialToolbar;
 
 import java.util.ArrayDeque;
+import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -68,6 +69,10 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
     private final ArrayDeque<Bitmap> frameWindow = new ArrayDeque<>();
     // 截屏帧转模型输入时复用的像素缓冲（只在视频线程用）
     private int[] screenPixels;
+    // [去黑边] 在截屏里找出视频画面（ScreenCropper），再与训练一样取居中正方形。以下几个只在视频线程（videoLock 里）用
+    private final ScreenCropper screenCropper = new ScreenCropper();
+    private int[] lastVideoRect;                     // 上一次找到的视频画面（变了才打日志）
+    private int frameWidth = -1, frameHeight = -1;   // 帧窗口里截图的尺寸：转屏后截图尺寸变了，窗口里的旧帧作废
     private static final int FRAME_WINDOW_SIZE = VideoClassifierHelper.NUM_FRAMES;
 
     // 视频推理步长：每 500ms 推理一次（与离线模式 VideoProcessActivity 保持一致）
@@ -393,12 +398,30 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
      */
     private void cacheFrameAndInfer(Bitmap frame) {
         synchronized (videoLock) {
-            // 与训练一致：居中裁正方形、面积平均缩到 160（FramePreprocessor）。2026-10-14 之前是整屏直接压扁成 160×160，
-            // 竖屏看横屏视频时画面只占中间一条，压扁后几乎看不清；居中裁剪至少保住中间那块
-            if (screenPixels == null || screenPixels.length < frame.getWidth() * frame.getHeight()) {
-                screenPixels = new int[frame.getWidth() * frame.getHeight()];
+            int w = frame.getWidth(), h = frame.getHeight();
+            // 截图尺寸变了（转屏后 OnlineAnalysisService 换了截图尺寸）：窗口里的旧帧是另一种画面布局，作废重攒
+            if (w != frameWidth || h != frameHeight) {
+                if (!frameWindow.isEmpty()) {
+                    Log.i(TAG, String.format("[视频线程] 截图尺寸 %dx%d → %dx%d，清空帧窗口", frameWidth, frameHeight, w, h));
+                }
+                frameWindow.clear();
+                frameWidth = w;
+                frameHeight = h;
             }
-            Bitmap scaled = VideoClassifierHelper.toModelBitmap(frame, screenPixels);
+            // 与训练一致：先去掉截屏里视频四周的黑边（ScreenCropper），再居中裁正方形、面积平均缩到 160（FramePreprocessor）。
+            // 2026-10-14 之前是整屏直接压扁成 160×160；2026-10-19 之前不去黑边，竖屏全屏播放、截图没跟上转屏时，
+            // 居中正方形里大半是黑边，视频被缩成中间一条
+            if (screenPixels == null || screenPixels.length < w * h) {
+                screenPixels = new int[w * h];
+            }
+            frame.getPixels(screenPixels, 0, w, 0, 0, w, h);
+            int[] video = ScreenCropper.ENABLED ? screenCropper.update(screenPixels, w, h) : new int[]{0, 0, w, h};
+            if (!Arrays.equals(video, lastVideoRect)) {
+                Log.i(TAG, String.format("[视频线程] 截图 %dx%d 里的视频画面：(%d, %d) %dx%d",
+                        w, h, video[0], video[1], video[2], video[3]));
+                lastVideoRect = video;
+            }
+            Bitmap scaled = VideoClassifierHelper.toModelBitmap(screenPixels, w, h, FramePreprocessor.cropRect(video));
             frameWindow.add(scaled);
             while (frameWindow.size() > FRAME_WINDOW_SIZE) {
                 frameWindow.poll();
@@ -1032,6 +1055,9 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
         synchronized (videoLock) {
             frameWindow.clear();
             lastVideoInferenceTime = 0;
+            // 静音这么久，多半换了视频或应用：黑边从头找
+            screenCropper.reset();
+            lastVideoRect = null;
         }
 
         synchronized (audioLock) {

@@ -10,8 +10,10 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
+import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.PixelFormat;
+import android.graphics.Point;
 import android.hardware.display.DisplayManager;
 import android.hardware.display.VirtualDisplay;
 import android.media.AudioAttributes;
@@ -27,9 +29,12 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.DisplayMetrics;
 import android.util.Log;
+import android.view.Display;
 
+import androidx.annotation.NonNull;
 import androidx.annotation.RequiresApi;
 import androidx.core.app.NotificationCompat;
 import androidx.core.content.ContextCompat;
@@ -45,11 +50,20 @@ public class OnlineAnalysisService extends Service {
     // 屏幕捕获相关
     private MediaProjectionManager mediaProjectionManager;
     private MediaProjection mediaProjection;
-    private VirtualDisplay virtualDisplay;
-    private ImageReader imageReader;
-    private int screenWidth;
-    private int screenHeight;
+    // VirtualDisplay / ImageReader 建好以后只在截图线程（imageProcessThread）上换、上读：转屏时在那个线程换 ImageReader，
+    // 不会和 processImage 同时动同一个
+    private volatile VirtualDisplay virtualDisplay;
+    private volatile ImageReader imageReader;
+    // 截图尺寸 = 被录画面当前尺寸的一半，转屏后跟着变（resizeCapture）。2026-10-19 之前只在 onCreate 里读一次屏幕尺寸：
+    // 竖屏开始录、再转横屏时，系统把横屏画面等比缩进竖屏尺寸的截图、上下补黑，视频模型看到的是缩成中间一条的整幅画面，
+    // 与训练素材（视频的居中正方形）差很远
+    private int captureWidth;
+    private int captureHeight;
     private int screenDensity;
+    private DisplayManager displayManager;
+    private DisplayManager.DisplayListener displayListener;  // Android 13 及以下靠它知道转屏
+    private long dropFramesUntil = 0;                         // 刚换完尺寸的头几帧可能还是旧的缩放，丢掉（截图线程）
+    private static final long RESIZE_SETTLE_MS = 300;
 
     // 音频捕获相关
     private AudioRecord audioRecord;
@@ -118,15 +132,22 @@ public class OnlineAnalysisService extends Service {
         imageProcessThread.start();
         imageProcessHandler = new Handler(imageProcessThread.getLooper());
 
-        // 获取屏幕参数
-        DisplayMetrics metrics = getResources().getDisplayMetrics();
-        screenWidth = metrics.widthPixels;
-        screenHeight = metrics.heightPixels;
-        screenDensity = metrics.densityDpi;
+        // 获取屏幕参数（截图尺寸在开始录屏时按屏幕当前的方向定，见 startScreenCapture）
+        displayManager = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
+        screenDensity = getResources().getDisplayMetrics().densityDpi;
+    }
 
-        // 降低分辨率以提高性能
-        screenWidth = screenWidth / 2;
-        screenHeight = screenHeight / 2;
+    /** 默认屏幕当前方向的实际像素尺寸；读不到时退回 getDisplayMetrics()。 */
+    @SuppressWarnings("deprecation")    // getRealSize：API 31 起不推荐（推荐的 WindowMetrics 要界面 Context），这里要的就是屏幕的实际尺寸
+    private Point realScreenSize() {
+        Point p = new Point();
+        Display display = displayManager != null ? displayManager.getDisplay(Display.DEFAULT_DISPLAY) : null;
+        if (display != null) display.getRealSize(p);
+        if (p.x <= 0 || p.y <= 0) {
+            DisplayMetrics metrics = getResources().getDisplayMetrics();
+            p.set(metrics.widthPixels, metrics.heightPixels);
+        }
+        return p;
     }
 
     @Override
@@ -213,36 +234,109 @@ public class OnlineAnalysisService extends Service {
                 Log.d(TAG, "MediaProjection stopped");
                 stopSelf();
             }
+
+            // Android 14+：开始录屏时、被录画面的尺寸变了时（转屏；"只共享一个应用"时那个应用的窗口变了）回调，给的是被录画面的
+            // 实际像素尺寸。截图尺寸不跟着改，系统就把画面等比缩进原来的尺寸、四周补黑。更早的版本没有这个回调，见下面的 displayListener
+            @Override
+            public void onCapturedContentResize(int width, int height) {
+                imageProcessHandler.post(() -> resizeCapture(width, height));
+            }
         }, mainHandler);
         // ======= 修改结束 =======
 
-        // 创建ImageReader用于接收屏幕图像
-        imageReader = ImageReader.newInstance(
-                screenWidth, screenHeight,
-                PixelFormat.RGBA_8888, 2
-        );
+        // 截图尺寸：屏幕当前方向的实际尺寸（含状态栏、导航栏，和被录的画面一样大）的一半，降低分辨率以提高性能。
+        // getDisplayMetrics() 可能不含导航栏，宽高比和被录画面对不上时系统一样会补黑边
+        Point size = realScreenSize();
+        captureWidth = size.x / 2;
+        captureHeight = size.y / 2;
 
-        // 设置图像可用监听器
-        imageReader.setOnImageAvailableListener(new ImageReader.OnImageAvailableListener() {
-            @Override
-            public void onImageAvailable(ImageReader reader) {
-                imageProcessHandler.post(() -> processImage(reader));
-            }
-        }, imageProcessHandler);
+        // 创建ImageReader用于接收屏幕图像
+        imageReader = newImageReader(captureWidth, captureHeight);
 
         // 创建虚拟显示
         virtualDisplay = mediaProjection.createVirtualDisplay(
                 "ScreenCapture",
-                screenWidth, screenHeight, screenDensity,
+                captureWidth, captureHeight, screenDensity,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                 imageReader.getSurface(),
                 null, null
         );
 
-        Log.d(TAG, "Screen capture started");
+        // Android 13 及以下：自己听屏幕的变化。转屏时 onDisplayChanged 和 onConfigurationChanged 都会来，先后不定
+        // （getRealSize 在 Android 12+ 按进程的配置给尺寸，可能比 onDisplayChanged 晚一步才变），两处都查一次；尺寸没变就什么都不做
+        if (Build.VERSION.SDK_INT < 34 && displayManager != null) {
+            displayListener = new DisplayManager.DisplayListener() {
+                @Override
+                public void onDisplayAdded(int displayId) {}
+
+                @Override
+                public void onDisplayRemoved(int displayId) {}
+
+                @Override
+                public void onDisplayChanged(int displayId) {
+                    if (displayId == Display.DEFAULT_DISPLAY) followScreenSize();
+                }
+            };
+            displayManager.registerDisplayListener(displayListener, imageProcessHandler);
+        }
+
+        Log.d(TAG, "Screen capture started: " + captureWidth + "x" + captureHeight);
+    }
+
+    @Override
+    public void onConfigurationChanged(@NonNull Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        // Android 13 及以下：转屏后截图尺寸跟上（见 startScreenCapture 里的 displayListener）
+        if (Build.VERSION.SDK_INT < 34 && imageProcessHandler != null) {
+            imageProcessHandler.post(this::followScreenSize);
+        }
+    }
+
+    /** Android 13 及以下：截图尺寸跟上屏幕当前的方向 / 大小。在截图线程上调用。 */
+    private void followScreenSize() {
+        Point p = realScreenSize();
+        resizeCapture(p.x, p.y);
+    }
+
+    /**
+     * 截图换成被录画面当前尺寸的一半：宽高比和被录画面一样，系统就不会补黑边。在截图线程上调用：
+     * 旧的 ImageReader 在这里关，不会和 processImage 同时动它。
+     */
+    private void resizeCapture(int fullWidth, int fullHeight) {
+        VirtualDisplay vd = virtualDisplay;
+        int w = fullWidth / 2, h = fullHeight / 2;
+        if (vd == null || w <= 0 || h <= 0 || (w == captureWidth && h == captureHeight)) return;
+        Log.i(TAG, String.format("[录屏] 被录画面 %dx%d：截图 %dx%d → %dx%d",
+                fullWidth, fullHeight, captureWidth, captureHeight, w, h));
+        ImageReader old = imageReader, reader = newImageReader(w, h);
+        try {
+            // 先换 Surface 再 resize：Android 14+ 由系统在虚拟屏尺寸变化时按 Surface 的尺寸重新算缩放，
+            // 先 resize 的话缩放可能还按旧 Surface 算，照样补黑边
+            vd.setSurface(reader.getSurface());
+            imageReader = reader;
+            vd.resize(w, h, screenDensity);
+        } catch (RuntimeException e) {
+            Log.e(TAG, "[录屏] 换截图尺寸失败", e);       // 录屏已经停了（VirtualDisplay 已释放）之类
+            if (imageReader != reader) {
+                reader.close();
+                return;
+            }
+        }
+        captureWidth = w;
+        captureHeight = h;
+        dropFramesUntil = SystemClock.uptimeMillis() + RESIZE_SETTLE_MS;
+        if (old != null) old.close();
+    }
+
+    private ImageReader newImageReader(int w, int h) {
+        ImageReader reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2);
+        // 设置图像可用监听器（回调就在截图线程上）
+        reader.setOnImageAvailableListener(this::processImage, imageProcessHandler);
+        return reader;
     }
 
     private void processImage(ImageReader reader) {
+        if (reader != imageReader) return;      // 转屏换下来的旧 ImageReader（已经关了）
         Image image = null;
         try {
             image = reader.acquireLatestImage();
@@ -250,23 +344,27 @@ public class OnlineAnalysisService extends Service {
 
             long currentTime = System.currentTimeMillis();
 
+            // 刚换完截图尺寸：头几帧可能还是旧的缩放
+            if (SystemClock.uptimeMillis() < dropFramesUntil) return;
+
             // 控制帧率
             if (currentTime - lastFrameTime < FRAME_INTERVAL_MS) {
                 return;
             }
             lastFrameTime = currentTime;
 
-            // 转换为Bitmap
+            // 转换为Bitmap（尺寸以这一帧为准：转屏前后截图尺寸不同）
+            int width = image.getWidth(), height = image.getHeight();
             Image.Plane[] planes = image.getPlanes();
             ByteBuffer buffer = planes[0].getBuffer();
             int pixelStride = planes[0].getPixelStride();
             int rowStride = planes[0].getRowStride();
-            int rowPadding = rowStride - pixelStride * screenWidth;
+            int rowPadding = rowStride - pixelStride * width;
 
             // ======= 修改：创建可变的Bitmap =======
             Bitmap bitmap = Bitmap.createBitmap(
-                    screenWidth + rowPadding / pixelStride,
-                    screenHeight,
+                    width + rowPadding / pixelStride,
+                    height,
                     Bitmap.Config.ARGB_8888
             );
             bitmap.copyPixelsFromBuffer(buffer);
@@ -274,7 +372,7 @@ public class OnlineAnalysisService extends Service {
             // 裁剪掉可能的padding
             Bitmap croppedBitmap = bitmap;  // ======= 修改：保留原始bitmap引用 =======
             if (rowPadding > 0) {
-                croppedBitmap = Bitmap.createBitmap(bitmap, 0, 0, screenWidth, screenHeight);
+                croppedBitmap = Bitmap.createBitmap(bitmap, 0, 0, width, height);
                 bitmap.recycle();  // ======= 修改：回收原始bitmap =======
             }
 
@@ -518,23 +616,26 @@ public class OnlineAnalysisService extends Service {
             audioRecord = null;
         }
 
-        // 停止屏幕捕获
-        if (virtualDisplay != null) {
-            virtualDisplay.release();
+        // 停止屏幕捕获：在截图线程上释放（转屏时也在那个线程换 ImageReader；processImage 正在读的 Image
+        // 不能被别的线程把 ImageReader 关掉）
+        if (displayListener != null) {
+            displayManager.unregisterDisplayListener(displayListener);
+            displayListener = null;
+        }
+        final MediaProjection projection = mediaProjection;
+        mediaProjection = null;
+        Runnable releaseCapture = () -> {
+            VirtualDisplay vd = virtualDisplay;
             virtualDisplay = null;
-        }
-
-        if (imageReader != null) {
-            imageReader.close();
+            if (vd != null) vd.release();
+            ImageReader reader = imageReader;
             imageReader = null;
-        }
+            if (reader != null) reader.close();
+            if (projection != null) projection.stop();
+        };
 
-        if (mediaProjection != null) {
-            mediaProjection.stop();
-            mediaProjection = null;
-        }
-
-        // 停止图像处理线程
+        // 停止图像处理线程（quitSafely：排着的任务——包括上面的释放——做完再退出）
+        if (imageProcessThread == null || !imageProcessHandler.post(releaseCapture)) releaseCapture.run();
         if (imageProcessThread != null) {
             imageProcessThread.quitSafely();
             imageProcessThread = null;

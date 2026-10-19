@@ -28,6 +28,8 @@ bench/tools/baseline.py — 统一评测基准：比视频模型 / 视频管线�
   python3 bench/tools/baseline.py compare phone exact_crop            # 并排对比，括号里是相对第一个的变化
   python3 bench/tools/baseline.py rescore --videos D:/xcup/videos --model D:/models/new1.tflite --name new1
   python3 bench/tools/baseline.py compare exact_crop new1
+  python3 bench/tools/baseline.py rescore --videos D:/xcup/videos --pipe exact_scrrot     # 在线模式（录屏）的场景，见 README 第 7 节
+  python3 bench/tools/baseline.py compare e1d exact_scrland exact_scrrot exact_scrrotbar
   python3 bench/tools/baseline.py --selftest
 check / rescore 包装 video_rescore.py，13 部（两个 runs 目录）一次做完；--jobs N 几部片并行，--only v01,v04 只做几部，
 原片名字对不上时 --pair v01=D:/xcup/视频1.mp4（可多次）。
@@ -211,19 +213,21 @@ def _source(name, videos, dirs):
     bad = sorted(vid for vid, x in notes.items() if not x)
     if bad:
         warns.append('这几部不是 video_rescore.py 重算的 run：%s' % ' '.join(bad))
-    kinds = sorted(set((x.get('pipe', '?'), x.get('model', '?'), x.get('delta', x.get('offset', '?')))
+    kinds = sorted(set((x.get('pipe', '?'), x.get('model', '?'), x.get('delta', x.get('offset', '?')), x.get('screen', ''))
                        for x in notes.values() if x))
     if len(kinds) > 1:
-        warns.append('13 部不是同一种重算：%s' % '；'.join('pipe=%s model=%s %s' % k for k in kinds))
+        warns.append('13 部不是同一种重算：%s' % '；'.join('pipe=%s model=%s %s%s' % (k[:3] + (' screen=' + k[3] if k[3] else '',))
+                                                      for k in kinds))
     mans = [read_manifest(d) for d in dirs]
     shas = sorted(set(m['model']['sha1'] for m in mans if m and m.get('model')))
     if len(shas) > 1:
         warns.append('两个重算目录用的模型不同（sha1 %s），重新 rescore' % ' / '.join(shas))
     if not kinds:
         return '?', warns
-    pipe, model, delta = kinds[0]
-    return 'video_rescore.py 重算：pipe=%s，模型 %s%s，Δ=%s' % (
-        pipe, model, '（sha1 %s）' % shas[0] if len(shas) == 1 else '', delta), warns
+    pipe, model, delta, screen = kinds[0]
+    return 'video_rescore.py 重算：pipe=%s，模型 %s%s，Δ=%s%s' % (
+        pipe, model, '（sha1 %s）' % shas[0] if len(shas) == 1 else '', delta,
+        '，模拟屏幕 %s' % screen if screen else ''), warns
 
 
 def evaluate(name):
@@ -566,27 +570,34 @@ def rescore_plan(a):
     return name, a.pipe, model, model_info(model)
 
 
-def guard(dirs, pipe, info, overwrite):
-    """同一个名字只能装同一个模型 + 管线的结果。→ 冲突说明（没有冲突返回 None）。"""
+def guard(dirs, pipe, info, overwrite, screen=None):
+    """同一个名字只能装同一个模型 + 管线（在线模式的管线还有模拟的屏幕）的结果。→ 冲突说明（没有冲突返回 None）。"""
     for d in dirs:
         old = read_manifest(d)
         if not old or overwrite:
             continue
         o = old.get('model') or {}
-        if o.get('sha1') != info['sha1'] or old.get('pipe') != pipe:
-            return ('%s 里已经是 %s（sha1 %s，pipe=%s）算的结果，这次是 %s（sha1 %s，pipe=%s）。\n'
+        if o.get('sha1') != info['sha1'] or old.get('pipe') != pipe or old.get('screen') != screen:
+            return ('%s 里已经是 %s（sha1 %s，pipe=%s%s）算的结果，这次是 %s（sha1 %s，pipe=%s%s）。\n'
                     '换一个 --name；确定要覆盖（原来的结果作废）就加 --overwrite'
-                    % (rel(d), o.get('file'), o.get('sha1'), old.get('pipe'), info['file'], info['sha1'], pipe))
+                    % (rel(d), o.get('file'), o.get('sha1'), old.get('pipe'),
+                       '，屏幕 %s' % old['screen'] if old.get('screen') else '', info['file'], info['sha1'], pipe,
+                       '，屏幕 %s' % screen if screen else ''))
     return None
 
 
 def cmd_rescore(a):
     name, pipe, model, info = rescore_plan(a)
+    # 在线模式（exact_scr*）模拟的手机屏幕：记进 variant.json，换了屏幕不许写进同一个名字
+    screen = None
+    if V.parse_pipe(pipe)[1] in V.SCREEN_PREPS:
+        screen = '%dx%d' % (V.parse_screen(a.screen) if getattr(a, 'screen', None) else V.SCREEN)
     dirs = variant_dirs(name)
-    msg = guard(dirs, pipe, info, a.overwrite)
+    msg = guard(dirs, pipe, info, a.overwrite, screen)
     if msg:
         sys.exit(msg)
-    print('变体 %s：管线 %s，模型 %s（sha1 %s）' % (name, pipe, rel(model), info['sha1']), flush=True)
+    print('变体 %s：管线 %s%s，模型 %s（sha1 %s）' % (name, pipe, '（模拟屏幕 %s）' % screen if screen else '',
+                                           rel(model), info['sha1']), flush=True)
     done, failed = {}, []
     for runs, d in zip(RUNS, dirs):
         args = _common_args(a, runs)
@@ -594,15 +605,19 @@ def cmd_rescore(a):
             continue
         print('\n══ %s → %s ══' % (runs, rel(d)), flush=True)
         rc, lines = run_tool(['rescore'] + args + ['--pipe', pipe, '--model', model,
-                                                   '--out', os.path.dirname(d), '--tag', os.path.basename(d)])
+                                                   '--out', os.path.dirname(d), '--tag', os.path.basename(d)]
+                             + (['--screen', screen] if screen else []))
         if rc:
             failed.append(runs)
             continue
         got = parse_rescore(lines)
         done.update(got)
         if got and os.path.isdir(d):
-            write_manifest(d, dict(name=name, pipe=pipe, model=dict(info, path=rel(model)),
-                                   created=time.strftime('%Y-%m-%d %H:%M'), tool=tool_version()))
+            man = dict(name=name, pipe=pipe, model=dict(info, path=rel(model)),
+                       created=time.strftime('%Y-%m-%d %H:%M'), tool=tool_version())
+            if screen:
+                man['screen'] = screen
+            write_manifest(d, man)
     want = _expected(a)
     print('\n══ 重算结果：%s ══' % name)
     ok = [v for v in want if v in done]
@@ -713,6 +728,8 @@ def selftest():
         check(guard([d0], 'exact_crop', info, False) is None and guard([d0], 'exact_crop', other, False)
               and guard([d0], 'exact_squash', info, False) and guard([d0], 'exact_crop', other, True) is None,
               '模型指纹：同一个名字换了模型或管线会被拒绝，--overwrite 才放行')
+        check(guard([d0], 'exact_crop', info, False, '2400x1080') and guard([d0], 'exact_crop', info, True, '2400x1080') is None,
+              '在线模式：同一个名字换了模拟的屏幕也会被拒绝')
         os.remove(os.path.join(variant_dirs('selftest')[1], 'v08_base.csv'))
         r3 = evaluate('selftest')
         check(any('缺这几部' in w and 'v08' in w for w in r3['warnings']), '少了片子会警告')
@@ -802,6 +819,8 @@ def main():
             p.add_argument('--name', help='变体名（默认 = 管线名，即 exact_crop）')
             p.add_argument('--pipe', default=DEFAULT_PIPE, help='管线（默认 exact_crop = 修复后的 app）')
             p.add_argument('--overwrite', action='store_true', help='允许用不同的模型 / 管线覆盖同名变体')
+            p.add_argument('--screen', help='在线模式（--pipe exact_scr*）模拟的手机屏幕，横屏时的 宽x高（默认 %dx%d）'
+                                            % V.SCREEN)
     a = ap.parse_args()
     fn = {'eval': cmd_eval, 'compare': cmd_compare, 'check': cmd_check, 'rescore': cmd_rescore}.get(a.cmd)
     if fn is None:

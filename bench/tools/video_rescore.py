@@ -17,7 +17,14 @@ run CSV 记下了真机每个视频结果是哪一刻出的（wall_ms - v_age）
     squash    同 crop 但不裁、整帧压扁（FramePreprocessor.CENTER_CROP=false 时 app 的做法，A/B 对比用）
     train     训练素材的做法（make_movinet_clips.py + train_mobilenetv3_tap_3class.py）的近似：ffmpeg 同样的双三次缩放和
               居中裁剪到 224 → BT.601 转 RGB（OpenCV 读帧的默认）→ INTER_AREA 缩到 160。不含 x264 重编码。只作参照
-  例：keyframe_legacy = 2026-10-14 之前的 app；exact_crop = 修复后的 app。
+  预处理：在线模式（录屏）的模拟。播放器把视频等比放进手机屏幕（四周补黑），OnlineAnalysisService 截屏幕一半大小的图，
+  app 取截图的居中正方形 → 224 → 160。屏幕尺寸用 --screen（默认 2400x1080，20:9）
+    scrland   横屏全屏播放，截图尺寸跟着屏幕转（2026-10-19 起的 app）：截图的居中正方形就是视频的居中正方形
+    scrrot    横屏全屏播放，截图却还是开始录屏时的竖屏尺寸（2026-10-19 之前的 app 在竖屏开始录、再转横屏时）：系统把横屏
+              画面等比缩进竖屏尺寸的截图、上下补黑，视频（整幅 16:9）只占正方形的中间一条
+    scrport   竖屏全屏播放（视频是屏幕中间的一条，上下黑边）
+    scrlandbar / scrrotbar / scrportbar  同上，但先按 ScreenCropper 去掉黑边、再取居中正方形（2026-10-19 起的 app）
+  例：keyframe_legacy = 2026-10-14 之前的 app；exact_crop = 修复后的 app；exact_scrrot = 2026-10-19 之前在线模式转屏后。
 
 子命令:
   keyframes  列出每部片的关键帧间隔（GOP）。keyframe 管线下，视频结果每个 GOP 只变一次
@@ -30,14 +37,16 @@ run CSV 记下了真机每个视频结果是哪一刻出的（wall_ms - v_age）
              fusion_lab.py eval/oracle、arbiter_lab.py 直接能读（fusion_lab check 除外：决策列还是原 run 的）。
              同时写 <run>.vframes.npz：用到的每一帧的 pts 和逐帧 logit（模型是“逐帧分类 + 12 帧 logit 平均”，
              有了逐帧 logit，换窗口长度、换聚合方式都不用再跑模型）
-  golden     重新生成 Java 端 FramePreprocessorTest 的对拍数据（改了 FramePreprocessor 才需要）
+  golden     重新生成 Java 端 FramePreprocessorTest、ScreenCropperTest 的对拍数据（改了 FramePreprocessor / ScreenCropper 才需要）
 
 用法（Windows 把 python3 换成 python）:
   python3 bench/tools/video_rescore.py keyframes --videos D:/xcup/videos
   python3 bench/tools/video_rescore.py check   --videos D:/xcup/videos --runs bench/runs_test --only v08
   python3 bench/tools/video_rescore.py rescore --videos D:/xcup/videos --runs bench/runs_initial                # exact_crop
   python3 bench/tools/video_rescore.py rescore --videos D:/xcup/videos --runs bench/runs_initial --pipe keyframe_crop
+  python3 bench/tools/video_rescore.py rescore --videos D:/xcup/videos --runs bench/runs_initial --pipe exact_scrrot
   python3 bench/tools/video_rescore.py --selftest
+在线模式的几种场景 13 部一起算、和离线模式比，用 baseline.py（README 第 7 节"在线模式（录屏）的画面"）。
 
 视频的查找与 audio_rescore.py 相同：--videos 目录下按 真值文件头的 file_name → 真值 id → run 的 video_name 找；
 也可以 --pair v01=D:/xcup/视频1.mp4 逐个指定。视频不进仓库。
@@ -84,6 +93,7 @@ DEFAULT_OUT = os.path.join(ROOT, 'bench', 'rescored')
 DEFAULT_VIDEOS = os.path.join(ROOT, 'bench', 'videos')
 DEFAULT_ALIGN = os.path.join(DEFAULT_OUT, 'video_alignment.json')
 GOLDEN_PATH = os.path.join(ROOT, 'app', 'src', 'test', 'resources', 'video', 'preprocess_golden.txt')
+CROP_GOLDEN_PATH = os.path.join(ROOT, 'app', 'src', 'test', 'resources', 'video', 'screen_crop_golden.txt')
 
 MODEL_SIZE = 160         # FramePreprocessor.MODEL_SIZE / VideoClassifierHelper.INPUT_SIZE
 CLIP_SIZE = 224          # FramePreprocessor.CLIP_SIZE：训练片段 224×224
@@ -91,7 +101,10 @@ STAGE_SIZE = 672         # VideoFrameExtractor.STAGE_SIZE：离线模式 GPU 先
 NUM_FRAMES = 12          # VideoClassifierHelper.NUM_FRAMES：12 帧、间隔 250ms
 FRAME_STEP_MS = 250
 FRAMES = ('keyframe', 'exact')
-PREPS = ('legacy', 'crop', 'squash', 'train')
+SCREEN_SCENES = ('scrland', 'scrrot', 'scrport')                       # 在线模式（录屏）的场景，见文件头
+SCREEN_PREPS = SCREEN_SCENES + tuple(s + 'bar' for s in SCREEN_SCENES)  # …bar：先按 ScreenCropper 去黑边
+PREPS = ('legacy', 'crop', 'squash', 'train') + SCREEN_PREPS
+SCREEN = (2400, 1080)    # 在线模式模拟的手机屏幕，横屏时的 宽×高（20:9）；--screen 改
 MATRICES = ('auto', 'bt601', 'bt709')
 
 # 旧 run 没记每帧的时刻：最后一帧的取帧目标比出结果时的播放位置早 Δ 毫秒，往前每 250ms 一帧。
@@ -125,6 +138,12 @@ def crop_rect(w, h, crop=True):
         return (0, 0, w, h)
     side = min(w, h)
     return ((w - side) // 2, (h - side) // 2, side, side)
+
+
+def crop_rect_in(region, crop=True):
+    """FramePreprocessor.cropRect(int[] region)：region (x0, y0, w, h) 里的居中正方形。"""
+    x, y, w, h = crop_rect(region[2], region[3], crop)
+    return (region[0] + x, region[1] + y, w, h)
 
 
 def area_tab(ssize, dsize):
@@ -236,6 +255,121 @@ def gl_linear(img, region, ow, oh):
     return _sat(top * (1 - wy) + bot * wy)
 
 
+# ======================================================================== 在线模式（录屏）的模拟
+# 截图是这样来的：播放器把视频等比放进屏幕（"适应屏幕"，四周补黑）；OnlineAnalysisService 的截图是屏幕的一半大，系统把屏幕
+# 等比缩进截图（截图和屏幕的方向对不上时同样等比缩、四周补黑）。视频那一层由 SurfaceFlinger 从解码出来的帧一次双线性采样
+# 合成进截图（gl_linear，缩小得多时一样有混叠）；用 TextureView 的播放器中间多一次缩放，没有模拟。
+
+def parse_screen(s):
+    """'2400x1080' → (2400, 1080)：手机屏幕横屏时的 宽×高（两个数顺序随意，大的当宽）。"""
+    try:
+        a, b = [int(x) for x in str(s).lower().replace('*', 'x').split('x')]
+    except ValueError:
+        sys.exit('--screen 的格式是 宽x高，例如 2400x1080：%r' % (s,))
+    if min(a, b) < 2 * CLIP_SIZE:
+        sys.exit('--screen %r 太小：截图是屏幕的一半，短边要至少 %d' % (s, 2 * CLIP_SIZE))
+    return max(a, b), min(a, b)
+
+
+def fit_rect(sw, sh, dw, dh):
+    """sw×sh 的画面等比放进 dw×dh、居中 → (x0, y0, w, h)。播放器"适应屏幕"、系统把屏幕缩进截图都是这样算的
+    （同 Android LogicalDisplay.configureDisplayLocked 的整数算法）。"""
+    if dw * sh < dh * sw:                     # 宽先满：上下补黑
+        w, h = dw, sh * dw // sw
+    else:                                     # 高先满：左右补黑
+        w, h = sw * dh // sh, dh
+    return ((dw - w) // 2, (dh - h) // 2, w, h)
+
+
+def _div_round(a, b):
+    return (2 * a + b) // (2 * b)
+
+
+def screen_layout(vw, vh, scene, screen=SCREEN):
+    """vw×vh 的视频在 scene 场景下 → (截图宽, 截图高, 视频在截图里的 (x0, y0, w, h))。"""
+    long_, short = max(screen), min(screen)
+    sw, sh = (short, long_) if scene == 'scrport' else (long_, short)          # 屏幕当前方向
+    bw, bh = (short // 2, long_ // 2) if scene == 'scrrot' else (sw // 2, sh // 2)   # scrrot：还是竖屏时的截图尺寸
+    vx, vy, vw2, vh2 = fit_rect(vw, vh, sw, sh)          # 播放器：视频 → 屏幕
+    px, py, pw, ph = fit_rect(sw, sh, bw, bh)            # 系统：屏幕 → 截图
+    x0, x1 = px + _div_round(vx * pw, sw), px + _div_round((vx + vw2) * pw, sw)
+    y0, y1 = py + _div_round(vy * ph, sh), py + _div_round((vy + vh2) * ph, sh)
+    return bw, bh, (x0, y0, x1 - x0, y1 - y0)
+
+
+def screen_shot(rgb, scene, screen=SCREEN):
+    """一帧视频（RGB）→ 在线模式的截图（uint8 [高, 宽, 3]，视频以外全黑）。"""
+    H, W = rgb.shape[:2]
+    bw, bh, (x0, y0, w, h) = screen_layout(W, H, scene, screen)
+    shot = np.zeros((bh, bw, 3), np.uint8)
+    shot[y0:y0 + h, x0:x0 + w] = gl_linear(rgb, (0, 0, W, H), w, h)
+    return shot
+
+
+def screen_input(rgb, prep, screen=SCREEN, cropper=None):
+    """一帧视频 → 在线模式送进模型的 160×160：截图 →（…bar：ScreenCropper 去黑边）→ 居中正方形 → 224 → 160。
+    cropper：同一路截图共用一个 ScreenCropper（它记着上一次裁的范围），按时间顺序喂。"""
+    bar = prep.endswith('bar')
+    shot = screen_shot(rgb, prep[:-3] if bar else prep, screen)
+    h, w = shot.shape[:2]
+    region = (cropper or ScreenCropper()).update(shot) if bar else (0, 0, w, h)
+    return to_model_input(shot, crop_rect_in(region))
+
+
+# ======================================================================== ScreenCropper 的逐行移植（在线模式去黑边）
+CROP_BLACK_MAX = 16        # R、G、B 都不超过它算黑（播放器、系统补的黑边是 0）
+CROP_LIT_DIV = 64          # 一行（列）里不黑的像素 ≥ 长度 / 64（至少 1 个）才算这一行（列）亮着
+CROP_MIN_KEEP_PCT = 15     # 最长的一段亮着的行（列）不到这一边的 15%：这一帧不作数（黑场、只有字幕或图标）
+CROP_SYM_DIV = 50          # 两边的黑边宽度差不超过 max(2, 长度 / 50) 才当黑边裁掉
+
+
+class ScreenCropper(object):
+    """ScreenCropper.java 的逐行移植：截图 → 视频画面的位置 (x0, y0, w, h)。一个实例按时间顺序看同一路截图，记着
+    上一次裁掉黑边后的范围：画面没超出这个范围（暗场景、黑边里的字幕）就沿用，不跟着缩。"""
+
+    def __init__(self):
+        self.size = None
+        self.rows = self.cols = None        # 上一次裁掉黑边后留下的行 / 列范围 (a, b)；None = 没裁
+        self.last = None
+
+    def update(self, img):
+        h, w = img.shape[:2]
+        if self.size != (w, h):
+            self.size, self.rows, self.cols, self.last = (w, h), None, None, (0, 0, w, h)
+        lit = img.max(axis=2) > CROP_BLACK_MAX
+        run = _longest_run(lit.sum(axis=1) >= max(1, w // CROP_LIT_DIV))
+        if run is None or (run[1] - run[0]) * 100 < CROP_MIN_KEEP_PCT * h:
+            return self.last
+        self.rows = _crop_choose(run, h, self.rows)
+        y0, y1 = self.rows or (0, h)
+        run = _longest_run(lit[y0:y1].sum(axis=0) >= max(1, (y1 - y0) // CROP_LIT_DIV))
+        if run is not None and (run[1] - run[0]) * 100 >= CROP_MIN_KEEP_PCT * w:
+            self.cols = _crop_choose(run, w, self.cols)
+        x0, x1 = self.cols or (0, w)
+        self.last = (x0, y0, x1 - x0, y1 - y0)
+        return self.last
+
+
+def _longest_run(flags):
+    """bool 数组里最长的一段连续 True → (a, b)，一样长取前面的；没有 True 返回 None。"""
+    d = np.diff(np.concatenate(([0], np.asarray(flags, np.int8), [0])))
+    starts, ends = np.flatnonzero(d == 1), np.flatnonzero(d == -1)
+    if not len(starts):
+        return None
+    k = int(np.argmax(ends - starts))
+    return int(starts[k]), int(ends[k])
+
+
+def _crop_choose(run, n, kept):
+    """这一边留下的范围 (a, b)，None = 不裁。画面没超出上次裁的范围 kept 就沿用；否则两边的黑边对称才裁。"""
+    a, b = run
+    if kept is not None and a >= kept[0] and b <= kept[1]:
+        return kept
+    if b - a < n and abs(a - (n - b)) <= max(2, n // CROP_SYM_DIV):
+        return run
+    return None
+
+
 def _colorspace(frame, matrix):
     """YUV→RGB 用哪个矩阵。auto：码流标了就按标的；没标时与 Android 一样，高清（≥720 行）按 BT.709，标清按 BT.601。"""
     if matrix == 'bt601':
@@ -263,8 +397,9 @@ def ffmpeg_increase(w, h, size):
     return max(size, tw), max(size, th)
 
 
-def prep_frame(frame, preps, matrix):
-    """一帧 → {预处理名: 160×160×3 uint8}。frame 是 PyAV 的 VideoFrame。"""
+def prep_frame(frame, preps, matrix, screen=SCREEN, croppers=None):
+    """一帧 → {预处理名: 160×160×3 uint8}。frame 是 PyAV 的 VideoFrame。
+    croppers：在线模式 …bar 预处理各自的 ScreenCropper（{预处理名: ScreenCropper}），要按时间顺序喂帧。"""
     out = {}
     rot = getattr(frame, 'rotation', 0) or 0
     gpu = [p for p in preps if p != 'train']
@@ -274,6 +409,8 @@ def prep_frame(frame, preps, matrix):
         for p in gpu:
             if p == 'legacy':
                 out[p] = gl_linear(rgb, (0, 0, W, H), MODEL_SIZE, MODEL_SIZE)
+            elif p in SCREEN_PREPS:
+                out[p] = screen_input(rgb, p, screen, None if croppers is None else croppers.setdefault(p, ScreenCropper()))
             else:
                 region = crop_rect(W, H, p == 'crop')
                 out[p] = to_model_input(gl_linear(rgb, region, STAGE_SIZE, STAGE_SIZE))
@@ -449,9 +586,10 @@ def classify(probs, do_th, plot_th):
 class FrameCache(object):
     """(预处理, 帧 pts) → 逐帧 logit。同一帧只解码一次，几种预处理一起做。"""
 
-    def __init__(self, src, model, matrix, log=None):
-        self.src, self.model, self.matrix, self.log = src, model, matrix, log
+    def __init__(self, src, model, matrix, log=None, screen=SCREEN):
+        self.src, self.model, self.matrix, self.log, self.screen = src, model, matrix, log, screen
         self.logits = {}
+        self.croppers = {}       # 在线模式 …bar 预处理的 ScreenCropper（ensure 按时间顺序解码，正好按顺序喂）
 
     def ensure(self, preps, pts_set):
         need = sorted(set(u for u in pts_set for p in preps if (p, u) not in self.logits))
@@ -469,7 +607,7 @@ class FrameCache(object):
                 del us[:], imgs[:]
 
         for u, f in self.src.decode(need, keyframes_only=only_keys, progress=self.log):
-            imgs = prep_frame(f, preps, self.matrix)
+            imgs = prep_frame(f, preps, self.matrix, self.screen, self.croppers)
             for p in preps:
                 pend[p][0].append(u)
                 pend[p][1].append(imgs[p])
@@ -577,7 +715,7 @@ def _usable(results):
 
 
 def check_one(job):
-    vid, gt_path, run_path, video_path, pipes, matrix, model_path = job
+    vid, gt_path, run_path, video_path, pipes, matrix, model_path, screen = job
     lines = []
 
     def log(msg):
@@ -590,7 +728,7 @@ def check_one(job):
         return dict(vid=vid, lines=['  %s: run 里没有可用的视频结果' % vid], rows=[], align=None)
     src = VideoSource(video_path)
     model = _make_model(model_path)
-    cache = FrameCache(src, model, matrix, log)
+    cache = FrameCache(src, model, matrix, log, screen)
     run_pipe = video_pipe_of(meta)
     new_run = results[0].fpts is not None
     if not pipes:
@@ -654,7 +792,7 @@ def check_one(job):
 
 
 def rescore_one(job):
-    vid, gt_path, run_path, video_path, pipe, matrix, model_path, out_path, align, delta_arg = job
+    vid, gt_path, run_path, video_path, pipe, matrix, model_path, out_path, align, delta_arg, screen = job
     lines = []
 
     def log(msg):
@@ -665,7 +803,7 @@ def rescore_one(job):
     frames, prep = parse_pipe(pipe)
     src = VideoSource(video_path)
     model = _make_model(model_path)
-    cache = FrameCache(src, model, matrix, log)
+    cache = FrameCache(src, model, matrix, log, screen)
     new_run = bool(results) and results[0].fpts is not None
     offset = (align or {}).get('offset_us') or 0
     if delta_arg is not None:
@@ -682,9 +820,9 @@ def rescore_one(job):
         picks[r.ts] = pick_frames(src, frames, targets)
     cache.ensure([prep], set(u for fs in picks.values() for u in fs))
     computed = dict((ts, (cache.window(prep, fs), fs)) for ts, fs in picks.items())
-    note = ('video_rescore.py rescore: pipe=%s matrix=%s %s model=%s' % (
+    note = ('video_rescore.py rescore: pipe=%s matrix=%s %s model=%s%s' % (
         pipe, matrix, ('offset=%dus' % offset) if new_run else ('delta=%dms' % delta),
-        os.path.basename(model_path)))
+        os.path.basename(model_path), (' screen=%dx%d' % screen) if prep in SCREEN_PREPS else ''))
     n_hit, n_tick = write_rescored(run_path, out_path, computed, note, params)
     used = sorted(set(u for fs in picks.values() for u in fs))
     np.savez_compressed(os.path.splitext(out_path)[0] + '.vframes.npz',
@@ -805,7 +943,8 @@ def cmd_check(a):
     pipes = [p.strip() for p in a.pipes.split(',')] if a.pipes else None
     for p in pipes or []:
         parse_pipe(p)
-    jobs = [(vid, g, r, v, pipes, a.matrix, a.model) for vid, g, r, v in pairs]
+    screen = parse_screen(a.screen)
+    jobs = [(vid, g, r, v, pipes, a.matrix, a.model, screen) for vid, g, r, v in pairs]
     print('视频重算 check：%d 部片，矩阵 %s%s' % (len(jobs), a.matrix, '' if cv2 is not None else '（没装 opencv，GPU 采样用 numpy 算，较慢）'))
     align = load_alignment(a.align)
     for res in _jobs_map(check_one, jobs, a.jobs):
@@ -830,14 +969,17 @@ def cmd_rescore(a):
     tag = a.tag or 'video_%s_%s' % (a.pipe, os.path.basename(os.path.normpath(a.runs)))
     out_dir = os.path.join(a.out, tag)
     align = load_alignment(a.align)
-    frames, _ = parse_pipe(a.pipe)
+    frames, prep = parse_pipe(a.pipe)
+    screen = parse_screen(a.screen)
     jobs = []
     for vid, g, r, v in pairs:
         al = align.get(_align_key(r))
         if frames == 'keyframe' and a.delta is None and (al is None or al.get('delta_ms') is None):
             print('  %s: video_alignment.json 里没有这份 run 的 Δ，按 %dms 算（复现旧 app 前先跑 check）' % (vid, NEW_APP_DELTA))
-        jobs.append((vid, g, r, v, a.pipe, a.matrix, a.model, os.path.join(out_dir, os.path.basename(r)), al, a.delta))
-    print('视频重算 rescore：管线 %s，矩阵 %s → %s' % (a.pipe, a.matrix, os.path.relpath(out_dir)))
+        jobs.append((vid, g, r, v, a.pipe, a.matrix, a.model, os.path.join(out_dir, os.path.basename(r)), al, a.delta,
+                     screen))
+    print('视频重算 rescore：管线 %s，矩阵 %s%s → %s' % (a.pipe, a.matrix,
+          '，屏幕 %dx%d' % screen if prep in SCREEN_PREPS else '', os.path.relpath(out_dir)))
     for res in _jobs_map(rescore_one, jobs, a.jobs):
         print('\n'.join(res['lines']))
     print('下一步：13 部按统一口径评测、对比用 python3 bench/tools/baseline.py（README 第 5 节；rescore 也可以用它两个 runs 目录一次做完）')
@@ -903,6 +1045,96 @@ def golden(path=GOLDEN_PATH, write=True):
         with io.open(path, 'w', encoding='utf-8', newline='\n') as fh:
             fh.write(txt)
         print('已写 %s（%d 个 case）' % (os.path.relpath(path), len(GOLDEN_CASES)))
+    return txt
+
+
+# ScreenCropper 的对拍用例：每个 case 是同一个 ScreenCropper 依次看的几帧，一帧 = ((宽, 高), [矩形 (x0, y0, w, h, 填充)])。
+# 期望的结果由上面的 Python 版算出来写进对拍数据；CROP_EXPECT 是设计上应得的结果，selftest 核对两者一致。
+# 屏幕是 20:9 缩小到 216×480 / 480×216（算法与尺寸无关，小图对拍数据生成得快）：16:9 的视频竖屏全屏是 (0, 179, 216, 121)，
+# 截图没跟上转屏时是 (22, 191, 172, 97)，横屏全屏是 (48, 0, 384, 216)
+_GP, _GL = (216, 480), (480, 216)
+_STRIP = (0, 179, 216, 121)
+CROP_CASES = [
+    ('land_pillarbox', [(_GL, [(48, 0, 384, 216, 'n1')])]),
+    ('port_strip_statusbar_subtitle', [(_GP, [_STRIP + ('n2',), (0, 0, 216, 10, 'k5'), (40, 330, 136, 12, 'k3')])]),
+    ('rotated_letterbox', [(_GP, [(22, 191, 172, 97, 'n3')])]),
+    ('port_sticky', [
+        (_GP, [_STRIP + ('n4',)]),                                  # 竖屏全屏：裁到视频那一条
+        (_GP, [_STRIP + ('n4',), (0, 179, 216, 40, 'c0a0a0a')]),    # 视频上面 40 行暗下去：沿用，不跟着缩
+        (_GP, []),                                                  # 全黑：沿用
+        (_GP, [(40, 330, 136, 12, 'k3')]),                          # 只有黑边里的字幕：不作数，沿用
+        (_GP, [_STRIP + ('n4',), (0, 300, 216, 30, 'c808080')]),    # 控制条贴着视频下沿：不对称，不裁
+        (_GP, [_STRIP + ('n4',)]),                                  # 控制条消失：又裁到视频
+    ]),
+    ('land_dark_top', [(_GL, [(0, 0, 480, 216, 'n5'), (0, 0, 480, 30, 'c000000')])]),   # 画面上沿暗：不对称，不裁
+    ('land_burned_in_bars', [(_GL, [(0, 27, 480, 162, 'n6')])]),     # 片源自带的宽银幕黑边：对称，也会裁掉
+    ('size_change', [(_GP, [_STRIP + ('n7',)]), (_GL, [(48, 0, 384, 216, 'n7')])]),
+    ('dark_gray_background', [(_GP, [(0, 0, 216, 480, 'c121212'), _STRIP + ('n8',)])]),  # 背景 #121212 不算黑：不裁
+    ('land_vertical_video', [(_GL, [(179, 0, 121, 216, 'n9')])]),    # 横屏看竖屏视频：左右大黑边
+    ('too_small', [(_GP, [(98, 230, 20, 20, 'n10')])]),              # 只有中间一小块（加载圈）：不作数
+    ('sparse_row', [(_GP, [_STRIP + ('n11',), (100, 400, 2, 1, 'cffffff')])]),   # 一行只有 2 个亮点（< 216/64）：不算亮
+]
+CROP_EXPECT = {
+    'land_pillarbox': [(48, 0, 384, 216)],
+    'port_strip_statusbar_subtitle': [_STRIP],
+    'rotated_letterbox': [(22, 191, 172, 97)],
+    'port_sticky': [_STRIP, _STRIP, _STRIP, _STRIP, (0, 0, 216, 480), _STRIP],
+    'land_dark_top': [(0, 0, 480, 216)],
+    'land_burned_in_bars': [(0, 27, 480, 162)],
+    'size_change': [_STRIP, (48, 0, 384, 216)],
+    'dark_gray_background': [(0, 0, 216, 480)],
+    'land_vertical_video': [(179, 0, 121, 216)],
+    'too_small': [(0, 0, 216, 480)],
+    'sparse_row': [_STRIP],
+}
+
+
+def crop_golden_frame(w, h, rects):
+    """ScreenCropperTest.frame 画的同一张图：先全黑，再按顺序画矩形。"""
+    img = np.zeros((h, w, 3), np.uint8)
+    for x0, y0, cw, ch, fill in rects:
+        sub = img[y0:y0 + ch, x0:x0 + cw]
+        if fill[0] == 'n':
+            sub[...] = golden_image(cw, ch, 'noise', int(fill[1:]))
+        elif fill[0] == 'c':
+            v = int(fill[1:], 16)
+            sub[...] = ((v >> 16) & 255, (v >> 8) & 255, v & 255)
+        else:                                            # k<步长>：(x + y) % 步长 == 0 的位置画白点
+            yy, xx = np.mgrid[y0:y0 + ch, x0:x0 + cw]
+            sub[(xx + yy) % int(fill[1:]) == 0] = 255
+    return img
+
+
+def crop_results():
+    """{case: [每一帧 ScreenCropper 的结果]}（按 CROP_CASES 依次喂）。"""
+    out = {}
+    for name, frames in CROP_CASES:
+        cropper = ScreenCropper()
+        out[name] = [tuple(cropper.update(crop_golden_frame(w, h, rects))) for (w, h), rects in frames]
+    return out
+
+
+def crop_golden(path=CROP_GOLDEN_PATH, write=True):
+    _need()
+    lines = ['# ScreenCropper 对拍数据：python3 bench/tools/video_rescore.py golden 生成，ScreenCropperTest 校验。',
+             '# 每个 case 是同一个 ScreenCropper 依次看的几帧。frame 行：截图的宽、高，期望的视频区域 x0 y0 w h，再是这一帧怎么画：',
+             '# 先全黑，再按顺序画矩形 x0,y0,w,h,填充（n<种子> 随机噪声，同 golden_image；c<RRGGBB> 纯色；',
+             '# k<步长> 在 (x + y) % 步长 == 0 的位置画白点，模拟状态栏图标、字幕）',
+             '# case <名字>',
+             '# frame <w> <h> <x0> <y0> <w> <h> [<x0>,<y0>,<w>,<h>,<填充>]...']
+    res = crop_results()
+    for name, frames in CROP_CASES:
+        lines.append('case %s' % name)
+        for ((w, h), rects), got in zip(frames, res[name]):
+            lines.append('frame %d %d %d %d %d %d' % ((w, h) + got) + ''.join(' %d,%d,%d,%d,%s' % r for r in rects))
+    txt = '\n'.join(lines) + '\n'
+    if write:
+        d = os.path.dirname(path)
+        if not os.path.isdir(d):
+            os.makedirs(d)
+        with io.open(path, 'w', encoding='utf-8', newline='\n') as fh:
+            fh.write(txt)
+        print('已写 %s（%d 个 case）' % (os.path.relpath(path), len(CROP_CASES)))
     return txt
 
 
@@ -974,6 +1206,32 @@ def selftest():
           '居中裁剪区域与 FramePreprocessor.cropRect 相同')
     check(ffmpeg_increase(1920, 1080, 224) == (398, 224) and ffmpeg_increase(720, 1280, 224) == (224, 398),
           'ffmpeg force_original_aspect_ratio=increase 的尺寸')
+    check(crop_golden(write=False) == io.open(CROP_GOLDEN_PATH, encoding='utf-8').read(),
+          'ScreenCropper 对拍数据与 Python 移植一致（改了算法要同步 Java 并跑 golden）')
+    got = crop_results()
+    bad = [k for k in CROP_EXPECT if got.get(k) != CROP_EXPECT[k]]
+    check(not bad, 'ScreenCropper：%d 个场景都得到设计上的结果（对称黑边裁掉；暗场景、字幕、全黑沿用上次；'
+                   '控制条、暗边不对称不裁）%s' % (len(CROP_EXPECT), ('；不对：%s' % ' '.join(bad)) if bad else ''))
+    check(fit_rect(2400, 1080, 540, 1200) == (0, 478, 540, 243) and fit_rect(1920, 1080, 2400, 1080) == (240, 0, 1920, 1080)
+          and fit_rect(1920, 1080, 1080, 2400) == (0, 896, 1080, 607) and parse_screen('1080x2400') == (2400, 1080),
+          '等比放进 + 居中（同 LogicalDisplay.configureDisplayLocked）')
+    check([screen_layout(1920, 1080, s) for s in SCREEN_SCENES] ==
+          [(1200, 540, (120, 0, 960, 540)), (540, 1200, (54, 478, 432, 243)), (540, 1200, (0, 448, 540, 304))],
+          '在线模式截图里视频的位置：横屏 / 转屏没跟上（横屏画面缩进竖屏截图）/ 竖屏全屏')
+    # 视频中间（训练取的居中正方形，x ∈ [420, 1500)）是绿的、两边是红的：哪种场景送进模型的只有绿色，就与训练取的一样
+    img = np.zeros((1080, 1920, 3), np.uint8)
+    img[:] = (220, 30, 30)
+    img[:, 400:1520] = (30, 200, 60)
+    green = dict((p, bool((np.abs(screen_input(img, p).astype(int) - (30, 200, 60)).max(axis=2) <= 2).all()))
+                 for p in SCREEN_PREPS)
+    lit = (screen_input(img, 'scrrot').max(axis=2) > CROP_BLACK_MAX)
+    rows, cols = int(lit.any(axis=1).sum()), int(lit.any(axis=0).sum())
+    check(green['scrland'] and green['scrlandbar'] and not green['scrrot'] and not green['scrport']
+          and 70 <= rows <= 76 and 126 <= cols <= 132,
+          '横屏截图的居中正方形 = 视频的居中正方形；转屏没跟上时整幅画面缩成正方形中间 %d×%d 的一条，上下是黑边' % (cols, rows))
+    check(green['scrrotbar'] and green['scrportbar']
+          and np.array_equal(screen_input(img, 'scrland'), screen_input(img, 'scrlandbar')),
+          '先去黑边：转屏没跟上、竖屏全屏也取回视频的居中正方形；横屏时与不去黑边逐位相同')
     if cv2 is not None:
         rng = np.random.default_rng(0)
         worst, exact = 0, True
@@ -1044,7 +1302,8 @@ def selftest():
         params = 'VIDEO_DO=0.65 VIDEO_PLOT=0.60 AUDIO_DO=0.55 AUDIO_NOISE=0.60'
         old_run = os.path.join(tmp, 'old.csv')
         _synth_run(old_run, src, cache, 'keyframe_legacy', 200, False, params)
-        res = check_one(('synth', None, old_run, vpath, ['keyframe_legacy', 'exact_legacy'], 'auto', DEFAULT_MODEL))
+        res = check_one(('synth', None, old_run, vpath, ['keyframe_legacy', 'exact_legacy'], 'auto', DEFAULT_MODEL,
+                         SCREEN))
         kf = [r for r in res['rows'] if r['pipe'] == 'keyframe_legacy'][0]
         ex = [r for r in res['rows'] if r['pipe'] == 'exact_legacy'][0]
         # 结果每 500ms、帧每 250ms，取帧目标 ≡ -Δ (mod 250)，GOP 中点 ≡ 0：Δ 在 [0, 250) 里关键帧的分配都一样
@@ -1055,24 +1314,32 @@ def selftest():
         check(ex['st']['mae'] > 0.05, '旧格式 run：exact_legacy 对不上（MAE %.4f）' % ex['st']['mae'])
         new_run = os.path.join(tmp, 'new.csv')
         _synth_run(new_run, src, cache, 'exact_crop', 150, True, params + ' VIDEO_PIPE=exact_crop')
-        res = check_one(('synth', None, new_run, vpath, None, 'auto', DEFAULT_MODEL))
+        res = check_one(('synth', None, new_run, vpath, None, 'auto', DEFAULT_MODEL, SCREEN))
         row = res['rows'][0]
         check(row['pipe'] == 'exact_crop' and row['st']['mae'] < 1e-3 and row['cand'] == 0,
               '新格式 run：按参数行 VIDEO_PIPE=exact_crop、v_fpts 逐帧复现（%s，MAE %.5f）' % (row['best'], row['st']['mae']))
         out = os.path.join(tmp, 'rescored.csv')
         rescore_one(('synth', None, old_run, vpath, 'exact_crop', 'auto', DEFAULT_MODEL, out,
-                     {'delta_ms': 900, 'offset_us': 0}, None))
+                     {'delta_ms': 900, 'offset_us': 0}, None, SCREEN))
         m2, rs2 = load_results(out)
         check(len(rs2) > 30 and all(r.fpts is not None for r in rs2), 'rescore 写出的 run 能读回，带 v_fpts')
         _, rs_old = load_results(old_run)
         lag = [r.pos - r2.fpts[-1] for r, r2 in zip(rs_old, rs2)]
         check(all(abs(x - NEW_APP_DELTA) <= 34 for x in lag),
               'rescore 的 exact 管线按修复后 app 的时序取帧（最后一帧比出结果早约 %dms），不用旧 Δ' % NEW_APP_DELTA)
-        res = check_one(('synth', None, out, vpath, ['exact_crop'], 'auto', DEFAULT_MODEL))
+        res = check_one(('synth', None, out, vpath, ['exact_crop'], 'auto', DEFAULT_MODEL, SCREEN))
         check(res['rows'][0]['st']['mae'] < 1e-3, 'rescore 写出的 run 再 check：exact_crop 逐帧复现（MAE %.5f）'
               % res['rows'][0]['st']['mae'])
         z = np.load(os.path.splitext(out)[0] + '.vframes.npz')
         check(z['logits'].shape == (len(z['pts_us']), 3), 'rescore 写出逐帧 logit（%d 帧）' % len(z['pts_us']))
+        out2 = os.path.join(tmp, 'rescored_scr.csv')
+        rescore_one(('synth', None, old_run, vpath, 'exact_scrrotbar', 'auto', DEFAULT_MODEL, out2,
+                     {'delta_ms': 900, 'offset_us': 0}, None, (1920, 1080)))
+        m3, rs3 = load_results(out2)
+        with io.open(out2, encoding='utf-8') as fh:
+            head = fh.read(4000)
+        check(len(rs3) == len(rs2) and 'pipe=exact_scrrotbar' in head and 'screen=1920x1080' in head,
+              '在线模式管线：rescore 照常写出，文件头记下管线和模拟的屏幕')
     finally:
         _make_model = keep_make
     return _finish(fails)
@@ -1120,6 +1387,8 @@ def main():
                         help='YUV→RGB 矩阵：auto（码流标的；没标时高清 BT.709、标清 BT.601，同 Android）')
         sp.add_argument('--align', default=DEFAULT_ALIGN, help='对齐结果文件（默认 bench/rescored/video_alignment.json）')
         sp.add_argument('--jobs', type=int, default=1, help='几部片并行（每个进程各占 4 个线程）')
+        sp.add_argument('--screen', default='%dx%d' % SCREEN,
+                        help='在线模式（exact_scr* 管线）模拟的手机屏幕，横屏时的 宽x高（默认 %dx%d）' % SCREEN)
         if name == 'check':
             sp.add_argument('--pipes', help='要比的管线，逗号分隔（默认按 run 判断）：如 keyframe_legacy,exact_legacy')
         else:
@@ -1128,12 +1397,14 @@ def main():
             sp.add_argument('--tag', help='输出子目录名（默认 video_<管线>_<runs 目录名>）')
             sp.add_argument('--delta', type=int, help='旧 run（没有 v_fpts）的时间差 Δ（ms）。默认：keyframe 管线用 check 扫出的值，'
                                                       'exact 管线用修复后 app 的 %dms' % NEW_APP_DELTA)
-    sub.add_parser('golden', help='重新生成 Java 端 FramePreprocessorTest 的对拍数据（改了 FramePreprocessor 才需要）')
+    sub.add_parser('golden', help='重新生成 Java 端 FramePreprocessorTest、ScreenCropperTest 的对拍数据'
+                                  '（改了 FramePreprocessor / ScreenCropper 才需要）')
     a = p.parse_args()
     if a.selftest:
         selftest()
     elif a.cmd == 'golden':
         golden()
+        crop_golden()
     elif a.cmd == 'keyframes':
         cmd_keyframes(a)
     elif a.cmd == 'check':

@@ -51,10 +51,11 @@ flowchart TB
 | `MainActivity.java` | 主界面、视频选择、BLE 连接、在线分析入口和更新检查 |
 | `VideoProcessActivity.java` | 本地视频播放、音视频分析、结果融合和 BLE 控制 |
 | `OnlineAnalysisActivity.java` | 在线分析界面，复用本地模式的推理与融合逻辑 |
-| `OnlineAnalysisService.java` | 前台服务；负责屏幕捕获、系统音频采集、静音检测和数据回调 |
+| `OnlineAnalysisService.java` | 前台服务；负责屏幕捕获（截图尺寸跟着转屏）、系统音频采集、静音检测和数据回调 |
 | `VideoFrameExtractor.java` | 基于 MediaExtractor、MediaCodec 与 SurfaceTexture 顺序解码，按播放位置取当前帧（在单独的抽帧线程里运行） |
 | `EGLRenderer.java` | 使用 OpenGL/EGL 按 SurfaceTexture 的变换矩阵把画面中央的正方形画到离屏缓冲并读回 |
 | `FramePreprocessor.java` | 视频模型输入的预处理（居中裁剪、面积平均缩小到 160×160），与训练素材的处理一致，三种模式共用 |
+| `ScreenCropper.java` | 在线模式：在截屏里找出视频画面（去掉四周对称的黑边），再交给 `FramePreprocessor` 居中裁剪 |
 | `VideoClassifierHelper.java` | MobileNetV3Small TFLite 推理封装 |
 | `AudioDecoder.java` | 按播放进度解码、重采样音频并写入 PCM 环形缓冲区 |
 | `PcmCircularBuffer.java` | 管理本地与在线模式的 PCM 数据写入和窗口读取 |
@@ -156,8 +157,8 @@ app/src/main/assets/
 ### 在线分析
 
 1. 进入在线分析模式并授权屏幕捕获。
-2. 返回桌面，在其他应用中播放允许捕获的视频。
-3. 应用以前台服务持续获取屏幕帧和系统音频。
+2. 返回桌面，在其他应用中播放允许捕获的视频。横屏全屏播放时，截到的画面与训练素材的取法一致，识别效果最好。
+3. 应用以前台服务持续获取屏幕帧和系统音频；转屏后截图尺寸跟着变，截屏里视频四周的黑边先去掉再居中裁剪。
 4. 连续静音达到阈值时，分析和硬件动作会暂停。
 
 ### 网页视频

@@ -15,7 +15,8 @@ import java.util.Arrays;
  * 离线模式还是 GPU 从原分辨率一步采样到 160（1080p 时每个输出像素只用到对应约 80 个原像素里的 4 个，有混叠）。
  * 现在三种模式都走这里：
  * <ol>
- *   <li>按 {@link #cropRect} 居中裁正方形（离线模式在 GPU 上裁，网页 / 在线模式在这里裁）；</li>
+ *   <li>按 {@link #cropRect} 居中裁正方形（离线模式在 GPU 上裁，网页 / 在线模式在这里裁；在线模式先用 ScreenCropper
+ *       去掉截屏里视频四周的黑边，再在视频画面里居中裁）；</li>
  *   <li>面积平均缩到 224（训练片段的尺寸）；</li>
  *   <li>面积平均缩到 160（与训练读帧时的 cv2.INTER_AREA 同一套权重）。</li>
  * </ol>
@@ -54,6 +55,12 @@ public final class FramePreprocessor {
         if (!CENTER_CROP) return new int[]{0, 0, w, h};
         int side = Math.min(w, h);
         return new int[]{(w - side) / 2, (h - side) / 2, side, side};
+    }
+
+    /** region {x0, y0, w, h} 里的居中正方形（在线模式：ScreenCropper 找出的视频画面里再居中裁）。 */
+    public static int[] cropRect(int[] region) {
+        int[] r = cropRect(region[2], region[3]);
+        return new int[]{region[0] + r[0], region[1] + r[1], r[2], r[3]};
     }
 
     /**
