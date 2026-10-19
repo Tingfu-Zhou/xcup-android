@@ -532,10 +532,23 @@ python3 bench/tools/frame_diag.py --name e1d,exact_scrland,exact_scrrot,exact_sc
 
 - 不带 `--model` 就是 app 里的模型（E1d），变体名默认就是管线名。PowerShell 里循环写成
   `foreach ($p in 'scrland','scrrot','scrport','scrrotbar','scrportbar') { python bench/tools/baseline.py rescore --videos D:/xcup/videos --pipe "exact_$p" --jobs 4 }`。
-- 预期：`exact_scrland` ≈ `e1d`；`exact_scrrot` / `exact_scrport` 量出缩小加黑边让视频 AUC 和端到端差了多少；`…bar` 取回多少
-  （截图分辨率低、缩得多时 GPU 双线性有混叠，可能比 `exact_scrland` 略差）。`exact_scrlandbar` 与 `exact_scrland` 逐位相同，不用算。
+- `exact_scrlandbar` 与 `exact_scrland` 逐位相同，不用算。
+- 结果（2026-10-19，屏幕 2756x1268，Xiaomi 17T；报告 `bench/baseline/compare_e1d_vs_exact_scrland_vs_…_vs_exact_scrportbar.txt`）：
+
+  | 变体 | 代价 | 视频 AUC 合并 / 最差片 | 视频准确率 | 漏转 | 误停 | seek 后没启动 |
+  |---|---|---|---|---|---|---|
+  | `e1d`（离线模式） | 1099 | 0.948 / 0.715 | 89.1% | 1.4% | 5 | 0 |
+  | `exact_scrland`（横屏，截图跟着转屏） | 1097 | 0.948 / 0.711 | 89.1% | 1.4% | 5 | 0 |
+  | `exact_scrrot`（修复前，竖屏开始再转横屏） | 1616 | 0.852 / 0.475 | 33.8% | 7.1% | 12 | 13 |
+  | `exact_scrrotbar`（转屏没跟上 + 去黑边） | 1133 | 0.948 / 0.693 | 89.5% | 1.5% | 6 | 0 |
+  | `exact_scrport`（修复前，竖屏全屏） | 1532 | 0.888 / 0.477 | 41.8% | 6.3% | 14 | 8 |
+  | `exact_scrportbar`（竖屏全屏 + 去黑边） | 1162 | 0.944 / 0.697 | 89.7% | 1.4% | 5 | 0 |
+
+  - 横屏、截图跟着转屏就与离线模式一样；修复前的两种场景视频基本不再判"转"（误转降到 6% 是这个原因，不是变好），代价 +39~47%。
+  - 去黑边取回了几乎全部；剩下的差距集中在 v07（scrrotbar +28、scrportbar +61，其余片 ±6 以内）：这两种场景截图里的视频只有
+    291 / 356 像素高，系统缩小 3~4 倍有混叠，最难的 v07 最敏感。
 - 局限：没有模拟播放器的界面（状态栏、控制条、竖屏不全屏时周围的页面），视频以外全是纯黑；视频按 SurfaceFlinger 一次双线性合成进
-  截图（`gl_linear`），用 TextureView 的播放器中间多一次缩放没有模拟。在线模式不写评测 CSV，这些数字还没有真机对照；真机上用 logcat
+  截图（`gl_linear`），用 TextureView 的播放器中间多一次缩放没有模拟。在线模式不写评测 CSV，这些数字没有真机对照；真机上用 logcat
   看 `[录屏]`（转屏后的截图尺寸）和 `[视频线程] 截图 … 里的视频画面`（去黑边的结果）。
 
 ## 时间线
@@ -577,4 +590,5 @@ python3 bench/tools/frame_diag.py --name e1d,exact_scrland,exact_scrrot,exact_sc
 - 2026-10-19：在线模式（录屏）送进视频模型的画面与训练不一致：截图尺寸只在启动时定一次，竖屏开始、转横屏后系统把横屏画面缩进
   竖屏尺寸的截图、上下补黑，模型看到的是缩成中间一条的整幅画面；竖屏全屏播放时也是上下黑边（第 7 节"在线模式（录屏）的画面"）。
   app：截图尺寸跟着转屏（`OnlineAnalysisService`），新增 `ScreenCropper` 去黑边后再居中裁；`video_rescore.py` 加在线模式的
-  `scr*` 预处理，`golden` 同时生成 `ScreenCropperTest` 的对拍数据；`baseline.py rescore` 加 `--screen`。13 部片上的量化和真机验证待做。
+  `scr*` 预处理，`golden` 同时生成 `ScreenCropperTest` 的对拍数据；`baseline.py rescore` 加 `--screen`。13 部片上的量化见第 7 节；真机（Xiaomi 17T）logcat 确认转屏后截图
+  634x1378 → 1378x634、帧窗口清空。
