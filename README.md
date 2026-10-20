@@ -20,6 +20,7 @@ Xcup Android 会从本地视频、屏幕共享或网页视频中提取画面与�
 - BLE 控制：支持自动扫描、连接、指令发送、发送节流，以及硬件按键触发后的暂停与恢复。
 - 播放同步：支持拖动、暂停、恢复、播放结束处理和横屏全屏；Seek 后会重置历史状态并重新同步分析链路。
 - 应用更新检查：通过远端 `version.json` 判断推荐更新或强制更新，并跳转外部浏览器下载。
+- 多语言界面：中文与日语，按系统语言自动切换；Android 13 及以上也可以在系统设置里单独为本 App 选择语言。
 
 ## 工作原理
 
@@ -123,17 +124,22 @@ app/src/main/assets/
 
 ### 4. 配置更新地址（可选）
 
-如需启用应用更新检查，请将固定地址的 `version.json` 配置为类似结构：
+如需启用应用更新检查，请将固定地址的 `version.json` 配置为类似结构（Android 读 `android` 段，iOS 版读同一文件的 `ios` 段）：
 
 ```json
 {
-  "latestVersionCode": 108,
-  "minSupportedCode": 106,
-  "latestVersionName": "1.0.8",
-  "landingUrl": "https://example.com/download",
-  "notes": "Bug fixes and performance improvements"
+  "android": {
+    "latestVersionCode": 108,
+    "minSupportedCode": 106,
+    "latestVersionName": "1.0.8",
+    "landingUrl": "https://example.com/download",
+    "notes": "修复问题并提升性能",
+    "notes_ja": "不具合の修正とパフォーマンスの向上"
+  }
 }
 ```
+
+`notes_ja` 可选：界面是日文时更新弹窗显示它，没填就显示 `notes`。
 
 ### 5. 构建与安装
 
@@ -144,6 +150,16 @@ app/src/main/assets/
 ```
 
 首次使用时，根据 Android 版本授予蓝牙、通知、录音和屏幕投影等必要权限。
+
+## 多语言
+
+界面文字支持中文和日语，按系统语言自动切换：系统语言是日语时显示日语，其余情况显示中文。
+
+- 中文：`app/src/main/res/values/strings.xml`（默认，也是其他语言的兜底）
+- 日语：`app/src/main/res/values-ja/strings.xml`
+- `app/src/main/res/xml/locales_config.xml`：声明支持的语言，Android 13 及以上可在「系统设置 → 应用 → 语言」里单独为本 App 选择语言
+
+新增界面文字时，在 `values/strings.xml` 和 `values-ja/strings.xml` 里各加一条同名的字符串，代码里用 `R.string.xxx` / `getString(...)`，不要直接写中文字面量。带参数的文字用 `%1$d`、`%2$s` 这类带序号的占位符，日语语序不同也能对上。只在调试悬浮窗和日志里出现的文字不需要翻译。
 
 ## 使用流程
 

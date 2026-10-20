@@ -354,8 +354,8 @@ public class WebVideoActivity extends AppCompatActivity {
                 + ", ua=" + ua
                 + ", startMs=" + startPositionMs);
         String toast = startPositionMs > 0
-                ? "正在打开分析页（从 " + (startPositionMs / 1000) + "s）…"
-                : "正在打开分析页…";
+                ? getString(R.string.web_video_opening_from, startPositionMs / 1000)
+                : getString(R.string.web_video_opening);
         Toast.makeText(this, toast, Toast.LENGTH_SHORT).show();
         startActivity(intent);
     }

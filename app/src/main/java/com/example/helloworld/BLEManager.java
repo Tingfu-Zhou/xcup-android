@@ -237,13 +237,13 @@ public class BLEManager {
     @SuppressLint("MissingPermission")
     public void startScanAndConnect() {
         if (scanner == null || adapter == null || !adapter.isEnabled()) {
-            notifyScanFailed("蓝牙未开启或不可用");
+            notifyScanFailed(context.getString(R.string.ble_unavailable));
             return;
         }
 
         // 检查权限
         if (!hasRequiredPermissions()) {
-            notifyScanFailed("缺少蓝牙权限");
+            notifyScanFailed(context.getString(R.string.ble_permission_missing));
             return;
         }
 
@@ -265,7 +265,7 @@ public class BLEManager {
         scanTimeoutRunnable = () -> {
             stopScanSafe();
             if (!isConnected) {
-                notifyScanFailed("扫描超时，未找到设备");
+                notifyScanFailed(context.getString(R.string.ble_scan_timeout));
             }
         };
         scanTimeoutHandler.postDelayed(scanTimeoutRunnable, 20000);
@@ -296,7 +296,7 @@ public class BLEManager {
         @Override
         public void onScanFailed(int errorCode) {
             Log.e(TAG, "扫描失败: " + errorCode);
-            notifyScanFailed("扫描失败，错误码: " + errorCode);
+            notifyScanFailed(context.getString(R.string.ble_scan_failed, errorCode));
         }
     };
 

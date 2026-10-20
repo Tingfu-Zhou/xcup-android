@@ -109,7 +109,7 @@ public class VideoFrameExtractor {
         }
         if (videoFormat == null) {
             extractor.release();
-            throw new IOException("未找到视频轨道");
+            throw new IOException(context.getString(R.string.video_no_video_track));
         }
         format = videoFormat;
         mime = format.getString(MediaFormat.KEY_MIME);

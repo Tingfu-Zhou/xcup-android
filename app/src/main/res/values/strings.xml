@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">Xcup</string>
+    <string name="app_name" translatable="false">Xcup</string>
     <string name="home_subtitle">视频联动智能控制</string>
     <string name="bluetooth_label">蓝牙设备</string>
     <string name="bluetooth_status_disconnected">未连接</string>
@@ -14,6 +14,31 @@
     <string name="mode_web_subtitle">输入网址，自动嗅探</string>
     <string name="resume_control_inactive">暂停控制（未激活）</string>
     <string name="connect_bluetooth">连接蓝牙设备</string>
+
+    <!-- Home page: Bluetooth button, toasts and the (hidden) resume control button -->
+    <string name="disconnect_bluetooth">断开蓝牙</string>
+    <string name="bluetooth_button_scanning">扫描中...</string>
+    <string name="bluetooth_permission_required">需要蓝牙权限才能连接设备</string>
+    <string name="bluetooth_enable_prompt">请开启蓝牙</string>
+    <string name="bluetooth_toast_connected">蓝牙已连接</string>
+    <string name="bluetooth_toast_disconnected">蓝牙已断开</string>
+    <string name="resume_control_paused">已暂停app操作，点击恢复</string>
+    <string name="resume_control_resumed">已恢复控制</string>
+    <string name="toast_device_local_control">设备正在本地控制，暂停app控制</string>
+
+    <!-- BLE scan failures (shown as a toast on the home page) -->
+    <string name="ble_unavailable">蓝牙未开启或不可用</string>
+    <string name="ble_permission_missing">缺少蓝牙权限</string>
+    <string name="ble_scan_timeout">扫描超时，未找到设备</string>
+    <string name="ble_scan_failed">扫描失败，错误码: %1$d</string>
+
+    <!-- Update dialog -->
+    <string name="update_title_required">必须更新以继续使用</string>
+    <string name="update_title_available">发现新版本 %1$s</string>
+    <string name="update_download">前往下载</string>
+    <string name="update_later">稍后</string>
+    <string name="update_url_unavailable">下载地址暂不可用，请稍后重试</string>
+    <string name="update_open_browser_failed">无法打开浏览器，请检查链接或网络</string>
 
     <!-- Manual control entry (home page) -->
     <string name="section_manual_control">手动控制</string>
@@ -32,6 +57,24 @@
     <string name="web_video_ad_tip_title">抓到的可能是广告</string>
     <string name="web_video_ad_tip_body">部分网站会先插播广告，嗅探到的可能是广告而不是正片。建议等正片开始播放后再点「开始分析」；若仍抓到广告，可改用主页的「在线分析」（录屏），在该网站的官方 App 里播放。</string>
     <string name="web_video_ad_tip_close">关闭提示</string>
+    <string name="web_video_opening">正在打开分析页…</string>
+    <string name="web_video_opening_from">正在打开分析页（从 %1$ds）…</string>
+
+    <!-- Video analysis page (offline and web video) -->
+    <string name="video_back_home">返回主页面</string>
+    <string name="video_fullscreen_toggle">全屏切换按钮</string>
+    <string name="video_parse_failed">视频解析失败：%1$s</string>
+    <string name="video_no_video_track">未找到视频轨道</string>
+    <string name="video_play_failed">VideoView 播放失败 (what=%1$d, extra=%2$d, %3$s)</string>
+    <string name="video_error_io">IO 错误（403/网络中断）</string>
+    <string name="video_error_malformed">畸形/不支持的流</string>
+    <string name="video_error_unsupported">不支持的格式</string>
+    <string name="video_error_timeout">请求超时</string>
+    <string name="video_error_unknown">未知错误</string>
+    <string name="web_video_play_failed">网页视频播放失败: %1$s%2$s</string>
+    <string name="web_video_error_403">（被 CDN 拒绝 403：防盗链校验未通过或视频已下架）</string>
+    <string name="web_video_error_http">（HTTP %1$d）</string>
+    <string name="web_video_too_short">视频时长仅 %1$d 秒，疑似预览/广告片段。\n请返回 WebView 等真视频开始播放后再点开始分析。</string>
 
     <!-- Online analysis page -->
     <string name="online_back">返回</string>
@@ -42,6 +85,18 @@
     <string name="online_tip_landscape">建议将手机横屏并全屏播放视频，识别效果最佳。</string>
     <string name="online_tip_browser">部分浏览器（如 Chrome、Firefox）出于安全考虑，会自动将屏幕共享中的视频画面遮黑，并显示 “为了安全起见，屏幕共享画面已隐藏此应用的内容” 等提示。\n\n为了保证分析的准确性，录屏模式建议使用对应视频网站的官方 App 直接观看视频(部分app会禁止屏幕/音频抓取)。</string>
     <string name="online_tip_exit">退出：回到本页面点左上角返回，或在系统的屏幕共享提示里点「停止」。</string>
+    <string name="online_audio_permission_title">需要音频录制权限</string>
+    <string name="online_audio_permission_rationale">在线分析需要音频录制权限才能捕获系统音频</string>
+    <string name="online_audio_permission_denied">您已拒绝音频录制权限，请在设置中手动开启</string>
+    <string name="online_audio_permission_required">需要音频录制权限才能捕获系统音频</string>
+    <string name="online_screen_capture_required">需要屏幕录制权限</string>
+    <string name="online_grant_permission">授予权限</string>
+    <string name="online_open_settings">去设置</string>
+    <string name="online_cancel">取消</string>
+    <string name="online_notification_channel_name">在线分析服务</string>
+    <string name="online_notification_channel_desc">正在进行在线视频分析</string>
+    <string name="online_notification_title">在线分析中</string>
+    <string name="online_notification_text">正在分析屏幕内容</string>
 
     <!-- Manual control page -->
     <string name="manual_title">手动电子菜单</string>

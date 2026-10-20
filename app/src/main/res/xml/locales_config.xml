@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 应用支持的界面语言（Android 13+ 可在 系统设置 → 应用 → 语言 里单独为本 App 选择）。
+     zh-CN 对应默认的 values/，ja 对应 values-ja/；新增语言时在这里同步加一行。 -->
+<locale-config xmlns:android="http://schemas.android.com/apk/res/android">
+    <locale android:name="zh-CN" />
+    <locale android:name="ja" />
+</locale-config>

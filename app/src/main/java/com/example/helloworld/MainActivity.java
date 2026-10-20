@@ -51,7 +51,7 @@ public class MainActivity extends AppCompatActivity {
                     // 权限获取成功后开始扫描
                     startBLEScan();
                 } else {
-                    Toast.makeText(this, "需要蓝牙权限才能连接设备", Toast.LENGTH_SHORT).show();
+                    Toast.makeText(this, R.string.bluetooth_permission_required, Toast.LENGTH_SHORT).show();
                 }
             });
 
@@ -75,15 +75,15 @@ public class MainActivity extends AppCompatActivity {
             public void onConnectionStateChanged(boolean connected) {
                 runOnUiThread(() -> {
                     if (connected) {
-                        btnConnectBluetooth.setText("断开蓝牙");
+                        btnConnectBluetooth.setText(R.string.disconnect_bluetooth);
                         btnConnectBluetooth.setEnabled(true);
                         tvBluetoothStatus.setText(R.string.bluetooth_status_connected);
-                        Toast.makeText(MainActivity.this, "蓝牙已连接", Toast.LENGTH_SHORT).show();
+                        Toast.makeText(MainActivity.this, R.string.bluetooth_toast_connected, Toast.LENGTH_SHORT).show();
                     } else {
-                        btnConnectBluetooth.setText("连接蓝牙设备");
+                        btnConnectBluetooth.setText(R.string.connect_bluetooth);
                         btnConnectBluetooth.setEnabled(true);
                         tvBluetoothStatus.setText(R.string.bluetooth_status_disconnected);
-                        Toast.makeText(MainActivity.this, "蓝牙已断开", Toast.LENGTH_SHORT).show();
+                        Toast.makeText(MainActivity.this, R.string.bluetooth_toast_disconnected, Toast.LENGTH_SHORT).show();
                     }
                 });
             }
@@ -91,7 +91,7 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onScanStarted() {
                 runOnUiThread(() -> {
-                    btnConnectBluetooth.setText("扫描中...");
+                    btnConnectBluetooth.setText(R.string.bluetooth_button_scanning);
                     btnConnectBluetooth.setEnabled(false);
                     tvBluetoothStatus.setText(R.string.bluetooth_status_scanning);
                 });
@@ -100,7 +100,7 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onScanFailed(String reason) {
                 runOnUiThread(() -> {
-                    btnConnectBluetooth.setText("连接蓝牙设备");
+                    btnConnectBluetooth.setText(R.string.connect_bluetooth);
                     btnConnectBluetooth.setEnabled(true);
                     tvBluetoothStatus.setText(R.string.bluetooth_status_disconnected);
                     Toast.makeText(MainActivity.this, reason, Toast.LENGTH_LONG).show();
@@ -113,16 +113,16 @@ public class MainActivity extends AppCompatActivity {
             runOnUiThread(() -> {
                 if (paused) {
                     btnResumeControl.setEnabled(true);
-                    btnResumeControl.setText("已暂停app操作，点击恢复");
+                    btnResumeControl.setText(R.string.resume_control_paused);
                     btnResumeControl.setAlpha(1.0f); // 完全不透明
-                    Toast.makeText(this, "设备正在本地控制，暂停app控制", Toast.LENGTH_LONG).show();
+                    Toast.makeText(this, R.string.toast_device_local_control, Toast.LENGTH_LONG).show();
                 } else {
                     btnResumeControl.setEnabled(false);
-                    btnResumeControl.setText("已恢复控制");
+                    btnResumeControl.setText(R.string.resume_control_resumed);
                     btnResumeControl.setAlpha(0.5f); // 半透明（灰色效果）
                     // 延迟后恢复默认文本
                     new Handler(Looper.getMainLooper()).postDelayed(() -> {
-                        btnResumeControl.setText("暂停控制（未激活）");
+                        btnResumeControl.setText(R.string.resume_control_inactive);
                     }, 2000);
                 }
             });
@@ -131,7 +131,7 @@ public class MainActivity extends AppCompatActivity {
         // [新增] 初始化恢复控制按钮状态
         btnResumeControl.setEnabled(false);
         btnResumeControl.setAlpha(0.5f);
-        btnResumeControl.setText("暂停控制（未激活）");
+        btnResumeControl.setText(R.string.resume_control_inactive);
 
         // 选择手机相册中的视频
         btnSelectVideo.setOnClickListener(new View.OnClickListener() {
@@ -151,7 +151,7 @@ public class MainActivity extends AppCompatActivity {
                 if (!bleManager.isConnected()) {
                     // 检查蓝牙是否可用
                     if (!bleManager.isBluetoothAvailable()) {
-                        Toast.makeText(MainActivity.this, "请开启蓝牙", Toast.LENGTH_SHORT).show();
+                        Toast.makeText(MainActivity.this, R.string.bluetooth_enable_prompt, Toast.LENGTH_SHORT).show();
                         return;
                     }
                     // 请求权限并开始扫描
@@ -159,7 +159,7 @@ public class MainActivity extends AppCompatActivity {
                 } else {
                     // 断开连接
                     bleManager.disconnect();
-                    btnConnectBluetooth.setText("连接蓝牙设备");
+                    btnConnectBluetooth.setText(R.string.connect_bluetooth);
                     tvBluetoothStatus.setText(R.string.bluetooth_status_disconnected);
                 }
             }
@@ -171,7 +171,7 @@ public class MainActivity extends AppCompatActivity {
             public void onClick(View v) {
                 if (bleManager.isPausedByLocal()) {
                     bleManager.sendResumeControl();
-                    Toast.makeText(MainActivity.this, "正在恢复控制...", Toast.LENGTH_SHORT).show();
+                    Toast.makeText(MainActivity.this, R.string.manual_toast_resuming, Toast.LENGTH_SHORT).show();
                 }
             }
         });
@@ -280,10 +280,10 @@ public class MainActivity extends AppCompatActivity {
         super.onResume();
         // [新增] 更新连接按钮状态
         if (bleManager != null && bleManager.isConnected()) {
-            btnConnectBluetooth.setText("断开蓝牙");
+            btnConnectBluetooth.setText(R.string.disconnect_bluetooth);
             tvBluetoothStatus.setText(R.string.bluetooth_status_connected);
         } else {
-            btnConnectBluetooth.setText("连接蓝牙设备");
+            btnConnectBluetooth.setText(R.string.connect_bluetooth);
             tvBluetoothStatus.setText(R.string.bluetooth_status_disconnected);
         }
 
@@ -303,18 +303,20 @@ public class MainActivity extends AppCompatActivity {
 
     // 显示更新对话框（保持原有方法）
     private void showUpdateDialog(UpdateChecker.UpdateInfo info) {
-        String title = info.force ? "必须更新以继续使用" : ("发现新版本 " + (info.latestName == null ? "" : info.latestName));
+        String title = info.force
+                ? getString(R.string.update_title_required)
+                : getString(R.string.update_title_available, info.latestName == null ? "" : info.latestName);
         String msg = (info.notes == null ? "" : info.notes);
 
         AlertDialog.Builder b = new AlertDialog.Builder(this)
                 .setTitle(title)
                 .setMessage(msg)
-                .setPositiveButton("前往下载", (d, w) -> openDownloadPage(info));
+                .setPositiveButton(R.string.update_download, (d, w) -> openDownloadPage(info));
 
         if (info.force) {
             b.setCancelable(false); // 强更：不可取消
         } else {
-            b.setNegativeButton("稍后", null);
+            b.setNegativeButton(R.string.update_later, null);
         }
         b.show();
     }
@@ -323,14 +325,14 @@ public class MainActivity extends AppCompatActivity {
     private void openDownloadPage(UpdateChecker.UpdateInfo info) {
         String url = info.landingUrl;
         if (url == null || url.isEmpty()) {
-            Toast.makeText(this, "下载地址暂不可用，请稍后重试", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, R.string.update_url_unavailable, Toast.LENGTH_LONG).show();
             return;
         }
         try {
             Uri u = Uri.parse(url);
             startActivity(new android.content.Intent(android.content.Intent.ACTION_VIEW, u));
         } catch (Exception e) {
-            Toast.makeText(this, "无法打开浏览器，请检查链接或网络", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, R.string.update_open_browser_failed, Toast.LENGTH_LONG).show();
         }
     }
 

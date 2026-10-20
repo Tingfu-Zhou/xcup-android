@@ -337,7 +337,7 @@ public class VideoProcessActivity extends AppCompatActivity {
                 Log.d(TAG, "onCreate: VideoFrameExtractor 初始化成功");
             } catch (IOException e) {
                 Log.e(TAG, "onCreate: VideoFrameExtractor 初始化失败 uri=" + videoUri, e);
-                Toast.makeText(this, "视频解析失败：" + e.getMessage(), Toast.LENGTH_LONG).show();
+                Toast.makeText(this, getString(R.string.video_parse_failed, e.getMessage()), Toast.LENGTH_LONG).show();
                 finish();
                 return;
             }
@@ -368,16 +368,16 @@ public class VideoProcessActivity extends AppCompatActivity {
             videoView.setOnErrorListener((mp, what, extra) -> {
                 Log.e(TAG, "视频播放出错 what:" + what + " extra:" + extra
                         + " uri=" + videoUri);
-                String hint;
+                int hint;
                 switch (extra) {
-                    case -1004: hint = "IO 错误（403/网络中断）"; break;
-                    case -1007: hint = "畸形/不支持的流"; break;
-                    case -1010: hint = "不支持的格式"; break;
-                    case -110:  hint = "请求超时"; break;
-                    default:    hint = "未知错误";
+                    case -1004: hint = R.string.video_error_io; break;
+                    case -1007: hint = R.string.video_error_malformed; break;
+                    case -1010: hint = R.string.video_error_unsupported; break;
+                    case -110:  hint = R.string.video_error_timeout; break;
+                    default:    hint = R.string.video_error_unknown;
                 }
                 Toast.makeText(this,
-                        "VideoView 播放失败 (what=" + what + ", extra=" + extra + ", " + hint + ")",
+                        getString(R.string.video_play_failed, what, extra, getString(hint)),
                         Toast.LENGTH_LONG).show();
                 return true;
             });
@@ -1426,12 +1426,12 @@ public class VideoProcessActivity extends AppCompatActivity {
                             + "\n  请求头(per-request)=" + http.dataSpec.httpRequestHeaders.keySet()
                             + "\n  响应头=" + http.headerFields);
                     hint = http.responseCode == 403
-                            ? "（被 CDN 拒绝 403：防盗链校验未通过或视频已下架）"
-                            : "（HTTP " + http.responseCode + "）";
+                            ? getString(R.string.web_video_error_403)
+                            : getString(R.string.web_video_error_http, http.responseCode);
                 }
 
                 Toast.makeText(VideoProcessActivity.this,
-                        "网页视频播放失败: " + error.getErrorCodeName() + hint,
+                        getString(R.string.web_video_play_failed, error.getErrorCodeName(), hint),
                         Toast.LENGTH_LONG).show();
             }
         });
@@ -1483,8 +1483,7 @@ public class VideoProcessActivity extends AppCompatActivity {
         // 真视频几乎不会这么短。弹 Toast 警告，让用户返回重嗅。
         if (duration > 0 && duration < 60_000L) {
             Toast.makeText(this,
-                    "视频时长仅 " + (duration / 1000) + " 秒，疑似预览/广告片段。\n"
-                            + "请返回 WebView 等真视频开始播放后再点开始分析。",
+                    getString(R.string.web_video_too_short, duration / 1000),
                     Toast.LENGTH_LONG).show();
         }
 

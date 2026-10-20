@@ -200,14 +200,14 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                     Manifest.permission.RECORD_AUDIO)) {
                 // 显示解释弹窗
                 new AlertDialog.Builder(this)
-                        .setTitle("需要音频录制权限")
-                        .setMessage("在线分析需要音频录制权限才能捕获系统音频")
-                        .setPositiveButton("授予权限", (dialog, which) -> {
+                        .setTitle(R.string.online_audio_permission_title)
+                        .setMessage(R.string.online_audio_permission_rationale)
+                        .setPositiveButton(R.string.online_grant_permission, (dialog, which) -> {
                             ActivityCompat.requestPermissions(this,
                                     new String[]{Manifest.permission.RECORD_AUDIO},
                                     REQUEST_CODE_AUDIO_PERMISSION);
                         })
-                        .setNegativeButton("取消", (dialog, which) -> finish())
+                        .setNegativeButton(R.string.online_cancel, (dialog, which) -> finish())
                         .show();
             } else {
                 // 第一次请求或者用户选择了"不再询问"
@@ -250,7 +250,7 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
 
                 tvStatus.setText(R.string.online_status_running);
             } else {
-                Toast.makeText(this, "需要屏幕录制权限", Toast.LENGTH_SHORT).show();
+                Toast.makeText(this, R.string.online_screen_capture_required, Toast.LENGTH_SHORT).show();
                 finish();
             }
         }
@@ -272,9 +272,9 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                         Manifest.permission.RECORD_AUDIO)) {
                     // 用户选择了"不再询问"，引导去设置页面
                     new AlertDialog.Builder(this)
-                            .setTitle("需要音频录制权限")
-                            .setMessage("您已拒绝音频录制权限，请在设置中手动开启")
-                            .setPositiveButton("去设置", (dialog, which) -> {
+                            .setTitle(R.string.online_audio_permission_title)
+                            .setMessage(R.string.online_audio_permission_denied)
+                            .setPositiveButton(R.string.online_open_settings, (dialog, which) -> {
                                 // 跳转到应用设置页面
                                 Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
                                 Uri uri = Uri.fromParts("package", getPackageName(), null);
@@ -282,11 +282,11 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
                                 startActivity(intent);
                                 finish();
                             })
-                            .setNegativeButton("取消", (dialog, which) -> finish())
+                            .setNegativeButton(R.string.online_cancel, (dialog, which) -> finish())
                             .show();
                 } else {
                     // 用户只是拒绝了，没有选择"不再询问"
-                    Toast.makeText(this, "需要音频录制权限才能捕获系统音频", Toast.LENGTH_LONG).show();
+                    Toast.makeText(this, R.string.online_audio_permission_required, Toast.LENGTH_LONG).show();
                     finish();
                 }
                 // ======= 添加结束 =======

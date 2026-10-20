@@ -1,0 +1,144 @@
+<resources>
+    <string name="home_subtitle">動画連動スマートコントロール</string>
+    <string name="bluetooth_label">Bluetooth デバイス</string>
+    <string name="bluetooth_status_disconnected">未接続</string>
+    <string name="bluetooth_status_connected">接続済み</string>
+    <string name="bluetooth_status_scanning">検索中…</string>
+    <string name="section_video_source">動画ソース</string>
+    <string name="mode_local_title">ローカル動画</string>
+    <string name="mode_local_subtitle">アルバムから選択</string>
+    <string name="mode_online_title">オンライン解析</string>
+    <string name="mode_online_subtitle">他のアプリの動画</string>
+    <string name="mode_web_title">Web 動画</string>
+    <string name="mode_web_subtitle">URL を入力して自動検出</string>
+    <string name="resume_control_inactive">一時停止中ではありません</string>
+    <string name="connect_bluetooth">接続</string>
+
+    <!-- Home page: Bluetooth button, toasts and the (hidden) resume control button -->
+    <string name="disconnect_bluetooth">切断</string>
+    <string name="bluetooth_button_scanning">検索中…</string>
+    <string name="bluetooth_permission_required">デバイスに接続するには Bluetooth の権限が必要です</string>
+    <string name="bluetooth_enable_prompt">Bluetooth をオンにしてください</string>
+    <string name="bluetooth_toast_connected">Bluetooth に接続しました</string>
+    <string name="bluetooth_toast_disconnected">Bluetooth の接続が切れました</string>
+    <string name="resume_control_paused">アプリ操作を一時停止中。タップで再開</string>
+    <string name="resume_control_resumed">操作を再開しました</string>
+    <string name="toast_device_local_control">デバイスが本体ボタンで操作中のため、アプリからの操作を一時停止しました</string>
+
+    <!-- BLE scan failures (shown as a toast on the home page) -->
+    <string name="ble_unavailable">Bluetooth がオフになっているか、利用できません</string>
+    <string name="ble_permission_missing">Bluetooth の権限がありません</string>
+    <string name="ble_scan_timeout">検索がタイムアウトしました。デバイスが見つかりません</string>
+    <string name="ble_scan_failed">検索に失敗しました（エラーコード: %1$d）</string>
+
+    <!-- Update dialog -->
+    <string name="update_title_required">ご利用を続けるにはアップデートが必要です</string>
+    <string name="update_title_available">新しいバージョン %1$s</string>
+    <string name="update_download">ダウンロードへ</string>
+    <string name="update_later">後で</string>
+    <string name="update_url_unavailable">ダウンロード先を利用できません。しばらくしてからもう一度お試しください</string>
+    <string name="update_open_browser_failed">ブラウザを開けませんでした。リンクまたはネットワークを確認してください</string>
+
+    <!-- Manual control entry (home page) -->
+    <string name="section_manual_control">手動操作</string>
+    <string name="mode_manual_title">手動コントロール</string>
+    <string name="mode_manual_subtitle">アプリでモードと強さを直接調整</string>
+
+    <!-- Web video page -->
+    <string name="web_video_title">Web 動画</string>
+    <string name="web_video_url_hint">動画ページの URL を貼り付け (https://...)</string>
+    <string name="web_video_open">開く</string>
+    <string name="web_video_status_idle">動画ページの URL を入力して「開く」をタップしてください</string>
+    <string name="web_video_status_loading">ページを読み込んでいます。動画が表示されるまでお待ちください…</string>
+    <string name="web_video_status_found">動画ストリームを検出しました。「解析を開始」をタップできます</string>
+    <string name="web_video_start_analyze">解析を開始</string>
+    <string name="web_video_back">戻る</string>
+    <string name="web_video_ad_tip_title">広告を検出した可能性があります</string>
+    <string name="web_video_ad_tip_body">一部のサイトでは本編の前に広告が流れるため、検出したのが本編ではなく広告の場合があります。本編の再生が始まってから「解析を開始」をタップしてください。それでも広告が検出される場合は、ホーム画面の「オンライン解析」（画面録画）に切り替え、そのサイトの公式アプリで再生してください。</string>
+    <string name="web_video_ad_tip_close">閉じる</string>
+    <string name="web_video_opening">解析画面を開いています…</string>
+    <string name="web_video_opening_from">解析画面を開いています（%1$d 秒から）…</string>
+
+    <!-- Video analysis page (offline and web video) -->
+    <string name="video_back_home">ホームに戻る</string>
+    <string name="video_fullscreen_toggle">全画面表示の切り替え</string>
+    <string name="video_parse_failed">動画を読み込めませんでした：%1$s</string>
+    <string name="video_no_video_track">動画トラックが見つかりません</string>
+    <string name="video_play_failed">動画を再生できませんでした (what=%1$d, extra=%2$d, %3$s)</string>
+    <string name="video_error_io">IO エラー（403／ネットワーク切断）</string>
+    <string name="video_error_malformed">不正または未対応のストリーム</string>
+    <string name="video_error_unsupported">未対応の形式</string>
+    <string name="video_error_timeout">リクエストがタイムアウトしました</string>
+    <string name="video_error_unknown">不明なエラー</string>
+    <string name="web_video_play_failed">Web 動画を再生できませんでした: %1$s%2$s</string>
+    <string name="web_video_error_403">（CDN に拒否されました 403：直リンク防止のチェックに通らなかったか、動画が削除されています）</string>
+    <string name="web_video_error_http">（HTTP %1$d）</string>
+    <string name="web_video_too_short">動画の長さが %1$d 秒しかなく、プレビューか広告の可能性があります。\n前の画面に戻り、本編の再生が始まってから「解析を開始」をタップしてください。</string>
+
+    <!-- Online analysis page -->
+    <string name="online_back">戻る</string>
+    <string name="online_status_waiting">オンライン解析を準備しています。開始まで数秒かかります</string>
+    <string name="online_status_running">オンライン解析を開始しました</string>
+    <string name="online_status_subtitle">ホーム画面に戻って、オンライン動画を再生できます</string>
+    <string name="online_tips_title">使い方のヒント</string>
+    <string name="online_tip_landscape">スマートフォンを横向きにして動画を全画面で再生すると、認識精度が最も高くなります。</string>
+    <string name="online_tip_browser">一部のブラウザ（Chrome、Firefox など）は、セキュリティ上の理由から画面共有中の動画を黒く塗りつぶし、「セキュリティのため、このアプリのコンテンツは画面共有で非表示になっています」などのメッセージを表示します。\n\n正確に解析するため、画面録画モードでは各動画サイトの公式アプリで動画を再生することをおすすめします（画面や音声の取得を禁止しているアプリもあります）。</string>
+    <string name="online_tip_exit">終了するには、この画面に戻って左上の「戻る」をタップするか、システムの画面共有の通知で「停止」をタップしてください。</string>
+    <string name="online_audio_permission_title">録音の権限が必要です</string>
+    <string name="online_audio_permission_rationale">オンライン解析でシステム音声を取得するには、録音の権限が必要です</string>
+    <string name="online_audio_permission_denied">録音の権限が拒否されています。設定から手動で許可してください</string>
+    <string name="online_audio_permission_required">システム音声を取得するには録音の権限が必要です</string>
+    <string name="online_screen_capture_required">画面録画の権限が必要です</string>
+    <string name="online_grant_permission">許可する</string>
+    <string name="online_open_settings">設定を開く</string>
+    <string name="online_cancel">キャンセル</string>
+    <string name="online_notification_channel_name">オンライン解析サービス</string>
+    <string name="online_notification_channel_desc">オンライン動画を解析しています</string>
+    <string name="online_notification_title">オンライン解析中</string>
+    <string name="online_notification_text">画面の内容を解析しています</string>
+
+    <!-- Manual control page -->
+    <string name="manual_title">手動コントロール</string>
+    <string name="manual_back">戻る</string>
+    <string name="manual_section_pattern">動作モード</string>
+    <string name="manual_section_level">モーターの強さ</string>
+    <string name="manual_pattern_1">モード 1</string>
+    <string name="manual_pattern_2">モード 2</string>
+    <string name="manual_pattern_3">モード 3</string>
+    <string name="manual_pattern_1_desc">モード 1 · 正回転のみ。同じ方向に連続で動きます</string>
+    <string name="manual_pattern_2_desc">モード 2 · 1200ms 逆回転 → 600ms 正回転 → 1100ms 逆回転</string>
+    <string name="manual_pattern_3_desc">モード 3 · 2000ms 逆回転 → 3000ms 正回転</string>
+    <string name="manual_pattern_shared_hint">このモードは動画解析でも使われます。解析で決まるのは「動かす／止める」と強さのレベルだけで、動き方（正回転／逆回転のリズム）はここで選んだモードに従います。</string>
+    <string name="manual_level_unit">レベル</string>
+    <string name="manual_level_min">0 停止</string>
+    <string name="manual_level_max">10 最強</string>
+    <string name="manual_level_detail_stop">モーター停止</string>
+    <string name="manual_level_detail">約 %1$d RPM · 伸縮 %2$s Hz</string>
+    <string name="manual_stop_all">緊急停止</string>
+    <string name="manual_status_disconnected">Bluetooth に接続されていません。ホーム画面に戻ってデバイスに接続してください</string>
+    <string name="manual_status_ready">接続済み。モードや強さを変更するとすぐに送信されます</string>
+    <string name="manual_status_sent">送信済み：モード %1$d · 強さ %2$d</string>
+    <string name="manual_status_sent_stop">送信済み：停止</string>
+    <string name="manual_status_send_failed">送信に失敗しました。Bluetooth の接続を確認してください</string>
+    <string name="manual_paused_title">デバイスは本体ボタンで操作中です</string>
+    <string name="manual_paused_body">アプリからの操作は一時停止しています。「操作を再開」をタップすると、この画面から操作できます。</string>
+    <string name="manual_resume">操作を再開</string>
+    <string name="manual_toast_paused">デバイスは本体ボタンで操作中です。先に「操作を再開」をタップしてください</string>
+    <string name="manual_toast_disconnected">Bluetooth に接続されていません。ホーム画面に戻ってデバイスに接続してください</string>
+    <string name="manual_toast_resuming">操作を再開しています…</string>
+    <string name="manual_footer_hint">この画面を離れても自動では停止しません。止めるには「緊急停止」をタップしてください。</string>
+
+    <!-- Manual control page: timed level boost for the video analysis modes -->
+    <string name="manual_section_boost">タイマーでレベルアップ</string>
+    <string name="manual_boost_title">一定時間再生すると自動でレベルアップ</string>
+    <string name="manual_boost_subtitle">終盤の盛り上がりを再現 · 動画解析モードのみ</string>
+    <string name="manual_boost_delay_label">レベルアップ開始</string>
+    <string name="manual_boost_delay_value">%1$d 分後</string>
+    <string name="manual_boost_delay_min">1 分</string>
+    <string name="manual_boost_delay_max">30 分</string>
+    <string name="manual_boost_levels_label">上げ幅</string>
+    <string name="manual_boost_levels_1">+1 レベル</string>
+    <string name="manual_boost_levels_2">+2 レベル</string>
+    <string name="manual_boost_summary">累計再生時間が %1$d 分に達すると、動画解析で決まった強さが自動的に %2$d レベル上がります（レベル 0 は停止のまま、最大はレベル 10）。</string>
+    <string name="manual_boost_hint">ローカル動画・オンライン（画面録画）・Web 動画の各モードで有効です。一時停止中や音声がないときは計測しません。モードを終了したときや動画の再生が終わったときは、最初から計測し直します（オンラインモードでは動画の終了を検知できないため、無音が約 10 秒続くと再生終了とみなします）。</string>
+</resources>

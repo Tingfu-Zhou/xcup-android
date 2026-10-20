@@ -13,6 +13,7 @@ import java.io.Reader;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.Locale;
 
 /**
  * 极简版本检查器：
@@ -85,7 +86,7 @@ public final class UpdateChecker {
                 info.latestCode   = a.getInt("latestVersionCode");
                 info.minSupported = a.getInt("minSupportedCode");
                 info.latestName   = a.optString("latestVersionName", "");
-                info.notes        = a.optString("notes", "");
+                info.notes        = localizedNotes(ctx, a);
                 info.landingUrl   = a.getString("landingUrl");
 
                 int current = getAppVersionCode(ctx);  // 修改：改为通过 PackageManager 读取
@@ -100,6 +101,16 @@ public final class UpdateChecker {
                 cb.onResult(null);
             }
         }).start();
+    }
+
+    // 界面是日文、且 version.json 里填了 notes_ja 时，弹窗用日文说明；否则用 notes（没填 notes_ja 时与原来一样）
+    private static String localizedNotes(Context ctx, JSONObject a) {
+        String notesJa = a.optString("notes_ja", "");
+        // 按系统语言列表挑界面语言，与资源匹配一致（如 [英语, 日语] 的用户看到的是日文界面）
+        Locale ui = ctx.getResources().getConfiguration().getLocales()
+                .getFirstMatch(new String[]{"zh", "ja"});
+        boolean japanese = ui != null && "ja".equals(ui.getLanguage());
+        return japanese && !notesJa.isEmpty() ? notesJa : a.optString("notes", "");
     }
 
     private static String readAll(Reader r) throws IOException {

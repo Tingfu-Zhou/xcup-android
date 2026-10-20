@@ -192,10 +192,10 @@ public class OnlineAnalysisService extends Service {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel channel = new NotificationChannel(
                     CHANNEL_ID,
-                    "在线分析服务",
+                    getString(R.string.online_notification_channel_name),
                     NotificationManager.IMPORTANCE_LOW
             );
-            channel.setDescription("正在进行在线视频分析");
+            channel.setDescription(getString(R.string.online_notification_channel_desc));
 
             NotificationManager manager = getSystemService(NotificationManager.class);
             manager.createNotificationChannel(channel);
@@ -209,8 +209,8 @@ public class OnlineAnalysisService extends Service {
         );
 
         return new NotificationCompat.Builder(this, CHANNEL_ID)
-                .setContentTitle("在线分析中")
-                .setContentText("正在分析屏幕内容")
+                .setContentTitle(getString(R.string.online_notification_title))
+                .setContentText(getString(R.string.online_notification_text))
                 .setSmallIcon(android.R.drawable.ic_media_play)
                 .setContentIntent(pendingIntent)
                 .setOngoing(true)

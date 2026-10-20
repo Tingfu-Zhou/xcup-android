@@ -76,7 +76,7 @@
         android:layout_margin="16dp"
         android:background="@android:color/transparent"
         android:src="@drawable/ic_fullscreen"
-        android:contentDescription="全屏切换按钮" />
+        android:contentDescription="@string/video_fullscreen_toggle" />
 
     <!-- 返回按钮 - 添加在全屏按钮之后或任意位置 -->
     <ImageButton
@@ -87,6 +87,6 @@
         android:layout_margin="16dp"
         android:background="#66000000"
         android:src="@drawable/ic_back"
-        android:contentDescription="返回主页面"
+        android:contentDescription="@string/video_back_home"
         android:padding="8dp" />
 </FrameLayout>
