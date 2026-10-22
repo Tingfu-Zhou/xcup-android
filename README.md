@@ -215,7 +215,7 @@ Android 版只维护一版：同一个包既上架 Google Play，也放在自己
 - 音视频识别链路设计为端侧推理；如二次开发中加入日志上传、统计分析或云端推理，应明确告知用户并取得必要授权。
 - 仅分析你有权访问和处理的内容，不得处理涉及未成年人、偷拍、胁迫或其他违法内容。
 - 屏幕捕获和音频捕获应遵守当地法律、内容版权及目标应用的服务条款。
-- 隐私政策：源文件 `docs/privacy.html`，发布在 `https://cdn.xswy.tech/app/privacy.html`（主页底部和首次启动的 18+ 确认弹窗里有入口，地址见 `MainActivity.PRIVACY_POLICY_URL`）。改了权限或数据处理方式，要同时更新它和 Play Console 的“数据安全”表。
+- 隐私政策：与 iOS 版共用 `https://download.xswy.tech/privacy.html`（主页底部和首次启动的 18+ 确认弹窗里有入口，地址见 `MainActivity.PRIVACY_POLICY_URL`；Play Console 也填这个地址）。改了权限或数据处理方式，要同时更新它和 Play Console 的“数据安全”表。
 - 接入实体硬件前请增加强度上限、停止指令、连接异常处理和人工中止机制，并充分测试。
 
 ## 贡献

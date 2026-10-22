@@ -35,8 +35,8 @@ public class MainActivity extends AppCompatActivity {
     private static final int REQUEST_CODE_SELECT_VIDEO = 101;
     private boolean updateDialogShown = false;
 
-    // 隐私政策：Google Play 要求商店后台和 app 里都要有链接。页面和 version.json 放在同一个 CDN 上
-    private static final String PRIVACY_POLICY_URL = "https://cdn.xswy.tech/app/privacy.html";
+    // 隐私政策：Google Play 要求商店后台和 app 里都要有链接。和 iOS 版共用同一个页面
+    private static final String PRIVACY_POLICY_URL = "https://download.xswy.tech/privacy.html";
     // 首次启动的 18+ 确认，确认过一次就不再弹
     private static final String PREFS = "app";
     private static final String KEY_AGE_CONFIRMED = "age_confirmed";
