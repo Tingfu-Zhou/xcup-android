@@ -19,9 +19,7 @@ import android.widget.Toast;
 import java.io.IOException;
 import java.util.ArrayDeque;
 import java.util.Arrays;
-import java.util.HashMap;
 import java.util.Locale;
-import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -29,7 +27,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.content.pm.ApplicationInfo;
-import android.view.TextureView;
 import android.view.View;
 import android.widget.ImageButton;
 
@@ -37,24 +34,10 @@ import android.widget.FrameLayout;
 import android.view.Gravity;
 import android.content.res.Configuration;
 
-import androidx.annotation.OptIn;
-import androidx.media3.common.PlaybackException;
-import androidx.media3.common.Player;
-import androidx.media3.common.VideoSize;
-import androidx.media3.common.util.UnstableApi;
-import androidx.media3.datasource.HttpDataSource;
-import androidx.media3.exoplayer.ExoPlayer;
-import androidx.media3.ui.PlayerView;
-
-@OptIn(markerClass = UnstableApi.class)
 public class VideoProcessActivity extends AppCompatActivity {
 
     private static final String TAG = "VideoProcessActivity";
     private VideoView videoView;
-    private PlayerView playerView;                  // [WebVideo] 仅网页模式可见
-    private ExoPlayerEngine exoPlayerEngine;        // [WebVideo] 仅网页模式创建
-    private long webVideoStartPositionMs = 0;       // [WebVideo] 从 WebView 带过来的起播时间
-    private boolean exoFirstReadyHandled = false;   // [WebVideo] STATE_READY 只处理第一次
     private TextView tvOverlay;
     private TextView tvVideoAction;
     private TextView tvAudioAction;
@@ -86,7 +69,7 @@ public class VideoProcessActivity extends AppCompatActivity {
      * 一次模型推理的结果快照。action 是分组概率判定（"do"/"Noise"/"" unclear），probs 为 null 表示推理失败。
      * winEndPosMs：模型窗口结尾的播放位置。音频是读 PCM 时的播放位置（窗口 = [winEndPosMs-2s, winEndPosMs]），写进评测 CSV 的
      * a_pos 列；视频是窗口里最后一帧的时刻，写进 v_pos 列。bench/tools/audio_rescore.py / video_rescore.py 离线重算时靠它们还原模型输入。
-     * framePosMs 只有视频有：窗口里 12 帧各自的时刻（离线模式是帧的 pts，网页模式是抓帧时的播放位置），写进 v_fpts 列。
+     * framePosMs 只有视频有：窗口里 12 帧各自的时刻（帧的 pts），写进 v_fpts 列。
      * cue / cueFeat 只有音频有：YAMNet AudioSet 分数判的线索（{@link AudioCue}）和分组分数，交给融合仲裁、写进评测 CSV。
      */
     private static final class ResultSnap {
@@ -178,7 +161,7 @@ public class VideoProcessActivity extends AppCompatActivity {
     private final Object audioLock = new Object();
 
     // 帧缓存环形缓冲：最近 3 秒、间隔 250ms 采样的 12 帧（已是模型输入 160×160），frameTimeWindow 是每帧的时刻
-    // （离线模式：帧的 pts；网页模式：抓帧时的播放位置），与 frameWindow 一一对应
+    // （帧的 pts），与 frameWindow 一一对应
     private final ArrayDeque<Bitmap> frameWindow = new ArrayDeque<>();
     private final ArrayDeque<Long> frameTimeWindow = new ArrayDeque<>();
     private static final int FRAME_WINDOW_SIZE = VideoClassifierHelper.NUM_FRAMES;
@@ -191,10 +174,6 @@ public class VideoProcessActivity extends AppCompatActivity {
     private final AtomicBoolean frameRequestInFlight = new AtomicBoolean(false);
     // seek 时加一：seek 之前请求、之后才送到视频线程的帧一律丢掉
     private final AtomicInteger frameGeneration = new AtomicInteger(0);
-    // [网页视频] TextureView 截帧的暂存图（短边 448 = 2×224）和像素缓冲，只在主线程用
-    private static final int WEB_STAGE_SHORT_SIDE = 448;
-    private Bitmap webStageBitmap;
-    private int[] webStagePixels;
 
     // 视频推理步长：每 500ms 推理一次（推理约 110ms + 抽帧 43ms，2Hz 下 CPU 占用可接受）
     private long lastVideoInferenceTime = 0;
@@ -233,25 +212,6 @@ public class VideoProcessActivity extends AppCompatActivity {
     private final java.util.concurrent.atomic.AtomicBoolean latestAudioLoudValid =
             new java.util.concurrent.atomic.AtomicBoolean(false);
 
-    // [WebVideo] 网页视频模式相关
-    // 网页视频模式没有 MediaController 和播放状态轮询：分析的开/停由音频 VAD（参考在线模式）决定，
-    // 播放器暂停（用户暂停、来电等）另外处理，见 onWebPlayerPlayIntentChanged
-    private boolean isWebVideoMode = false;
-    // VAD 状态（音频线程写，主线程也读写）
-    private volatile boolean webVadActive = false;
-    // [网页视频] 播放器是否处于暂停（用户暂停，或来电等抢走音频焦点）。只在主线程访问
-    private boolean webPlayerPaused = false;
-    private long webVadLastActiveMs = 0;
-    private int webVadConsecutiveSilentTicks = 0;
-    // VAD 参数（音频循环每秒一次，5 个 silent tick ≈ 5 秒静音才暂停）
-    private static final int WEB_VAD_MIN_SILENT_TICKS = 5;
-    private static final long WEB_VAD_SILENCE_MS = 5000;
-    private static final float WEB_VAD_ACTIVATE_RMS_DB = -55f;
-    private static final float WEB_VAD_ACTIVATE_PEAK_DB = -42f;
-    private static final float WEB_VAD_KEEP_RMS_DB = -60f;
-    private static final float WEB_VAD_KEEP_PEAK_DB = -48f;
-    private long lastWebVadLogMs = 0;
-
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -262,7 +222,6 @@ public class VideoProcessActivity extends AppCompatActivity {
 
         // 初始化UI组件
         videoView = findViewById(R.id.videoView);
-        playerView = findViewById(R.id.playerView);          // [WebVideo]
         videoContainer = findViewById(R.id.videoContainer);  // 🔴 新增这行
         tvOverlay = findViewById(R.id.tvOverlay);
         tvVideoAction = findViewById(R.id.tvVideoAction);
@@ -276,30 +235,17 @@ public class VideoProcessActivity extends AppCompatActivity {
         // 调试悬浮窗只在 debug 包（Android Studio 直接 Run 装的包）显示，release 包隐藏。
         // 与 BenchLogger 一样看 FLAG_DEBUGGABLE，不依赖 BuildConfig。
         boolean debuggable = (getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0;
-        findViewById(R.id.debugPanel).setVisibility(debuggable ? View.VISIBLE : View.GONE);
+        View debugPanel = findViewById(R.id.debugPanel);
+        debugPanel.setVisibility(debuggable ? View.VISIBLE : View.GONE);
+
+        // Android 15+ 画面铺满到系统栏后面，返回 / 全屏按钮和调试悬浮窗挪进安全区域
+        SystemBarInsets.marginOverlays(findViewById(R.id.rootLayout), btnBack, btnFullscreen, debugPanel);
 
         // [定时加档] 进入页面时读一次手动电子菜单里的设置
         levelBoost = ManualControlActivity.loadLevelBoost(this);
 
         videoClassifier = new VideoClassifierHelper(this);
         Log.d(TAG, "onCreate: VideoClassifierHelper (MobileNetV3Small) 初始化完成");
-
-        // [WebVideo] 解析网页视频模式标志和 HTTP headers
-        isWebVideoMode = intent.getBooleanExtra(WebVideoActivity.EXTRA_IS_WEB_VIDEO, false);
-        Map<String, String> httpHeaders = null;
-        if (isWebVideoMode) {
-            httpHeaders = new HashMap<>();
-            String referer = intent.getStringExtra(WebVideoActivity.EXTRA_HTTP_REFERER);
-            String ua = intent.getStringExtra(WebVideoActivity.EXTRA_HTTP_UA);
-            String cookie = intent.getStringExtra(WebVideoActivity.EXTRA_HTTP_COOKIE);
-            if (referer != null && !referer.isEmpty()) httpHeaders.put("Referer", referer);
-            if (ua != null && !ua.isEmpty()) httpHeaders.put("User-Agent", ua);
-            if (cookie != null && !cookie.isEmpty()) httpHeaders.put("Cookie", cookie);
-            webVideoStartPositionMs = Math.max(0L,
-                    intent.getLongExtra(WebVideoActivity.EXTRA_START_POSITION_MS, 0L));
-            Log.d(TAG, "onCreate: 网页视频模式启用，headers=" + httpHeaders.keySet()
-                    + ", startMs=" + webVideoStartPositionMs);
-        }
 
         Uri videoUri = intent.getData();
         if (videoUri == null) {
@@ -312,85 +258,74 @@ public class VideoProcessActivity extends AppCompatActivity {
         // debug 包自动开启；只读取不干预，关闭时全是空操作。
         BenchLogger.get().init(this, videoUri, benchParamsLine());
 
-        // 通用：音频推理 + PCM 缓冲。两种模式都需要。
+        // 音频推理 + PCM 缓冲
         Log.d(TAG, "onCreate: 初始化 AudioInferenceHelper + PcmCircularBuffer...");
         audioHelper = new AudioInferenceHelper(this);
         pcmBuffer = new PcmCircularBuffer(16000, 20); // 采样率 16kHz，最多缓冲 20 秒
 
-        if (isWebVideoMode) {
-            // ============== 网页视频模式：ExoPlayer + PlayerView ==============
-            // VideoView / VideoFrameExtractor / AudioDecoder 全部不启用，避免对
-            // HLS 走 MediaExtractor 那条已知不通的路径。
-            videoView.setVisibility(View.GONE);
-            playerView.setVisibility(View.VISIBLE);
-            // 网页视频默认 analysis 暂停，由音频 VAD 驱动 resume/pause
-            isAnalysisPaused.set(true);
-            setupExoPlayerForWebMode(videoUri, httpHeaders);
-        } else {
-            // ============== 离线模式：保持原 VideoView + MediaExtractor 路径 ==============
-            videoView.setVideoURI(videoUri);
-            Log.d(TAG, "onCreate: 设置视频 URI: " + videoUri + " (offline)");
+        // VideoView 播放 + MediaExtractor 抽帧 / 解码音频
+        videoView.setVideoURI(videoUri);
+        Log.d(TAG, "onCreate: 设置视频 URI: " + videoUri + " (offline)");
 
-            try {
-                // 构造函数只打开 MediaExtractor；解码器和 EGL 在抽帧线程第一次取帧时创建，之后的调用也都在那个线程
-                videoFrameExtractor = new VideoFrameExtractor(this, videoUri, null);
-                Log.d(TAG, "onCreate: VideoFrameExtractor 初始化成功");
-            } catch (IOException e) {
-                Log.e(TAG, "onCreate: VideoFrameExtractor 初始化失败 uri=" + videoUri, e);
-                Toast.makeText(this, getString(R.string.video_parse_failed, e.getMessage()), Toast.LENGTH_LONG).show();
-                finish();
-                return;
-            }
-            frameThread = new HandlerThread("FrameExtractThread");
-            frameThread.start();
-            frameHandler = new Handler(frameThread.getLooper());
-
-            videoView.setMediaController(new MediaController(this));
-            videoView.requestFocus();
-
-            videoView.setOnCompletionListener(mp -> {
-                isVideoCompleted = true;
-                pauseAnalysis();
-                resetLevelBoost(); // [定时加档] 视频播完，从头计时
-                Log.d(TAG, "视频播放完成！暂停同步分析，等待用户操作");
-            });
-
-            videoView.setOnPreparedListener(mp -> {
-                originalWidth = mp.getVideoWidth();
-                originalHeight = mp.getVideoHeight();
-                Log.d(TAG, "视频原始尺寸: " + originalWidth + "x" + originalHeight);
-                adjustVideoSize(false);
-                mp.setOnSeekCompleteListener(seekMp -> handleSeekComplete());
-                videoView.start();
-                startMultiThreadAnalysis();
-            });
-
-            videoView.setOnErrorListener((mp, what, extra) -> {
-                Log.e(TAG, "视频播放出错 what:" + what + " extra:" + extra
-                        + " uri=" + videoUri);
-                int hint;
-                switch (extra) {
-                    case -1004: hint = R.string.video_error_io; break;
-                    case -1007: hint = R.string.video_error_malformed; break;
-                    case -1010: hint = R.string.video_error_unsupported; break;
-                    case -110:  hint = R.string.video_error_timeout; break;
-                    default:    hint = R.string.video_error_unknown;
-                }
-                Toast.makeText(this,
-                        getString(R.string.video_play_failed, what, extra, getString(hint)),
-                        Toast.LENGTH_LONG).show();
-                return true;
-            });
-
-            audioDecoder = new AudioDecoder(this, videoUri, null, pcmBuffer,
-                    () -> videoView.getCurrentPosition());
-            audioDecoder.setOnCompleteListener(() -> {
-                isAudioCompleted = true;
-                Log.d(TAG, "音频解码完成");
-            });
-            audioDecoder.startDecoding();
-            Log.d(TAG, "onCreate: audioDecoder 已启动解码线程");
+        try {
+            // 构造函数只打开 MediaExtractor；解码器和 EGL 在抽帧线程第一次取帧时创建，之后的调用也都在那个线程
+            videoFrameExtractor = new VideoFrameExtractor(this, videoUri, null);
+            Log.d(TAG, "onCreate: VideoFrameExtractor 初始化成功");
+        } catch (IOException e) {
+            Log.e(TAG, "onCreate: VideoFrameExtractor 初始化失败 uri=" + videoUri, e);
+            Toast.makeText(this, getString(R.string.video_parse_failed, e.getMessage()), Toast.LENGTH_LONG).show();
+            finish();
+            return;
         }
+        frameThread = new HandlerThread("FrameExtractThread");
+        frameThread.start();
+        frameHandler = new Handler(frameThread.getLooper());
+
+        videoView.setMediaController(new MediaController(this));
+        videoView.requestFocus();
+
+        videoView.setOnCompletionListener(mp -> {
+            isVideoCompleted = true;
+            pauseAnalysis();
+            resetLevelBoost(); // [定时加档] 视频播完，从头计时
+            Log.d(TAG, "视频播放完成！暂停同步分析，等待用户操作");
+        });
+
+        videoView.setOnPreparedListener(mp -> {
+            originalWidth = mp.getVideoWidth();
+            originalHeight = mp.getVideoHeight();
+            Log.d(TAG, "视频原始尺寸: " + originalWidth + "x" + originalHeight);
+            adjustVideoSize(false);
+            mp.setOnSeekCompleteListener(seekMp -> handleSeekComplete());
+            videoView.start();
+            startMultiThreadAnalysis();
+        });
+
+        videoView.setOnErrorListener((mp, what, extra) -> {
+            Log.e(TAG, "视频播放出错 what:" + what + " extra:" + extra
+                    + " uri=" + videoUri);
+            int hint;
+            switch (extra) {
+                case -1004: hint = R.string.video_error_io; break;
+                case -1007: hint = R.string.video_error_malformed; break;
+                case -1010: hint = R.string.video_error_unsupported; break;
+                case -110:  hint = R.string.video_error_timeout; break;
+                default:    hint = R.string.video_error_unknown;
+            }
+            Toast.makeText(this,
+                    getString(R.string.video_play_failed, what, extra, getString(hint)),
+                    Toast.LENGTH_LONG).show();
+            return true;
+        });
+
+        audioDecoder = new AudioDecoder(this, videoUri, null, pcmBuffer,
+                () -> videoView.getCurrentPosition());
+        audioDecoder.setOnCompleteListener(() -> {
+            isAudioCompleted = true;
+            Log.d(TAG, "音频解码完成");
+        });
+        audioDecoder.startDecoding();
+        Log.d(TAG, "onCreate: audioDecoder 已启动解码线程");
 
         // 全屏按钮
         btnFullscreen.setOnClickListener(v -> {
@@ -401,29 +336,26 @@ public class VideoProcessActivity extends AppCompatActivity {
             }
         });
 
-        // 播放状态监听（仅离线模式）
-        // 网页视频模式下分析的开/停由音频 VAD 驱动，不靠 VideoView.isPlaying()
-        if (!isWebVideoMode) {
-            playStateHandler = new Handler(Looper.getMainLooper());
-            playStateChecker = new Runnable() {
-                boolean lastPlayingState = true;
+        // 播放状态监听：系统 MediaController 的暂停 / 播放不经过我们的按钮，靠轮询 VideoView.isPlaying()
+        playStateHandler = new Handler(Looper.getMainLooper());
+        playStateChecker = new Runnable() {
+            boolean lastPlayingState = true;
 
-                @Override
-                public void run() {
-                    boolean isPlayingNow = videoView.isPlaying();
-                    if (isPlayingNow != lastPlayingState) {
-                        if (isPlayingNow) {
-                            resumeAnalysis(false);
-                        } else {
-                            pauseAnalysis();
-                        }
-                        lastPlayingState = isPlayingNow;
+            @Override
+            public void run() {
+                boolean isPlayingNow = videoView.isPlaying();
+                if (isPlayingNow != lastPlayingState) {
+                    if (isPlayingNow) {
+                        resumeAnalysis();
+                    } else {
+                        pauseAnalysis();
                     }
-                    playStateHandler.postDelayed(this, 200);
+                    lastPlayingState = isPlayingNow;
                 }
-            };
-            playStateHandler.post(playStateChecker);
-        }
+                playStateHandler.postDelayed(this, 200);
+            }
+        };
+        playStateHandler.post(playStateChecker);
 
         // 初始化主线程Handler
         mainHandler = new Handler(Looper.getMainLooper());
@@ -477,26 +409,8 @@ public class VideoProcessActivity extends AppCompatActivity {
 
                 try {
                     final int gen = frameGeneration.get();
-                    if (isWebVideoMode) {
-                        // 网页模式：TextureView 只能在主线程读
-                        mainHandler.post(() -> {
-                            try {
-                                long tExtractStart = System.currentTimeMillis();
-                                long posMs = getCurrentPlaybackPosMs();
-                                Bitmap frame = captureWebVideoFrameBitmap();
-                                Log.d(TAG, "[计时] 📸 抽帧耗时: "
-                                        + (System.currentTimeMillis() - tExtractStart) + " ms");
-                                if (frame != null) {
-                                    videoHandler.post(() -> cacheFrameAndInfer(frame, posMs, gen));
-                                } else {
-                                    Log.w(TAG, "[主线程] [同步分析] 未能抽取到视频帧");
-                                }
-                            } catch (Exception e) {
-                                Log.e(TAG, "[主线程] 抽帧异常：", e);
-                            }
-                        });
-                    } else if (frameHandler != null && frameRequestInFlight.compareAndSet(false, true)) {
-                        // 离线模式：抽帧线程取“此刻播放位置的那一帧”（位置在抽帧线程里读，排队等待不会让它过时）
+                    if (frameHandler != null && frameRequestInFlight.compareAndSet(false, true)) {
+                        // 抽帧线程取“此刻播放位置的那一帧”（位置在抽帧线程里读，排队等待不会让它过时）
                         frameHandler.post(() -> {
                             try {
                                 if (shouldStop.get()) return;
@@ -533,7 +447,7 @@ public class VideoProcessActivity extends AppCompatActivity {
      * 缓存一帧到滑动窗口；窗口满 12 帧且距上次推理 ≥ 500ms 时执行一次推理。
      *
      * @param frame      模型输入（160×160，已按 FramePreprocessor 裁剪缩放）
-     * @param framePosMs 这一帧的时刻（离线：pts；网页：抓帧时的播放位置）
+     * @param framePosMs 这一帧的时刻（pts）
      * @param gen        请求这一帧时的 frameGeneration；之后发生过 seek 就丢掉
      */
     private void cacheFrameAndInfer(Bitmap frame, long framePosMs, int gen) {
@@ -647,11 +561,6 @@ public class VideoProcessActivity extends AppCompatActivity {
                 if (shouldStop.get()) {
                     Log.d(TAG, "[音频线程] 收到停止信号，退出循环");
                     return;
-                }
-
-                // [WebVideo] 网页视频模式：先跑 VAD（不论当前是否暂停），由 VAD 决定要不要 resume/pause
-                if (isWebVideoMode) {
-                    runWebVideoVadTick();
                 }
 
                 if (isAnalysisPaused.get()) {
@@ -1245,9 +1154,11 @@ public class VideoProcessActivity extends AppCompatActivity {
                 BLUETOOTH_MIN_DURATION, BLUETOOTH_SEND_INTERVAL,
                 LEVEL_STABLE_MS, LEVEL_MIN_DUR_MS,
                 MAIN_FUSION_INTERVAL, VIDEO_INFERENCE_INTERVAL, AUDIO_INFERENCE_INTERVAL,
-                isWebVideoMode ? "web" : "fixed",
-                // 视频输入：抽帧方式_几何（exact_crop = 修复后的离线模式；没有这一项的旧 run 是 keyframe + 整帧压扁）
-                (isWebVideoMode ? "web_" : "exact_") + FramePreprocessor.geometryName())
+                // 音频输入：fixed = AudioDecoder 解码 + PcmResampler（旧 run 里的 web 是已删除的网页视频模式）
+                "fixed",
+                // 视频输入：抽帧方式_几何（exact_crop = 修复后的离线模式；没有这一项的旧 run 是 keyframe + 整帧压扁，
+                // web_crop 是已删除的网页视频模式）
+                "exact_" + FramePreprocessor.geometryName())
                 + FusionArbiter.paramsLine() + " " + AudioCue.paramsLine()
                 // 定时加档：打开时到点后 sent_level 是加档后的档位（final_freq / ble_level 仍是分析档位）
                 + " " + levelBoost.paramsLine();
@@ -1346,7 +1257,7 @@ public class VideoProcessActivity extends AppCompatActivity {
                 isVideoCompleted = false;
                 // 只有当前已经在播放，才立刻恢复分析；否则继续保持暂停
                 if (videoView.isPlaying()) {
-                    resumeAnalysis(false);
+                    resumeAnalysis();
                 }
             }
 
@@ -1362,296 +1273,10 @@ public class VideoProcessActivity extends AppCompatActivity {
         seekHandler.postDelayed(pendingSeekRunnable, 500);
     }
 
-    /**
-     * [WebVideo] 网页视频模式专用：建立 ExoPlayer，attach 到 PlayerView，监听状态/seek/错误。
-     */
-    private void setupExoPlayerForWebMode(Uri videoUri, Map<String, String> httpHeaders) {
-        exoPlayerEngine = new ExoPlayerEngine(this, pcmBuffer, httpHeaders);
-        ExoPlayer player = exoPlayerEngine.getPlayer();
-        playerView.setPlayer(player);
-        playerView.setUseController(true);
-
-        player.addListener(new Player.Listener() {
-            @Override
-            public void onPlaybackStateChanged(int state) {
-                if (state == Player.STATE_READY && !exoFirstReadyHandled) {
-                    exoFirstReadyHandled = true;
-                    onExoPlayerFirstReady();
-                } else if (state == Player.STATE_ENDED) {
-                    isVideoCompleted = true;
-                    pauseAnalysis();
-                    resetLevelBoost(); // [定时加档] 视频播完，从头计时
-                    Log.d(TAG, "[网页视频] 视频播放完成，暂停同步分析");
-                }
-            }
-
-            @Override
-            public void onPlayWhenReadyChanged(boolean playWhenReady, int reason) {
-                onWebPlayerPlayIntentChanged(player);
-            }
-
-            @Override
-            public void onPlaybackSuppressionReasonChanged(int playbackSuppressionReason) {
-                onWebPlayerPlayIntentChanged(player);
-            }
-
-            @Override
-            public void onPositionDiscontinuity(Player.PositionInfo oldPosition,
-                                                Player.PositionInfo newPosition,
-                                                int reason) {
-                if (reason == Player.DISCONTINUITY_REASON_SEEK
-                        || reason == Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT) {
-                    final long newMs = Math.max(0, newPosition.positionMs);
-                    Log.i(TAG, "[网页视频] onPositionDiscontinuity seek -> " + newMs + "ms");
-                    if (mainHandler != null) {
-                        mainHandler.post(() -> handleWebVideoSeekComplete(newMs));
-                    } else {
-                        handleWebVideoSeekComplete(newMs);
-                    }
-                }
-            }
-
-            @Override
-            public void onPlayerError(PlaybackException error) {
-                Log.e(TAG, "[网页视频] ExoPlayer 错误 code=" + error.errorCode, error);
-
-                // HTTP 层错误（典型：CDN 防盗链 403）把细节打出来，方便定位到底缺什么头
-                String hint = "";
-                Throwable cause = error.getCause();
-                if (cause instanceof HttpDataSource.InvalidResponseCodeException) {
-                    HttpDataSource.InvalidResponseCodeException http =
-                            (HttpDataSource.InvalidResponseCodeException) cause;
-                    Log.e(TAG, "[网页视频] HTTP " + http.responseCode
-                            + " url=" + http.dataSpec.uri
-                            + "\n  请求头(per-request)=" + http.dataSpec.httpRequestHeaders.keySet()
-                            + "\n  响应头=" + http.headerFields);
-                    hint = http.responseCode == 403
-                            ? getString(R.string.web_video_error_403)
-                            : getString(R.string.web_video_error_http, http.responseCode);
-                }
-
-                Toast.makeText(VideoProcessActivity.this,
-                        getString(R.string.web_video_play_failed, error.getErrorCodeName(), hint),
-                        Toast.LENGTH_LONG).show();
-            }
-        });
-
-        player.setPlayWhenReady(true);
-        exoPlayerEngine.setUri(videoUri.toString());
-        Log.d(TAG, "[网页视频] ExoPlayer 已 prepare: " + videoUri);
-    }
-
-    /**
-     * [网页视频] 播放器"要不要播"变了：用户暂停 / 继续，或来电等抢走音频焦点（ExoPlayer 暂缓播放，playWhenReady 不变）。
-     *
-     * <p>暂停后 PCM 不再写入，VAD 和音频模型读到的一直是暂停前最后那几秒，靠 VAD 判断不出暂停：原来分析会接着跑，
-     * 暂停在动作上时马达也接着转。这里和离线模式一样处理：暂停时 pauseAnalysis（有证据的动作挂起、发 Noise）；
-     * 继续播放时 VAD 若还认为有声（暂停前在响）就直接 resumeAnalysis 接着转，否则照旧等 VAD 听到声音再恢复。
-     * 网络卡顿缓冲不算暂停（ExoPlayer 自己会接着播）。onPlayWhenReadyChanged 会重复报同一个值，这里只看状态变化。</p>
-     */
-    private void onWebPlayerPlayIntentChanged(Player player) {
-        boolean paused = !player.getPlayWhenReady()
-                || player.getPlaybackSuppressionReason() != Player.PLAYBACK_SUPPRESSION_REASON_NONE;
-        if (paused == webPlayerPaused) return;
-        webPlayerPaused = paused;
-        if (paused) {
-            Log.i(TAG, "[网页视频] 播放器暂停，暂停分析");
-            pauseAnalysis();
-        } else if (webVadActive) {
-            Log.i(TAG, "[网页视频] 播放器继续播放，恢复分析");
-            resumeAnalysis(false);
-        }
-    }
-
-    /**
-     * [WebVideo] ExoPlayer 第一次进入 STATE_READY：相当于离线模式 onPrepared 回调。
-     * 拿尺寸、按需起播 seek、启动多线程分析。
-     */
-    private void onExoPlayerFirstReady() {
-        if (exoPlayerEngine == null) return;
-        ExoPlayer player = exoPlayerEngine.getPlayer();
-        if (player == null) return;
-
-        VideoSize size = player.getVideoSize();
-        originalWidth = size.width;
-        originalHeight = size.height;
-        long duration = player.getDuration();
-        Log.d(TAG, "[网页视频] 首次 READY，尺寸: " + originalWidth + "x" + originalHeight
-                + ", 时长: " + duration + "ms");
-
-        // 哨兵：时长太短（< 60s）八成是 trickplay / 预览 / 广告 trailer，
-        // 真视频几乎不会这么短。弹 Toast 警告，让用户返回重嗅。
-        if (duration > 0 && duration < 60_000L) {
-            Toast.makeText(this,
-                    getString(R.string.web_video_too_short, duration / 1000),
-                    Toast.LENGTH_LONG).show();
-        }
-
-        // PlayerView 内部用 resize_mode=fit 自动按比例缩放，这里 adjustVideoSize 仅对
-        // 离线模式的 VideoView 起作用；为了不动它，给 originalWidth/Height 占位即可
-        if (videoView.getVisibility() == View.VISIBLE) {
-            adjustVideoSize(false);
-        }
-
-        if (webVideoStartPositionMs > 0) {
-            Log.i(TAG, "[网页视频] 起播 seek 到 " + webVideoStartPositionMs
-                    + "ms（来自 WebView currentTime）");
-            player.seekTo(webVideoStartPositionMs);
-        }
-
-        startMultiThreadAnalysis();
-    }
-
-    /**
-     * [WebVideo] seek 后清缓存：跟离线模式的 handleSeekComplete 大体一致，但因为我们
-     * 不靠 videoFrameExtractor / audioDecoder，所以只需要重置共享状态。
-     */
-    private void handleWebVideoSeekComplete(long newPositionMs) {
-        synchronized (videoLock) {
-            frameWindow.clear();
-            frameTimeWindow.clear();
-            frameGeneration.incrementAndGet();
-            lastVideoInferenceTime = 0;
-        }
-        synchronized (audioLock) {
-            pcmBuffer.reset();
-        }
-        // [融合仲裁] seek 后清空证据：seek 之前产出的结果一律不算
-        resetFusionArbiter(true, 0);
-
-        audioStartTime = newPositionMs;
-
-        // 清空蓝牙控制动作缓存
-        currentBluetoothState = "";
-        pendingBluetoothState = "";
-        latestBluetoothAction.set("");
-        currentStateStartTime = 0;
-        pendingStateStartTime = 0;
-        currentLevel = 1;
-        currentLevelSinceMs = 0;
-        pendingLevel = null;
-        pendingLevelSinceMs = 0;
-
-        suspendedBluetoothState = "";
-        suspendedLevel = 0;
-
-        loudnessEstimator.reset();
-        latestAudioLoudLevel.set(0);
-        latestAudioLoudConf.set(0f);
-        latestAudioLoudTsMs.set(0L);
-        latestAudioLoudValid.set(false);
-
-        // VAD 状态也重置，让起播位置后的"没声音"重新走一遍判断
-        webVadActive = false;
-        webVadConsecutiveSilentTicks = 0;
-        webVadLastActiveMs = 0;
-
-        Log.d(TAG, "[网页视频] seek 完成 -> " + newPositionMs + "ms，缓冲已清空");
-    }
-
-    /**
-     * 统一的当前播放位置：网页模式走 ExoPlayer 的缓存值（任何线程安全），离线模式走 VideoView。
-     */
+    /** 当前播放位置（ms）。 */
     private long getCurrentPlaybackPosMs() {
-        if (isWebVideoMode) {
-            if (exoPlayerEngine == null) return 0L;
-            return Math.max(0L, exoPlayerEngine.getCachedPositionMs());
-        }
         if (videoView == null) return 0L;
         return videoView.getCurrentPosition();
-    }
-
-    /**
-     * [WebVideo] 从 PlayerView 的 TextureView 读一帧，处理成模型输入（160×160）。失败返回 null。只能在主线程调用。
-     *
-     * <p>2026-10-14 之前直接 getBitmap(160, 160)：整帧压扁成正方形，与训练（居中裁正方形）不一致。现在按 TextureView 的
-     * 宽高比截一张短边 448（= 2×224）的图，再交给 FramePreprocessor 居中裁剪、面积缩小。TextureView 在 PlayerView 里按视频
-     * 宽高比摆放（resize_mode=fit），所以截到的就是完整的视频画面。</p>
-     */
-    private Bitmap captureWebVideoFrameBitmap() {
-        if (playerView == null) return null;
-        View surfaceView = playerView.getVideoSurfaceView();
-        if (!(surfaceView instanceof TextureView)) return null;
-        TextureView tv = (TextureView) surfaceView;
-        if (!tv.isAvailable() || tv.getWidth() <= 0 || tv.getHeight() <= 0) return null;
-        try {
-            int vw = tv.getWidth(), vh = tv.getHeight();
-            int sw, sh;
-            if (vw >= vh) {
-                sh = WEB_STAGE_SHORT_SIDE;
-                sw = Math.round(WEB_STAGE_SHORT_SIDE * (float) vw / vh);
-            } else {
-                sw = WEB_STAGE_SHORT_SIDE;
-                sh = Math.round(WEB_STAGE_SHORT_SIDE * (float) vh / vw);
-            }
-            if (webStageBitmap == null || webStageBitmap.getWidth() != sw || webStageBitmap.getHeight() != sh) {
-                webStageBitmap = Bitmap.createBitmap(sw, sh, Bitmap.Config.ARGB_8888);
-                webStagePixels = new int[sw * sh];
-            }
-            tv.getBitmap(webStageBitmap);
-            return VideoClassifierHelper.toModelBitmap(webStageBitmap, webStagePixels);
-        } catch (Exception e) {
-            Log.w(TAG, "[网页视频] TextureView 抽帧失败", e);
-            return null;
-        }
-    }
-
-    /**
-     * [WebVideo] 网页视频模式音频 VAD。
-     * 在音频线程每秒触发一次。读取当前播放位置附近 0.25s 的 PCM，
-     * 用 RMS/峰值 + 迟滞判定是否有声，决定 resume/pauseAnalysis。
-     */
-    private void runWebVideoVadTick() {
-        long currentMs = getCurrentPlaybackPosMs();
-        float[] samples = pcmBuffer.readWindowRelaxed(currentMs, 4000); // 0.25s @ 16kHz
-        if (samples == null || samples.length == 0) {
-            // PCM 未就绪：不切换状态，等下一拍再看
-            return;
-        }
-
-        float rmsTh  = webVadActive ? WEB_VAD_KEEP_RMS_DB  : WEB_VAD_ACTIVATE_RMS_DB;
-        float peakTh = webVadActive ? WEB_VAD_KEEP_PEAK_DB : WEB_VAD_ACTIVATE_PEAK_DB;
-
-        double sumSq = 0;
-        float peak = 0f;
-        for (float s : samples) {
-            sumSq += s * s;
-            float a = Math.abs(s);
-            if (a > peak) peak = a;
-        }
-        double rms = Math.sqrt(sumSq / samples.length);
-        float rmsDb  = (float) (20.0 * Math.log10(Math.max(rms,  1e-9)));
-        float peakDb = (float) (20.0 * Math.log10(Math.max(peak, 1e-9)));
-        boolean active = rmsDb > rmsTh || peakDb > peakTh;
-
-        long now = System.currentTimeMillis();
-        if (now - lastWebVadLogMs > 5000) {
-            lastWebVadLogMs = now;
-            Log.d(TAG, String.format("[网页VAD] rms=%.1fdB peak=%.1fdB -> active=%b (state=%s)",
-                    rmsDb, peakDb, active, webVadActive ? "ACTIVE" : "SILENT"));
-        }
-
-        if (active) {
-            webVadLastActiveMs = now;
-            webVadConsecutiveSilentTicks = 0;
-            if (!webVadActive) {
-                webVadActive = true;
-                Log.i(TAG, "[网页VAD] 检测到音频活动，恢复分析");
-                mainHandler.post(() -> {
-                    // 播放器暂停期间不由 VAD 恢复（PCM 不再更新，VAD 听到的是暂停前的声音），继续播放时再处理
-                    if (!webPlayerPaused) resumeAnalysis(true);
-                });
-            }
-        } else {
-            webVadConsecutiveSilentTicks++;
-            if (webVadActive
-                    && webVadConsecutiveSilentTicks >= WEB_VAD_MIN_SILENT_TICKS
-                    && (now - webVadLastActiveMs) > WEB_VAD_SILENCE_MS) {
-                webVadActive = false;
-                Log.i(TAG, "[网页VAD] 静音超过 " + WEB_VAD_SILENCE_MS + "ms，暂停分析");
-                mainHandler.post(VideoProcessActivity.this::pauseAnalysis);
-            }
-        }
     }
 
     private void pauseAnalysis() {
@@ -1666,8 +1291,8 @@ public class VideoProcessActivity extends AppCompatActivity {
                         suspendedBluetoothState, suspendedLevel));
             } else {
                 // [融合仲裁] 马达此刻只是仲裁器在"等结果"（刚 seek / 恢复后的冷启动，或看不清听不清），没有证据撑着：
-                // 不带过暂停，状态同步成 Noise（下面照常发 Noise），恢复后从头判断。否则网页视频模式下
-                // "静音暂停 → 一声短响恢复 → 还在等结果时又静音暂停"会让马达跟着每一声短响一直转。
+                // 不带过暂停，状态同步成 Noise（下面照常发 Noise），恢复后从头判断。否则"暂停 → 短暂恢复 →
+                // 还在等结果时又暂停"会让马达每恢复一次就接着转（最早是在已删除的网页视频模式里发现的）。
                 long now = System.currentTimeMillis();
                 currentBluetoothState = "Noise";
                 currentStateStartTime = now;
@@ -1686,15 +1311,11 @@ public class VideoProcessActivity extends AppCompatActivity {
         Log.i(TAG, "暂停分析");
     }
 
-    /**
-     * @param afterSilence 网页视频模式 VAD 因静音暂停后、声音回来时恢复：模型窗口里还混着暂停前的静音，
-     *                     融合仲裁先丢掉恢复后 2 秒内产出的结果
-     */
-    private void resumeAnalysis(boolean afterSilence) {
+    private void resumeAnalysis() {
         isAnalysisPaused.set(false);
         // [融合仲裁] 暂停前的证据已经过时，清空重来。恢复后马达若仍在转，仲裁会先等两路攒够新结果
         // （wait_sparse，最多 6 秒），不会因为某一路刚出的一个"不转"就停。
-        resetFusionArbiter(false, afterSilence ? FusionArbiter.SILENCE_RESUME_WARMUP_MS : 0);
+        resetFusionArbiter(false, 0);
 
         // ★ 新增：恢复挂起的蓝牙动作
         if (!suspendedBluetoothState.isEmpty()) {
@@ -1893,15 +1514,6 @@ public class VideoProcessActivity extends AppCompatActivity {
 
         if (audioHelper != null) {
             audioHelper.close();
-        }
-
-        // [WebVideo] 释放 ExoPlayer
-        if (playerView != null) {
-            try { playerView.setPlayer(null); } catch (Exception ignored) {}
-        }
-        if (exoPlayerEngine != null) {
-            exoPlayerEngine.release();
-            exoPlayerEngine = null;
         }
 
         super.onDestroy();

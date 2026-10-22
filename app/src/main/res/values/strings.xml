@@ -10,8 +10,6 @@
     <string name="mode_local_subtitle">从相册选择</string>
     <string name="mode_online_title">在线分析</string>
     <string name="mode_online_subtitle">app视频</string>
-    <string name="mode_web_title">网页视频</string>
-    <string name="mode_web_subtitle">输入网址，自动嗅探</string>
     <string name="resume_control_inactive">暂停控制（未激活）</string>
     <string name="connect_bluetooth">连接蓝牙设备</string>
 
@@ -40,27 +38,19 @@
     <string name="update_url_unavailable">下载地址暂不可用，请稍后重试</string>
     <string name="update_open_browser_failed">无法打开浏览器，请检查链接或网络</string>
 
+    <!-- Privacy policy link and first-launch 18+ confirmation (home page) -->
+    <string name="privacy_policy">隐私政策</string>
+    <string name="age_gate_title">使用前请确认</string>
+    <string name="age_gate_message">本应用仅供年满 18 周岁的用户使用。\n\n继续使用即表示你已年满 18 周岁，并已阅读《隐私政策》。</string>
+    <string name="age_gate_confirm">我已满 18 周岁</string>
+    <string name="age_gate_exit">退出</string>
+
     <!-- Manual control entry (home page) -->
     <string name="section_manual_control">手动控制</string>
     <string name="mode_manual_title">手动电子菜单</string>
     <string name="mode_manual_subtitle">在 app 上直接调节模式与强度</string>
 
-    <!-- Web video page -->
-    <string name="web_video_title">网页视频</string>
-    <string name="web_video_url_hint">粘贴视频网页链接 (https://...)</string>
-    <string name="web_video_open">打开</string>
-    <string name="web_video_status_idle">输入视频网页地址并点击\"打开\"</string>
-    <string name="web_video_status_loading">正在加载页面，等待视频出现…</string>
-    <string name="web_video_status_found">已嗅探到视频流，可点击开始分析</string>
-    <string name="web_video_start_analyze">开始分析</string>
-    <string name="web_video_back">返回</string>
-    <string name="web_video_ad_tip_title">抓到的可能是广告</string>
-    <string name="web_video_ad_tip_body">部分网站会先插播广告，嗅探到的可能是广告而不是正片。建议等正片开始播放后再点「开始分析」；若仍抓到广告，可改用主页的「在线分析」（录屏），在该网站的官方 App 里播放。</string>
-    <string name="web_video_ad_tip_close">关闭提示</string>
-    <string name="web_video_opening">正在打开分析页…</string>
-    <string name="web_video_opening_from">正在打开分析页（从 %1$ds）…</string>
-
-    <!-- Video analysis page (offline and web video) -->
+    <!-- Video analysis page -->
     <string name="video_back_home">返回主页面</string>
     <string name="video_fullscreen_toggle">全屏切换按钮</string>
     <string name="video_parse_failed">视频解析失败：%1$s</string>
@@ -71,10 +61,6 @@
     <string name="video_error_unsupported">不支持的格式</string>
     <string name="video_error_timeout">请求超时</string>
     <string name="video_error_unknown">未知错误</string>
-    <string name="web_video_play_failed">网页视频播放失败: %1$s%2$s</string>
-    <string name="web_video_error_403">（被 CDN 拒绝 403：防盗链校验未通过或视频已下架）</string>
-    <string name="web_video_error_http">（HTTP %1$d）</string>
-    <string name="web_video_too_short">视频时长仅 %1$d 秒，疑似预览/广告片段。\n请返回 WebView 等真视频开始播放后再点开始分析。</string>
 
     <!-- Online analysis page -->
     <string name="online_back">返回</string>
@@ -106,7 +92,7 @@
     <string name="manual_pattern_1">模式 1</string>
     <string name="manual_pattern_2">模式 2</string>
     <string name="manual_pattern_3">模式 3</string>
-    <string name="manual_pattern_1_desc">模式 1 · 只有正转，持续同向抽送</string>
+    <string name="manual_pattern_1_desc">模式 1 · 只有正转，持续同向运动</string>
     <string name="manual_pattern_2_desc">模式 2 · 1200ms 反转 → 600ms 正转 → 1100ms 反转</string>
     <string name="manual_pattern_3_desc">模式 3 · 2000ms 反转 → 3000ms 正转</string>
     <string name="manual_pattern_shared_hint">该模式同时用于视频分析模式：分析只决定「转 / 不转」与强度档位，转动方式（正转 / 反转节拍）以这里的选择为准。</string>
@@ -132,7 +118,7 @@
     <!-- Manual control page: timed level boost for the video analysis modes -->
     <string name="manual_section_boost">定时加档</string>
     <string name="manual_boost_title">播放一段时间后自动加档</string>
-    <string name="manual_boost_subtitle">模拟临近高潮 · 只作用于视频分析模式</string>
+    <string name="manual_boost_subtitle">随播放时长逐步加强 · 只作用于视频分析模式</string>
     <string name="manual_boost_delay_label">开始加档</string>
     <string name="manual_boost_delay_value">%1$d 分钟后</string>
     <string name="manual_boost_delay_min">1 分钟</string>
@@ -141,5 +127,5 @@
     <string name="manual_boost_levels_1">+1 档</string>
     <string name="manual_boost_levels_2">+2 档</string>
     <string name="manual_boost_summary">累计播放满 %1$d 分钟后，视频分析给出的档位自动加 %2$d 档（0 档仍为停止，最高 10 档）。</string>
-    <string name="manual_boost_hint">适用于离线视频、在线录屏和网页视频模式。暂停或没有声音时不计时；退出当前模式、视频播放完毕后重新计时（在线模式无法得知视频何时播完，连续静音约 10 秒即视为播完）。</string>
+    <string name="manual_boost_hint">适用于本地视频和在线录屏模式。暂停或没有声音时不计时；退出当前模式、视频播放完毕后重新计时（在线模式无法得知视频何时播完，连续静音约 10 秒即视为播完）。</string>
 </resources>

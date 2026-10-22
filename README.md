@@ -2,7 +2,7 @@
 
 一个运行在 Android 端的实时视频理解与 BLE 联动项目。
 
-Xcup Android 会从本地视频、屏幕共享或网页视频中提取画面与音频，在设备端识别动作状态和节律强度，经过时间窗口平滑与状态管理后，将控制指令发送给兼容的 BLE 硬件。
+Xcup Android 会从本地视频或屏幕共享中提取画面与音频，在设备端识别动作状态和节律强度，经过时间窗口平滑与状态管理后，将控制指令发送给兼容的 BLE 硬件。
 
 本项目最初作为个人项目开发。随着类似的视频互动能力逐渐普及，我决定公开代码，供对 Android 多媒体处理、端侧多模态推理和 BLE 实时控制感兴趣的开发者学习、研究与二次开发。
 
@@ -12,7 +12,6 @@ Xcup Android 会从本地视频、屏幕共享或网页视频中提取画面与�
 
 - 本地视频分析：从系统文件选择器导入视频，播放过程中同步分析画面与音频。
 - 在线分析：通过 `MediaProjection` 和 `AudioPlaybackCapture` 获取屏幕画面及其他应用允许捕获的播放音频。
-- 网页视频模式：使用应用内 `WebView` 获取页面信息，并将识别到的 MP4/HLS 媒体交给 ExoPlayer 播放与分析。
 - 端侧视觉推理：使用 MobileNetV3Small TFLite 模型识别剧情、口部动作和性交动作三类画面。
 - 端侧音频推理：使用 YAMNet 与自定义分类器识别动作类别。
 - 节律强度估计：根据 PCM 音频的 RMS、dB、时间平滑和置信度生成离散档位。
@@ -22,11 +21,13 @@ Xcup Android 会从本地视频、屏幕共享或网页视频中提取画面与�
 - 应用更新检查：通过远端 `version.json` 判断推荐更新或强制更新，并跳转外部浏览器下载。
 - 多语言界面：中文与日语，按系统语言自动切换；Android 13 及以上也可以在系统设置里单独为本 App 选择语言。
 
+> 网页视频模式（应用内 WebView 嗅探网页视频地址，再交给 ExoPlayer 播放分析）已在上架 Google Play 前移除，最后一版代码在提交 `c06b84c`（tag `web-video-archive`），需要时用 `git checkout web-video-archive -- <文件>` 取回。
+
 ## 工作原理
 
 ```mermaid
 flowchart TB
-    A["输入源<br/>本地视频 / 屏幕与系统音频 / 网页视频"] --> B["采集与解码<br/>视频帧 + PCM 音频"]
+    A["输入源<br/>本地视频 / 屏幕与系统音频"] --> B["采集与解码<br/>视频帧 + PCM 音频"]
     B --> C["视觉分类<br/>MobileNetV3Small"]
     B --> D["音频分类<br/>YAMNet + 自定义分类器"]
     B --> E["节律估计<br/>RMS → dB → 档位"]
@@ -55,7 +56,7 @@ flowchart TB
 | `OnlineAnalysisService.java` | 前台服务；负责屏幕捕获（截图尺寸跟着转屏）、系统音频采集、静音检测和数据回调 |
 | `VideoFrameExtractor.java` | 基于 MediaExtractor、MediaCodec 与 SurfaceTexture 顺序解码，按播放位置取当前帧（在单独的抽帧线程里运行） |
 | `EGLRenderer.java` | 使用 OpenGL/EGL 按 SurfaceTexture 的变换矩阵把画面中央的正方形画到离屏缓冲并读回 |
-| `FramePreprocessor.java` | 视频模型输入的预处理（居中裁剪、面积平均缩小到 160×160），与训练素材的处理一致，三种模式共用 |
+| `FramePreprocessor.java` | 视频模型输入的预处理（居中裁剪、面积平均缩小到 160×160），与训练素材的处理一致，两种模式共用 |
 | `ScreenCropper.java` | 在线模式：在截屏里找出视频画面（去掉四周对称的黑边），再交给 `FramePreprocessor` 居中裁剪 |
 | `VideoClassifierHelper.java` | MobileNetV3Small TFLite 推理封装 |
 | `AudioDecoder.java` | 按播放进度解码、重采样音频并写入 PCM 环形缓冲区 |
@@ -151,6 +152,19 @@ app/src/main/assets/
 
 首次使用时，根据 Android 版本授予蓝牙、通知、录音和屏幕投影等必要权限。
 
+## 发布到 Google Play
+
+Android 版只维护一版：同一个包既上架 Google Play，也放在自己的服务器上供直接下载。
+
+- 包名（`applicationId`）是 `tech.xswy.xcup`，上架后不能再改。2026-10 之前的版本包名是 `com.example.helloworld`（Play 不接受 `com.example` 开头），
+  两者是两个 app，老用户需要卸载旧版再装新版。Java 包名（`namespace`）没有改，仍是 `com.example.helloworld`。
+- `targetSdk` / `compileSdk` 为 36（Play 从 2026-08-31 起要求新应用和更新 target Android 16），AGP 至少 8.9.1。
+- 推理运行时用 LiteRT（`com.google.ai.edge.litert:litert`），它的 `.so` 按 16 KB 对齐；Play 要求 target 35+ 的 app 支持 16 KB 内存页。
+  打包后用 Android Studio 的 APK Analyzer（`lib/arm64-v8a` 的 Alignment 列）或 `zipalign -c -P 16 -v 4 <apk>` 检查。
+- 上传 Play 用 AAB（Build → Generate Signed App Bundle），并开启 Play App Signing。开启时选择上传自己现有的签名密钥，
+  这样服务器上直接下载的 APK 和 Play 装的签名一致，用户可以在两个渠道之间覆盖升级。
+- Play 上的 app 只能通过 Play 更新：`UpdateChecker` 弹窗跳转外部下载的更新方式，对 Play 审核有风险，上架前要再处理。
+
 ## 多语言
 
 界面文字支持中文和日语，按系统语言自动切换：系统语言是日语时显示日语，其余情况显示中文。
@@ -177,12 +191,6 @@ app/src/main/assets/
 3. 应用以前台服务持续获取屏幕帧和系统音频；转屏后截图尺寸跟着变，截屏里视频四周的黑边先去掉再居中裁剪。
 4. 连续静音达到阈值时，分析和硬件动作会暂停。
 
-### 网页视频
-
-1. 在应用内网页模式打开页面。
-2. 播放目标视频，等待应用识别 MP4 或 HLS 媒体资源。
-3. 将识别到的媒体交给 ExoPlayer 后开始统一的播放、Seek 与分析流程。
-
 ## 性能参考
 
 以下为开发阶段的单次测试结果，仅用于说明量级；不同 SoC、Android 版本、视频分辨率和温控状态会显著影响结果。
@@ -198,8 +206,6 @@ app/src/main/assets/
 ## 已知限制
 
 - `AudioPlaybackCapture` 只能捕获目标应用明确允许捕获的音频；受保护内容可能静音或黑屏。
-- DRM、临时签名 URL、非标准媒体清单、反自动化机制和页面结构变化可能导致网页媒体识别失败。
-- 网页模式不应用于绕过 DRM、付费墙、访问控制或第三方服务的安全机制。
 - BLE 协议和档位映射与具体硬件绑定，不能直接保证兼容其他设备。
 - 分类结果依赖训练数据分布，不应将模型输出视为对内容的绝对判断。
 - 当前性能数据来自开发阶段测试，不代表所有设备上的实时性或稳定性。
@@ -208,7 +214,8 @@ app/src/main/assets/
 
 - 音视频识别链路设计为端侧推理；如二次开发中加入日志上传、统计分析或云端推理，应明确告知用户并取得必要授权。
 - 仅分析你有权访问和处理的内容，不得处理涉及未成年人、偷拍、胁迫或其他违法内容。
-- 屏幕捕获、音频捕获和网页访问应遵守当地法律、内容版权及目标应用/网站的服务条款。
+- 屏幕捕获和音频捕获应遵守当地法律、内容版权及目标应用的服务条款。
+- 隐私政策：源文件 `docs/privacy.html`，发布在 `https://cdn.xswy.tech/app/privacy.html`（主页底部和首次启动的 18+ 确认弹窗里有入口，地址见 `MainActivity.PRIVACY_POLICY_URL`）。改了权限或数据处理方式，要同时更新它和 Play Console 的“数据安全”表。
 - 接入实体硬件前请增加强度上限、停止指令、连接异常处理和人工中止机制，并充分测试。
 
 ## 贡献
@@ -216,7 +223,7 @@ app/src/main/assets/
 欢迎提交 Issue 和 Pull Request。提交改动时建议：
 
 - 说明 Android 版本、设备型号和复现步骤。
-- 将站点适配、模型调整、BLE 协议和通用播放器改动拆分为独立提交。
+- 将模型调整、BLE 协议和通用播放器改动拆分为独立提交。
 - 不要提交无权公开的视频、音频、训练数据、密钥、签名文件或设备唯一标识。
 - 对涉及线程、Seek、暂停恢复或 BLE 状态机的改动补充真机测试结果。
 
@@ -246,7 +253,6 @@ Apache License 2.0 不授予对 Xcup 名称、商标、产品图片、Logo 或�
 - [Android MediaProjection](https://developer.android.com/media/grow/media-projection)
 - [Android Audio Playback Capture](https://developer.android.com/media/platform/av-capture)
 - [Android BLE](https://developer.android.com/develop/connectivity/bluetooth/ble/ble-overview)
-- [Media3 ExoPlayer](https://developer.android.com/media/media3/exoplayer)
 
 ---
 

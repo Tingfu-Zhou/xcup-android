@@ -4,7 +4,6 @@ import android.content.Context;
 import android.util.Log;
 
 import org.tensorflow.lite.Interpreter;
-import org.tensorflow.lite.nnapi.NnApiDelegate;
 
 import java.io.FileInputStream;
 import java.io.IOException;
@@ -32,15 +31,10 @@ public class AudioInferenceHelper {
     private int embeddingOutput = 1;
     private int scoresOutput = -1;
 
-    private NnApiDelegate nnApiDelegate;
-
     public AudioInferenceHelper(Context context) {
         try {
-            nnApiDelegate = new NnApiDelegate();
-
             Interpreter.Options options = new Interpreter.Options();
-            // 不使用 delegate，默认用 CPU，确保稳定跑通
-            // options.addDelegate(new NnApiDelegate());
+            // 不使用 delegate，默认用 CPU，确保稳定跑通（NNAPI 从 Android 15 起已弃用）
 
             // 加载两个 TFLite 模型（建议放到 assets 文件夹中）
             yamnetInterpreter = new Interpreter(loadModelFile(context, "yamnet.tflite"), options);
@@ -161,6 +155,5 @@ public class AudioInferenceHelper {
     public void close() {
         if (yamnetInterpreter != null) yamnetInterpreter.close();
         if (classifierInterpreter != null) classifierInterpreter.close();
-        if (nnApiDelegate != null) nnApiDelegate.close();
     }
 }

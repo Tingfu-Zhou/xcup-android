@@ -1,5 +1,4 @@
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/rootLayout"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
@@ -12,24 +11,12 @@
         android:layout_height="match_parent"
         android:background="#000000">
 
-        <!--  修改：VideoView 改为 match_parent（离线模式用） -->
+        <!--  修改：VideoView 改为 match_parent -->
         <VideoView
             android:id="@+id/videoView"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:layout_gravity="center" />
-
-        <!-- 网页视频模式专用：ExoPlayer 的 PlayerView，默认 GONE -->
-        <androidx.media3.ui.PlayerView
-            android:id="@+id/playerView"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:layout_gravity="center"
-            android:visibility="gone"
-            app:resize_mode="fit"
-            app:show_buffering="when_playing"
-            app:surface_type="texture_view"
-            app:use_controller="true" />
     </FrameLayout>
 
     <!-- 调试悬浮窗：视频分析 / 音频分析 / 蓝牙输出结果。只在 debug 包显示，release 包由 VideoProcessActivity 隐藏 -->

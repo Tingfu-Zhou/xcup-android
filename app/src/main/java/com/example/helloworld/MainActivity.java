@@ -3,6 +3,7 @@ package com.example.helloworld;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.net.Uri;
 import android.os.Bundle;
 import android.view.View;
@@ -34,6 +35,12 @@ public class MainActivity extends AppCompatActivity {
     private static final int REQUEST_CODE_SELECT_VIDEO = 101;
     private boolean updateDialogShown = false;
 
+    // 隐私政策：Google Play 要求商店后台和 app 里都要有链接。页面和 version.json 放在同一个 CDN 上
+    private static final String PRIVACY_POLICY_URL = "https://cdn.xswy.tech/app/privacy.html";
+    // 首次启动的 18+ 确认，确认过一次就不再弹
+    private static final String PREFS = "app";
+    private static final String KEY_AGE_CONFIRMED = "age_confirmed";
+
     // [新增] BLE管理器
     private BLEManager bleManager;
 
@@ -59,6 +66,7 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+        SystemBarInsets.padContentRoot(this);
 
         btnSelectVideo = findViewById(R.id.btnSelectVideo);
         btnConnectBluetooth = findViewById(R.id.btnConnectBluetooth);
@@ -195,15 +203,35 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
-        // 网页视频入口：打开 WebView 嗅探视频流，再走离线分析链路
-        View btnWebVideo = findViewById(R.id.btnWebVideo);
-        btnWebVideo.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                Intent intent = new Intent(MainActivity.this, WebVideoActivity.class);
-                startActivity(intent);
-            }
-        });
+        findViewById(R.id.btnPrivacyPolicy).setOnClickListener(v -> openPrivacyPolicy());
+
+        showAgeConfirmationIfNeeded();
+    }
+
+    // 首次启动：确认已满 18 周岁（不可取消；点「退出」直接关掉 app）
+    private void showAgeConfirmationIfNeeded() {
+        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        if (prefs.getBoolean(KEY_AGE_CONFIRMED, false)) return;
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle(R.string.age_gate_title)
+                .setMessage(R.string.age_gate_message)
+                .setCancelable(false)
+                .setPositiveButton(R.string.age_gate_confirm,
+                        (d, w) -> prefs.edit().putBoolean(KEY_AGE_CONFIRMED, true).apply())
+                .setNegativeButton(R.string.age_gate_exit, (d, w) -> finishAffinity())
+                .setNeutralButton(R.string.privacy_policy, null)
+                .create();
+        dialog.show();
+        // 点「隐私政策」不关弹窗：看完回来还要确认年龄
+        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> openPrivacyPolicy());
+    }
+
+    private void openPrivacyPolicy() {
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(PRIVACY_POLICY_URL)));
+        } catch (Exception e) {
+            Toast.makeText(this, R.string.update_open_browser_failed, Toast.LENGTH_LONG).show();
+        }
     }
 
     // [新增] 请求BLE权限

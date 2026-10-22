@@ -53,7 +53,7 @@ run 文件名要以真值 id 开头（`v01_base.csv` 配 `gt/v01.csv`）。命�
 
 **采集（手机）**：装 debug 包（`BenchLogger` 自动开启；release 包把 `FORCE_ENABLE` 改成 true），进入离线视频分析，
 **从头不间断播到尾**（不要 seek、暂停、切后台），退出页面时 Toast 会提示文件路径：
-`/sdcard/Android/data/com.example.helloworld/files/bench/run_<视频名>_<时间>.csv`。蓝牙不连也能采。
+`/sdcard/Android/data/tech.xswy.xcup/files/bench/run_<视频名>_<时间>.csv`。蓝牙不连也能采。
 
 run 的文件头记录了当次的全部参数（含融合仲裁的 `ARB=v1 …`），任何一份 dump 都能追溯参数。
 `v_p_*` / `a_p_*` 是模型的原始概率，离线回放和扫参都靠它们。

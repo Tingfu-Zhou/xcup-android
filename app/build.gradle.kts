@@ -3,13 +3,17 @@ plugins {
 }
 
 android {
+    // namespace 只决定 R / BuildConfig 等生成类的 Java 包名，和安装包的包名（applicationId）无关，没跟着改
     namespace = "com.example.helloworld"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.example.helloworld"
+        // 安装包的包名。Google Play 不接受 com.example 开头的包名；上架后不能再改。
+        // 和以前的 com.example.helloworld 是两个 app：老用户装新版不会覆盖旧版，需要手动卸载旧版
+        applicationId = "tech.xswy.xcup"
         minSdk = 26
-        targetSdk = 35
+        // Google Play 从 2026-08-31 起要求新应用和更新 target Android 16（API 36）
+        targetSdk = 36
         versionCode = 127
         versionName = "1.2.7"
 
@@ -38,25 +42,12 @@ dependencies {
     implementation(libs.activity)
     implementation(libs.constraintlayout)
 
-    // AndroidX UI 组件
-    implementation("androidx.appcompat:appcompat:1.3.1")
-    implementation("androidx.constraintlayout:constraintlayout:2.1.1")
-    implementation("com.google.android.material:material:1.4.0")
-    // TensorFlow Lite 核心库
-    implementation("org.tensorflow:tensorflow-lite:2.13.0")
+    // LiteRT：TensorFlow Lite 改名后的同一套运行时，org.tensorflow.lite.Interpreter 的用法不变。
+    // 原来的 org.tensorflow:tensorflow-lite:2.13.0 的 .so 只按 4 KB 对齐，Google Play 要求 target 35+ 的 app
+    // 支持 16 KB 内存页；LiteRT 1.4.0 起 .so 按 16 KB 对齐
+    implementation("com.google.ai.edge.litert:litert:1.4.0")
     // 如果需要更好的权限管理，可以添加（可选）：
     implementation("pub.devrel:easypermissions:3.0.0")
-    // Media3 / ExoPlayer（仅"网页视频"模式使用，离线/在线模式仍走原本的 MediaExtractor 路径）
-    implementation("androidx.media3:media3-exoplayer:1.4.1")
-    implementation("androidx.media3:media3-exoplayer-hls:1.4.1")
-    implementation("androidx.media3:media3-datasource:1.4.1")
-    implementation("androidx.media3:media3-ui:1.4.1")
-    // Cronet 数据源：让网页视频模式的 ExoPlayer 用 Chromium 网络栈拉流，
-    // TLS/HTTP 指纹与 WebView 一致，过 missav CDN（surrit.com）的 Cloudflare 机器人校验。
-    // cronet-embedded 内嵌 Chromium 网络栈（约 +8MB），不依赖 Google Play 服务，任何设备可用。
-    implementation("androidx.media3:media3-datasource-cronet:1.4.1")
-    // 版本对齐 media3-datasource-cronet 依赖的 cronet-api，避免版本冲突/重复类。
-    implementation("org.chromium.net:cronet-embedded:113.5672.61")
     // 单元测试 & Android 测试
     testImplementation(libs.junit)
     androidTestImplementation(libs.ext.junit)

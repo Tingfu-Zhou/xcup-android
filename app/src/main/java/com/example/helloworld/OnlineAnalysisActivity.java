@@ -36,6 +36,9 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
     private static final String TAG = "OnlineAnalysisActivity";
     private static final int REQUEST_CODE_MEDIA_PROJECTION = 1001;
     private static final int REQUEST_CODE_AUDIO_PERMISSION = 1003;
+    private static final int REQUEST_CODE_NOTIFICATION_PERMISSION = 1004;
+    // 通知权限每次进页面只问一次：拒绝了也照常分析，不能再问一遍卡在循环里
+    private boolean notificationPermissionAsked = false;
 
     // UI组件
     private TextView tvStatus;
@@ -157,6 +160,7 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_online_analysis);
+        SystemBarInsets.padContentRoot(this);
 
         // 初始化UI组件
         tvStatus = findViewById(R.id.tvStatus);
@@ -219,6 +223,18 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
             return;
         }
 
+        // Android 13+：前台服务的通知（"在线分析中"）要有通知权限才会出现在通知栏。
+        // 不是必需的：拒绝了照常分析，只是通知栏里看不到
+        if (Build.VERSION.SDK_INT >= 33 && !notificationPermissionAsked
+                && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED) {
+            notificationPermissionAsked = true;
+            ActivityCompat.requestPermissions(this,
+                    new String[]{Manifest.permission.POST_NOTIFICATIONS},
+                    REQUEST_CODE_NOTIFICATION_PERMISSION);
+            return;
+        }
+
         // 请求屏幕录制权限
         requestScreenCapture();
     }
@@ -260,6 +276,12 @@ public class OnlineAnalysisActivity extends AppCompatActivity implements OnlineA
     public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions,
                                            @NonNull int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+
+        if (requestCode == REQUEST_CODE_NOTIFICATION_PERMISSION) {
+            // 给没给都接着走（下一步是录屏授权）
+            checkAndRequestPermissions();
+            return;
+        }
 
         if (requestCode == REQUEST_CODE_AUDIO_PERMISSION) {
             if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {

@@ -227,62 +227,6 @@
                 </com.google.android.material.card.MaterialCardView>
             </LinearLayout>
 
-            <!-- Web video mode card (full width) -->
-            <com.google.android.material.card.MaterialCardView
-                android:id="@+id/btnWebVideo"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="16dp"
-                android:clickable="true"
-                android:focusable="true"
-                app:cardBackgroundColor="?attr/colorSecondaryContainer"
-                app:cardCornerRadius="24dp"
-                app:cardElevation="0dp"
-                app:strokeWidth="0dp">
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:gravity="center_vertical"
-                    android:orientation="horizontal"
-                    android:padding="20dp">
-
-                    <ImageView
-                        android:layout_width="48dp"
-                        android:layout_height="48dp"
-                        android:background="@drawable/bg_icon_circle"
-                        android:backgroundTint="?attr/colorSurface"
-                        android:contentDescription="@string/mode_web_title"
-                        android:padding="12dp"
-                        android:src="@drawable/ic_link"
-                        app:tint="?attr/colorSecondary" />
-
-                    <LinearLayout
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="16dp"
-                        android:layout_weight="1"
-                        android:orientation="vertical">
-
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="@string/mode_web_title"
-                            android:textAppearance="?attr/textAppearanceTitleMedium"
-                            android:textColor="?attr/colorOnSecondaryContainer" />
-
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:layout_marginTop="2dp"
-                            android:alpha="0.85"
-                            android:text="@string/mode_web_subtitle"
-                            android:textAppearance="?attr/textAppearanceBodySmall"
-                            android:textColor="?attr/colorOnSecondaryContainer" />
-                    </LinearLayout>
-                </LinearLayout>
-            </com.google.android.material.card.MaterialCardView>
-
             <!-- Section title -->
             <TextView
                 android:layout_width="wrap_content"
@@ -362,6 +306,16 @@
                 android:text="@string/resume_control_inactive"
                 app:icon="@drawable/ic_pause_circle"
                 app:iconGravity="textStart" />
+
+            <!-- 隐私政策：Google Play 要求 app 里也要有入口 -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnPrivacyPolicy"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center_horizontal"
+                android:layout_marginTop="24dp"
+                android:text="@string/privacy_policy" />
 
         </LinearLayout>
     </androidx.core.widget.NestedScrollView>

@@ -99,6 +99,7 @@ public class ManualControlActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_manual_control);
+        SystemBarInsets.padContentRoot(this);
 
         MaterialToolbar toolbar = findViewById(R.id.topAppBar);
         toolbar.setNavigationOnClickListener(v -> finish());
@@ -332,7 +333,7 @@ public class ManualControlActivity extends AppCompatActivity {
     // ====== [定时加档] 视频分析模式的设置 ======
 
     /**
-     * 读取「定时加档」设置（在本页修改）。离线视频 / 网页视频（VideoProcessActivity）、在线录屏（OnlineAnalysisActivity）
+     * 读取「定时加档」设置（在本页修改）。离线视频（VideoProcessActivity）、在线录屏（OnlineAnalysisActivity）
      * 进入时各读一次，所以在本页改了之后，下次进入视频分析模式生效。
      */
     static LevelBoost loadLevelBoost(Context context) {
