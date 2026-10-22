@@ -47,7 +47,14 @@
             android:name=".VideoProcessActivity"
             android:exported="false"
             android:configChanges="orientation|screenSize"
-            android:screenOrientation="portrait" />
+            android:screenOrientation="portrait">
+            <!-- target 36 起，最小宽度 >= 600dp 的屏幕（平板、折叠屏内屏）会忽略 screenOrientation 和
+                 setRequestedOrientation：竖屏锁定和全屏按钮的横屏切换失效。这个属性让它保持以前的行为；
+                 只是临时的，target 37 起不再生效，到时候要让这个页面自己适配任意方向 -->
+            <property
+                android:name="android.window.PROPERTY_COMPAT_ALLOW_RESTRICTED_RESIZABILITY"
+                android:value="true" />
+        </activity>
 
 
         <!-- 主页面 -->

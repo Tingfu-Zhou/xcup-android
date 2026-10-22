@@ -8,7 +8,7 @@
     <string name="mode_local_title">ローカル動画</string>
     <string name="mode_local_subtitle">アルバムから選択</string>
     <string name="mode_online_title">オンライン解析</string>
-    <string name="mode_online_subtitle">他のアプリの動画</string>
+    <string name="mode_online_subtitle">オンライン動画</string>
     <string name="resume_control_inactive">一時停止中ではありません</string>
     <string name="connect_bluetooth">接続</string>
 
@@ -69,7 +69,7 @@
     <string name="online_tips_title">使い方のヒント</string>
     <string name="online_tip_landscape">スマートフォンを横向きにして動画を全画面で再生すると、認識精度が最も高くなります。</string>
     <string name="online_tip_browser">一部のブラウザ（Chrome、Firefox など）は、セキュリティ上の理由から画面共有中の動画を黒く塗りつぶし、「セキュリティのため、このアプリのコンテンツは画面共有で非表示になっています」などのメッセージを表示します。\n\n正確に解析するため、画面録画モードでは各動画サイトの公式アプリで動画を再生することをおすすめします（画面や音声の取得を禁止しているアプリもあります）。</string>
-    <string name="online_tip_exit">終了するには、この画面に戻って左上の「戻る」をタップするか、システムの画面共有の通知で「停止」をタップしてください。</string>
+    <string name="online_tip_exit">アプリのホーム画面に戻ると、オンラインモードを終了できます。システムの画面共有の通知で「停止」をタップしても終了できます。</string>
     <string name="online_audio_permission_title">録音の権限が必要です</string>
     <string name="online_audio_permission_rationale">オンライン解析でシステム音声を取得するには、録音の権限が必要です</string>
     <string name="online_audio_permission_denied">録音の権限が拒否されています。設定から手動で許可してください</string>
