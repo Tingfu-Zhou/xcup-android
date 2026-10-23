@@ -49,6 +49,8 @@
     <string name="section_manual_control">手动控制</string>
     <string name="mode_manual_title">手动电子菜单</string>
     <string name="mode_manual_subtitle">在 app 上直接调节模式与强度</string>
+    <string name="mode_manual_subtitle_disconnected">连接蓝牙设备后可用</string>
+    <string name="mode_manual_connect_first">请先连接蓝牙设备</string>
 
     <!-- Video analysis page -->
     <string name="video_back_home">返回主页面</string>

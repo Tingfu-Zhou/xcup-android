@@ -280,7 +280,9 @@
                             android:textAppearance="?attr/textAppearanceTitleMedium"
                             android:textColor="?attr/colorOnSurface" />
 
+                        <!-- 蓝牙没连上时换成「连接蓝牙设备后可用」，见 MainActivity#updateManualControlEntry -->
                         <TextView
+                            android:id="@+id/tvManualControlSubtitle"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:layout_marginTop="2dp"

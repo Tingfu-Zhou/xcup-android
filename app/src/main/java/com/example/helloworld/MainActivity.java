@@ -32,6 +32,8 @@ public class MainActivity extends AppCompatActivity {
     private Button btnConnectBluetooth; // [修改] 改为真实BLE连接按钮
     private Button btnResumeControl;    // [新增] 恢复控制按钮
     private TextView tvBluetoothStatus; // [MD3] 蓝牙状态副文本
+    private View btnManualControl;            // [新增] 手动电子菜单入口卡片，蓝牙连上后才能进入
+    private TextView tvManualControlSubtitle; // [新增] 手动电子菜单入口副文本
     private static final int REQUEST_CODE_SELECT_VIDEO = 101;
     private boolean updateDialogShown = false;
 
@@ -72,6 +74,8 @@ public class MainActivity extends AppCompatActivity {
         btnConnectBluetooth = findViewById(R.id.btnConnectBluetooth);
         btnResumeControl = findViewById(R.id.btnResumeControl); // [新增] 恢复控制按钮
         tvBluetoothStatus = findViewById(R.id.tvBluetoothStatus); // [MD3] 蓝牙状态副文本
+        btnManualControl = findViewById(R.id.btnManualControl); // [新增] 手动电子菜单入口
+        tvManualControlSubtitle = findViewById(R.id.tvManualControlSubtitle);
 
         // [新增] 初始化BLE管理器
         bleManager = new BLEManager(this);
@@ -86,11 +90,13 @@ public class MainActivity extends AppCompatActivity {
                         btnConnectBluetooth.setText(R.string.disconnect_bluetooth);
                         btnConnectBluetooth.setEnabled(true);
                         tvBluetoothStatus.setText(R.string.bluetooth_status_connected);
+                        updateManualControlEntry(true);
                         Toast.makeText(MainActivity.this, R.string.bluetooth_toast_connected, Toast.LENGTH_SHORT).show();
                     } else {
                         btnConnectBluetooth.setText(R.string.connect_bluetooth);
                         btnConnectBluetooth.setEnabled(true);
                         tvBluetoothStatus.setText(R.string.bluetooth_status_disconnected);
+                        updateManualControlEntry(false);
                         Toast.makeText(MainActivity.this, R.string.bluetooth_toast_disconnected, Toast.LENGTH_SHORT).show();
                     }
                 });
@@ -169,6 +175,7 @@ public class MainActivity extends AppCompatActivity {
                     bleManager.disconnect();
                     btnConnectBluetooth.setText(R.string.connect_bluetooth);
                     tvBluetoothStatus.setText(R.string.bluetooth_status_disconnected);
+                    updateManualControlEntry(false);
                 }
             }
         });
@@ -193,11 +200,15 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
-        // [新增] 手动电子菜单入口：脱离视频分析，直接在 app 上选模式与强度
-        View btnManualControl = findViewById(R.id.btnManualControl);
+        // [新增] 手动电子菜单入口：脱离视频分析，直接在 app 上选模式与强度。
+        // 模式和强度都要通过蓝牙下发，所以要先在主页连上蓝牙设备才能进入，没连上时只弹提示
         btnManualControl.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
+                if (!bleManager.isConnected()) {
+                    Toast.makeText(MainActivity.this, R.string.mode_manual_connect_first, Toast.LENGTH_SHORT).show();
+                    return;
+                }
                 Intent intent = new Intent(MainActivity.this, ManualControlActivity.class);
                 startActivity(intent);
             }
@@ -269,6 +280,15 @@ public class MainActivity extends AppCompatActivity {
         bleManager.startScanAndConnect();
     }
 
+    // [新增] 手动电子菜单入口跟着蓝牙连接状态变：没连上时卡片半透明（灰色效果，与恢复控制按钮一致）、
+    // 副文本提示先连接；连上后恢复原样。已在手动页里时断开不会被退回主页，由手动页自己置灰控件
+    private void updateManualControlEntry(boolean connected) {
+        btnManualControl.setAlpha(connected ? 1.0f : 0.5f);
+        tvManualControlSubtitle.setText(connected
+                ? R.string.mode_manual_subtitle
+                : R.string.mode_manual_subtitle_disconnected);
+    }
+
     @Override
     protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
@@ -310,9 +330,11 @@ public class MainActivity extends AppCompatActivity {
         if (bleManager != null && bleManager.isConnected()) {
             btnConnectBluetooth.setText(R.string.disconnect_bluetooth);
             tvBluetoothStatus.setText(R.string.bluetooth_status_connected);
+            updateManualControlEntry(true);
         } else {
             btnConnectBluetooth.setText(R.string.connect_bluetooth);
             tvBluetoothStatus.setText(R.string.bluetooth_status_disconnected);
+            updateManualControlEntry(false);
         }
 
         // 版本检查逻辑（保持不变）

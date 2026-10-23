@@ -48,6 +48,8 @@
     <string name="section_manual_control">手動操作</string>
     <string name="mode_manual_title">手動コントロール</string>
     <string name="mode_manual_subtitle">アプリでモードと強さを直接調整</string>
+    <string name="mode_manual_subtitle_disconnected">Bluetooth デバイスに接続すると使えます</string>
+    <string name="mode_manual_connect_first">先に Bluetooth デバイスに接続してください</string>
 
     <!-- Video analysis page -->
     <string name="video_back_home">ホームに戻る</string>
