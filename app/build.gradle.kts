@@ -8,9 +8,9 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        // 安装包的包名。Google Play 不接受 com.example 开头的包名；上架后不能再改。
+        // 安装包的包名，与 iOS 版的 Bundle ID 一致（区分大小写）。Google Play 不接受 com.example 开头的包名；上架后不能再改。
         // 和以前的 com.example.helloworld 是两个 app：老用户装新版不会覆盖旧版，需要手动卸载旧版
-        applicationId = "tech.xswy.xcup"
+        applicationId = "com.aibei.Xcup"
         minSdk = 26
         // Google Play 从 2026-08-31 起要求新应用和更新 target Android 16（API 36）
         targetSdk = 36

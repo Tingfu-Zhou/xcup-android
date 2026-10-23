@@ -21,6 +21,6 @@ public class ExampleInstrumentedTest {
     public void useAppContext() {
         // Context of the app under test.
         Context appContext = InstrumentationRegistry.getInstrumentation().getTargetContext();
-        assertEquals("tech.xswy.xcup", appContext.getPackageName());
+        assertEquals("com.aibei.Xcup", appContext.getPackageName());
     }
 }

@@ -156,7 +156,7 @@ app/src/main/assets/
 
 Android 版只维护一版：同一个包既上架 Google Play，也放在自己的服务器上供直接下载。
 
-- 包名（`applicationId`）是 `tech.xswy.xcup`，上架后不能再改。2026-10 之前的版本包名是 `com.example.helloworld`（Play 不接受 `com.example` 开头），
+- 包名（`applicationId`）是 `com.aibei.Xcup`（与 iOS 版的 Bundle ID 一致，区分大小写），上架后不能再改。2026-10 之前的版本包名是 `com.example.helloworld`（Play 不接受 `com.example` 开头），
   两者是两个 app，老用户需要卸载旧版再装新版。Java 包名（`namespace`）没有改，仍是 `com.example.helloworld`。
 - `targetSdk` / `compileSdk` 为 36（Play 从 2026-08-31 起要求新应用和更新 target Android 16），AGP 至少 8.9.1。
 - 推理运行时用 LiteRT（`com.google.ai.edge.litert:litert`），它的 `.so` 按 16 KB 对齐；Play 要求 target 35+ 的 app 支持 16 KB 内存页。
