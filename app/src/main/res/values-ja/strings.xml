@@ -1,6 +1,6 @@
 <resources>
     <string name="home_subtitle">動画連動スマートコントロール</string>
-    <string name="bluetooth_label">Bluetooth デバイス</string>
+    <string name="bluetooth_label">Bluetoothデバイス</string>
     <string name="bluetooth_status_disconnected">未接続</string>
     <string name="bluetooth_status_connected">接続済み</string>
     <string name="bluetooth_status_scanning">検索中…</string>
@@ -15,17 +15,17 @@
     <!-- Home page: Bluetooth button, toasts and the (hidden) resume control button -->
     <string name="disconnect_bluetooth">切断</string>
     <string name="bluetooth_button_scanning">検索中…</string>
-    <string name="bluetooth_permission_required">デバイスに接続するには Bluetooth の権限が必要です</string>
-    <string name="bluetooth_enable_prompt">Bluetooth をオンにしてください</string>
-    <string name="bluetooth_toast_connected">Bluetooth に接続しました</string>
-    <string name="bluetooth_toast_disconnected">Bluetooth の接続が切れました</string>
+    <string name="bluetooth_permission_required">デバイスに接続するにはBluetoothの権限が必要です</string>
+    <string name="bluetooth_enable_prompt">Bluetoothをオンにしてください</string>
+    <string name="bluetooth_toast_connected">Bluetoothに接続しました</string>
+    <string name="bluetooth_toast_disconnected">Bluetoothの接続が切れました</string>
     <string name="resume_control_paused">アプリ操作を一時停止中。タップで再開</string>
     <string name="resume_control_resumed">操作を再開しました</string>
     <string name="toast_device_local_control">デバイスが本体ボタンで操作中のため、アプリからの操作を一時停止しました</string>
 
     <!-- BLE scan failures (shown as a toast on the home page) -->
-    <string name="ble_unavailable">Bluetooth がオフになっているか、利用できません</string>
-    <string name="ble_permission_missing">Bluetooth の権限がありません</string>
+    <string name="ble_unavailable">Bluetoothがオフになっているか、利用できません</string>
+    <string name="ble_permission_missing">Bluetoothの権限がありません</string>
     <string name="ble_scan_timeout">検索がタイムアウトしました。デバイスが見つかりません</string>
     <string name="ble_scan_failed">検索に失敗しました（エラーコード: %1$d）</string>
 
@@ -47,9 +47,9 @@
     <!-- Manual control entry (home page) -->
     <string name="section_manual_control">手動操作</string>
     <string name="mode_manual_title">手動コントロール</string>
-    <string name="mode_manual_subtitle">アプリでモードと強さを直接調整</string>
-    <string name="mode_manual_subtitle_disconnected">Bluetooth デバイスに接続すると使えます</string>
-    <string name="mode_manual_connect_first">先に Bluetooth デバイスに接続してください</string>
+    <string name="mode_manual_subtitle">アプリでモードと強度を直接調整</string>
+    <string name="mode_manual_subtitle_disconnected">Bluetoothデバイスに接続すると使えます</string>
+    <string name="mode_manual_connect_first">先にBluetoothデバイスに接続してください</string>
 
     <!-- Video analysis page -->
     <string name="video_back_home">ホームに戻る</string>
@@ -96,7 +96,7 @@
     <string name="manual_pattern_1_desc">モード 1 · 正回転のみ。</string>
     <string name="manual_pattern_2_desc">モード 2 · 1200ms 逆回転 → 600ms 正回転 → 1100ms 逆回転</string>
     <string name="manual_pattern_3_desc">モード 3 · 2000ms 逆回転 → 3000ms 正回転</string>
-    <string name="manual_pattern_shared_hint">このモードは動画解析でも使われます。解析で決まるのは「動かす／止める」と強さのレベルだけで、動き方（正回転／逆回転のリズム）はここで選んだモードに従います。</string>
+    <string name="manual_pattern_shared_hint">このモードは動画解析でも使われます。解析で決まるのは「動かす／止める」と強度のレベルだけで、動き方（正回転／逆回転のリズム）はここで選んだモードに従います。</string>
     <string name="manual_level_unit">レベル</string>
     <string name="manual_level_min">0 停止</string>
     <string name="manual_level_max">10 最強</string>
@@ -104,10 +104,10 @@
     <string name="manual_level_detail">約 %1$d RPM · 伸縮 %2$s Hz</string>
     <string name="manual_stop_all">緊急停止</string>
     <string name="manual_status_disconnected">Bluetooth未接続です。ホーム画面に戻ってデバイスを接続してください。</string>
-    <string name="manual_status_ready">接続済み。モードや強さを変更するとすぐに送信されます</string>
-    <string name="manual_status_sent">送信済み：モード %1$d · 強さ %2$d</string>
+    <string name="manual_status_ready">接続済み。モードや強度を変更するとすぐに送信されます</string>
+    <string name="manual_status_sent">送信済み：モード %1$d · 強度 %2$d</string>
     <string name="manual_status_sent_stop">送信済み：停止</string>
-    <string name="manual_status_send_failed">送信に失敗しました。Bluetooth の接続を確認してください</string>
+    <string name="manual_status_send_failed">送信に失敗しました。Bluetoothの接続を確認してください</string>
     <string name="manual_paused_title">デバイスは本体ボタンで操作中です</string>
     <string name="manual_paused_body">アプリからの操作は一時停止しています。「操作を再開」をタップすると、この画面から操作できます。</string>
     <string name="manual_resume">操作を再開</string>
@@ -122,11 +122,11 @@
     <string name="manual_boost_subtitle">動画解析モード専用</string>
     <string name="manual_boost_delay_label">ブースト開始まで</string>
     <string name="manual_boost_delay_value">%1$d分</string>
-    <string name="manual_boost_delay_min">1 分</string>
-    <string name="manual_boost_delay_max">30 分</string>
+    <string name="manual_boost_delay_min">1分</string>
+    <string name="manual_boost_delay_max">30分</string>
     <string name="manual_boost_levels_label">強度の上げ幅</string>
     <string name="manual_boost_levels_1">+1 レベル</string>
     <string name="manual_boost_levels_2">+2 レベル</string>
-    <string name="manual_boost_summary">累計再生時間が %1$d 分に達すると、動画解析で決まった強さが自動的に %2$d レベル上がります（レベル 0 は停止のまま、最大はレベル 10）。</string>
+    <string name="manual_boost_summary">累計再生時間が %1$d 分に達すると、動画解析で決まった強度が自動的に %2$d レベル上がります（レベル 0 は停止のまま、最大はレベル 10）。</string>
     <string name="manual_boost_hint">ローカル動画・オンライン（画面録画）の各モードで有効です。一時停止中や音声がないときは計測しません。モードを終了したときや動画の再生が終わったときは、最初から計測し直します（オンラインモードでは動画の終了を検知できないため、無音が約 10 秒続くと再生終了とみなします）。</string>
 </resources>
