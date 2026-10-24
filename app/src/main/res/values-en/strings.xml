@@ -1,0 +1,132 @@
+<resources>
+    <string name="home_subtitle">Video-synced smart control</string>
+    <string name="bluetooth_label">Bluetooth Device</string>
+    <string name="bluetooth_status_disconnected">Not connected</string>
+    <string name="bluetooth_status_connected">Connected</string>
+    <string name="bluetooth_status_scanning">Scanning…</string>
+    <string name="section_video_source">Video Source</string>
+    <string name="mode_local_title">Local Video</string>
+    <string name="mode_local_subtitle">Choose from your device</string>
+    <string name="mode_online_title">Online Analysis</string>
+    <string name="mode_online_subtitle">Online videos</string>
+    <string name="resume_control_inactive">App control not paused</string>
+    <string name="connect_bluetooth">Connect</string>
+
+    <!-- Home page: Bluetooth button, toasts and the (hidden) resume control button -->
+    <string name="disconnect_bluetooth">Disconnect</string>
+    <string name="bluetooth_button_scanning">Scanning…</string>
+    <string name="bluetooth_permission_required">Bluetooth permission is required to connect to your device</string>
+    <string name="bluetooth_enable_prompt">Turn on Bluetooth</string>
+    <string name="bluetooth_toast_connected">Bluetooth connected</string>
+    <string name="bluetooth_toast_disconnected">Bluetooth disconnected</string>
+    <string name="resume_control_paused">App control paused. Tap to resume.</string>
+    <string name="resume_control_resumed">App control resumed</string>
+    <string name="toast_device_local_control">The device is being controlled using its physical buttons. App control has been paused.</string>
+
+    <!-- BLE scan failures (shown as a toast on the home page) -->
+    <string name="ble_unavailable">Bluetooth is off or unavailable</string>
+    <string name="ble_permission_missing">Bluetooth permission not granted</string>
+    <string name="ble_scan_timeout">Scan timed out. No device found.</string>
+    <string name="ble_scan_failed">Scan failed (error code: %1$d)</string>
+
+    <!-- Update dialog -->
+    <string name="update_title_required">An update is required to continue</string>
+    <string name="update_title_available">Version %1$s is available</string>
+    <string name="update_download">Download</string>
+    <string name="update_later">Later</string>
+    <string name="update_url_unavailable">The download link isn’t available right now. Please try again later.</string>
+    <string name="update_open_browser_failed">Couldn’t open the browser. Check the link or your network connection.</string>
+
+    <!-- Privacy policy link and first-launch 18+ confirmation (home page) -->
+    <string name="privacy_policy">Privacy Policy</string>
+    <string name="age_gate_title">Before You Continue</string>
+    <string name="age_gate_message">This app is only for adults 18 and older.\n\nBy continuing, you confirm that you are at least 18 years old and have read the Privacy Policy.</string>
+    <string name="age_gate_confirm">I’m 18 or Older</string>
+    <string name="age_gate_exit">Exit</string>
+
+    <!-- Manual control entry (home page) -->
+    <string name="section_manual_control">Manual Control</string>
+    <string name="mode_manual_title">Manual Controls</string>
+    <string name="mode_manual_subtitle">Adjust the motion mode and intensity in the app</string>
+    <string name="mode_manual_subtitle_disconnected">Available after connecting a Bluetooth device</string>
+    <string name="mode_manual_connect_first">Connect a Bluetooth device first</string>
+
+    <!-- Video analysis page -->
+    <string name="video_back_home">Back to Home</string>
+    <string name="video_fullscreen_toggle">Toggle full screen</string>
+    <string name="video_parse_failed">Couldn’t load video: %1$s</string>
+    <string name="video_no_video_track">No video track found</string>
+    <string name="video_play_failed">Couldn’t play video (what=%1$d, extra=%2$d, %3$s)</string>
+    <string name="video_error_io">I/O error (403 or network interruption)</string>
+    <string name="video_error_malformed">Malformed or unsupported stream</string>
+    <string name="video_error_unsupported">Unsupported format</string>
+    <string name="video_error_timeout">Request timed out</string>
+    <string name="video_error_unknown">Unknown error</string>
+
+    <!-- Online analysis page -->
+    <string name="online_back">Back</string>
+    <string name="online_status_waiting">Starting online analysis. This may take a few seconds.</string>
+    <string name="online_status_running">Online analysis started</string>
+    <string name="online_status_subtitle">You can return to your home screen and play an online video.</string>
+    <string name="online_tips_title">Tips</string>
+    <string name="online_tip_landscape">For best recognition accuracy, turn your phone sideways and play the video full screen.</string>
+    <string name="online_tip_browser">Some browsers and apps restrict screen recording. If a video can’t be analyzed, try a different playback method.</string>
+    <string name="online_tip_exit">Return to the app’s home page to exit Online Mode. You can also end it from the system’s screen sharing notification.</string>
+    <string name="online_audio_permission_title">Audio Recording Permission Needed</string>
+    <string name="online_audio_permission_rationale">Online analysis needs audio recording permission to capture system audio.</string>
+    <string name="online_audio_permission_denied">Audio recording permission was denied. Turn it on in Settings.</string>
+    <string name="online_audio_permission_required">Audio recording permission is required to capture system audio</string>
+    <string name="online_screen_capture_required">Screen recording permission is required</string>
+    <string name="online_grant_permission">Grant Permission</string>
+    <string name="online_open_settings">Open Settings</string>
+    <string name="online_cancel">Cancel</string>
+    <string name="online_notification_channel_name">Online analysis</string>
+    <string name="online_notification_channel_desc">Shown while online video analysis is running</string>
+    <string name="online_notification_title">Analyzing online video</string>
+    <string name="online_notification_text">Analyzing screen content</string>
+
+    <!-- Manual control page -->
+    <string name="manual_title">Manual Controls</string>
+    <string name="manual_back">Back</string>
+    <string name="manual_section_pattern">Motion Mode</string>
+    <string name="manual_section_level">Motor Intensity</string>
+    <string name="manual_pattern_1">Mode 1</string>
+    <string name="manual_pattern_2">Mode 2</string>
+    <string name="manual_pattern_3">Mode 3</string>
+    <string name="manual_pattern_1_desc">Mode 1 · Forward rotation only.</string>
+    <string name="manual_pattern_2_desc">Mode 2 · 1200 ms reverse → 600 ms forward → 1100 ms reverse</string>
+    <string name="manual_pattern_3_desc">Mode 3 · 2000 ms reverse → 3000 ms forward</string>
+    <string name="manual_pattern_shared_hint">This motion pattern also applies during video analysis. Analysis determines only whether the motor runs and the intensity level. Rotation direction and timing follow the mode selected here.</string>
+    <string name="manual_level_unit">/ 10</string>
+    <string name="manual_level_min">0 Stop</string>
+    <string name="manual_level_max">10 Max</string>
+    <string name="manual_level_detail_stop">Motor stopped</string>
+    <string name="manual_level_detail">About %1$d RPM · Stroke %2$s Hz</string>
+    <string name="manual_stop_all">Emergency Stop</string>
+    <string name="manual_status_disconnected">Bluetooth isn’t connected. Return to Home and connect your device.</string>
+    <string name="manual_status_ready">Connected. Mode and intensity changes are sent immediately.</string>
+    <string name="manual_status_sent">Sent: Mode %1$d · Intensity %2$d</string>
+    <string name="manual_status_sent_stop">Emergency stop command sent</string>
+    <string name="manual_status_send_failed">Couldn’t send command. Check your Bluetooth connection.</string>
+    <string name="manual_paused_title">Device controls are active</string>
+    <string name="manual_paused_body">App control is paused. Tap “Resume App Control” to continue on this screen.</string>
+    <string name="manual_resume">Resume App Control</string>
+    <string name="manual_toast_paused">Device controls are active. Tap “Resume App Control” first.</string>
+    <string name="manual_toast_disconnected">Bluetooth isn’t connected. Return to Home and connect your device.</string>
+    <string name="manual_toast_resuming">Resuming app control…</string>
+    <string name="manual_footer_hint">Leaving this screen won’t stop the device. Tap “Emergency Stop” to stop it.</string>
+
+    <!-- Manual control page: timed level boost for the video analysis modes -->
+    <string name="manual_section_boost">Climax Boost</string>
+    <string name="manual_boost_title">Automatically increases intensity after a set time</string>
+    <string name="manual_boost_subtitle">Video analysis only</string>
+    <string name="manual_boost_delay_label">Boost starts in</string>
+    <string name="manual_boost_delay_value">%1$d min</string>
+    <string name="manual_boost_delay_min">1 min</string>
+    <string name="manual_boost_delay_max">30 min</string>
+    <string name="manual_boost_levels_label">Boost amount</string>
+    <string name="manual_boost_levels_1">+1</string>
+    <string name="manual_boost_levels_2">+2</string>
+    <string name="manual_boost_summary">After %1$d min of playback, Climax Boost raises the intensity chosen by video analysis by %2$d (0 stays stopped; maximum is 10).</string>
+    <string name="manual_boost_hint">Available in Local Video and Online Mode (screen recording). Pauses and periods without audio do not count toward the timer. The timer resets when you exit the mode or playback ends. In Online Mode, about 10 seconds of continuous silence is treated as the end of playback because the app cannot detect when a video ends.</string>
+</resources>

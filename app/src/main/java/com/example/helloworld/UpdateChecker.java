@@ -103,14 +103,19 @@ public final class UpdateChecker {
         }).start();
     }
 
-    // 界面是日文、且 version.json 里填了 notes_ja 时，弹窗用日文说明；否则用 notes（没填 notes_ja 时与原来一样）
+    // 按界面语言挑更新说明：日文界面填了 notes_ja 就用它，否则用 notes（与原来一样）；
+    // 英文界面只用 notes_en，没填就不显示说明（中文 notes 英文用户看不懂）；其余界面用 notes
     private static String localizedNotes(Context ctx, JSONObject a) {
-        String notesJa = a.optString("notes_ja", "");
-        // 按系统语言列表挑界面语言，与资源匹配一致（如 [英语, 日语] 的用户看到的是日文界面）
+        // 按系统语言列表挑界面语言，与资源匹配一致（如 [法语, 英语] 的用户看到的是英文界面）
         Locale ui = ctx.getResources().getConfiguration().getLocales()
-                .getFirstMatch(new String[]{"zh", "ja"});
-        boolean japanese = ui != null && "ja".equals(ui.getLanguage());
-        return japanese && !notesJa.isEmpty() ? notesJa : a.optString("notes", "");
+                .getFirstMatch(new String[]{"zh", "ja", "en"});
+        String lang = ui == null ? "" : ui.getLanguage();
+        if ("ja".equals(lang)) {
+            String notesJa = a.optString("notes_ja", "");
+            return notesJa.isEmpty() ? a.optString("notes", "") : notesJa;
+        }
+        if ("en".equals(lang)) return a.optString("notes_en", "");
+        return a.optString("notes", "");
     }
 
     private static String readAll(Reader r) throws IOException {

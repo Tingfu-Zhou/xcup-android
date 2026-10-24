@@ -360,7 +360,8 @@ public class MainActivity extends AppCompatActivity {
 
         AlertDialog.Builder b = new AlertDialog.Builder(this)
                 .setTitle(title)
-                .setMessage(msg)
+                // 没有说明（如英文界面没填 notes_en）时不设正文，免得标题和按钮之间空一块
+                .setMessage(msg.isEmpty() ? null : msg)
                 .setPositiveButton(R.string.update_download, (d, w) -> openDownloadPage(info));
 
         if (info.force) {

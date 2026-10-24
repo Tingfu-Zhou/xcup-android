@@ -19,7 +19,7 @@ Xcup Android 会从本地视频或屏幕共享中提取画面与音频，在设�
 - BLE 控制：支持自动扫描、连接、指令发送、发送节流，以及硬件按键触发后的暂停与恢复。
 - 播放同步：支持拖动、暂停、恢复、播放结束处理和横屏全屏；Seek 后会重置历史状态并重新同步分析链路。
 - 应用更新检查：通过远端 `version.json` 判断推荐更新或强制更新，并跳转外部浏览器下载。
-- 多语言界面：中文与日语，按系统语言自动切换；Android 13 及以上也可以在系统设置里单独为本 App 选择语言。
+- 多语言界面：中文、日语与英语，按系统语言自动切换；Android 13 及以上也可以在系统设置里单独为本 App 选择语言。
 
 > 网页视频模式（应用内 WebView 嗅探网页视频地址，再交给 ExoPlayer 播放分析）已在上架 Google Play 前移除，最后一版代码在提交 `c06b84c`（tag `web-video-archive`），需要时用 `git checkout web-video-archive -- <文件>` 取回。
 
@@ -135,12 +135,13 @@ app/src/main/assets/
     "latestVersionName": "1.0.8",
     "landingUrl": "https://example.com/download",
     "notes": "修复问题并提升性能",
-    "notes_ja": "不具合の修正とパフォーマンスの向上"
+    "notes_ja": "不具合の修正とパフォーマンスの向上",
+    "notes_en": "Bug fixes and performance improvements"
   }
 }
 ```
 
-`notes_ja` 可选：界面是日文时更新弹窗显示它，没填就显示 `notes`。
+`notes_ja`、`notes_en` 可选：界面是日文时更新弹窗显示 `notes_ja`，没填就显示 `notes`；界面是英文时显示 `notes_en`，没填就不显示说明（不显示中文的 `notes`）。iOS 段同样支持这两个字段。
 
 ### 5. 构建与安装
 
@@ -167,13 +168,16 @@ Android 版只维护一版：同一个包既上架 Google Play，也放在自己
 
 ## 多语言
 
-界面文字支持中文和日语，按系统语言自动切换：系统语言是日语时显示日语，其余情况显示中文。
+界面文字支持中文、日语和英语，按系统语言自动切换：按系统语言列表的顺序，取第一个本 App 支持的语言；三种都不在列表里时显示中文。
 
 - 中文：`app/src/main/res/values/strings.xml`（默认，也是其他语言的兜底）
 - 日语：`app/src/main/res/values-ja/strings.xml`
+- 英语：`app/src/main/res/values-en/strings.xml`
 - `app/src/main/res/xml/locales_config.xml`：声明支持的语言，Android 13 及以上可在「系统设置 → 应用 → 语言」里单独为本 App 选择语言
 
-新增界面文字时，在 `values/strings.xml` 和 `values-ja/strings.xml` 里各加一条同名的字符串，代码里用 `R.string.xxx` / `getString(...)`，不要直接写中文字面量。带参数的文字用 `%1$d`、`%2$s` 这类带序号的占位符，日语语序不同也能对上。只在调试悬浮窗和日志里出现的文字不需要翻译。
+新增界面文字时，在 `values/strings.xml`、`values-ja/strings.xml`、`values-en/strings.xml` 里各加一条同名的字符串，代码里用 `R.string.xxx` / `getString(...)`，不要直接写中文字面量。带参数的文字用 `%1$d`、`%2$s` 这类带序号的占位符，日语、英语语序不同也能对上。只在调试悬浮窗和日志里出现的文字不需要翻译。
+
+英文按北美用法，与 iOS 版一致：按钮和标题用 Title Case（如 Emergency Stop），提示句只有句首大写；撇号和引号用 ’ “ ”（直撇号 ' 在 strings.xml 里要转义）。
 
 ## 使用流程
 
