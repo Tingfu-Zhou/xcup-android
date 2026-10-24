@@ -31,7 +31,7 @@
 
     <!-- Update dialog -->
     <string name="update_title_required">ご利用を続けるにはアップデートが必要です</string>
-    <string name="update_title_available">新しいバージョン %1$s</string>
+    <string name="update_title_available">新しいバージョン %1$s があります</string>
     <string name="update_download">ダウンロードへ</string>
     <string name="update_later">後で</string>
     <string name="update_url_unavailable">ダウンロード先を利用できません。しばらくしてからもう一度お試しください</string>
@@ -70,7 +70,7 @@
     <string name="online_status_subtitle">ホーム画面に戻って、オンライン動画を再生できます</string>
     <string name="online_tips_title">使い方のヒント</string>
     <string name="online_tip_landscape">スマートフォンを横向きにして動画を全画面で再生すると、認識精度が最も高くなります。</string>
-    <string name="online_tip_browser">一部のブラウザ（Chrome、Firefox など）は、セキュリティ上の理由から画面共有中の動画を黒く塗りつぶし、「セキュリティのため、このアプリのコンテンツは画面共有で非表示になっています」などのメッセージを表示します。\n\n正確に解析するため、画面録画モードでは各動画サイトの公式アプリで動画を再生することをおすすめします（画面や音声の取得を禁止しているアプリもあります）。</string>
+    <string name="online_tip_browser">一部のブラウザやアプリでは、画面録画が制限される場合があります。動画を正常に解析できない場合は、別の再生方法をお試しください。</string>
     <string name="online_tip_exit">アプリのホーム画面に戻ると、オンラインモードを終了できます。システムの画面共有の通知で「停止」をタップしても終了できます。</string>
     <string name="online_audio_permission_title">録音の権限が必要です</string>
     <string name="online_audio_permission_rationale">オンライン解析でシステム音声を取得するには、録音の権限が必要です</string>
@@ -89,11 +89,11 @@
     <string name="manual_title">手動コントロール</string>
     <string name="manual_back">戻る</string>
     <string name="manual_section_pattern">動作モード</string>
-    <string name="manual_section_level">モーターの強さ</string>
+    <string name="manual_section_level">モーターの強度</string>
     <string name="manual_pattern_1">モード 1</string>
     <string name="manual_pattern_2">モード 2</string>
     <string name="manual_pattern_3">モード 3</string>
-    <string name="manual_pattern_1_desc">モード 1 · 正回転のみ。同じ方向に連続で動きます</string>
+    <string name="manual_pattern_1_desc">モード 1 · 正回転のみ。</string>
     <string name="manual_pattern_2_desc">モード 2 · 1200ms 逆回転 → 600ms 正回転 → 1100ms 逆回転</string>
     <string name="manual_pattern_3_desc">モード 3 · 2000ms 逆回転 → 3000ms 正回転</string>
     <string name="manual_pattern_shared_hint">このモードは動画解析でも使われます。解析で決まるのは「動かす／止める」と強さのレベルだけで、動き方（正回転／逆回転のリズム）はここで選んだモードに従います。</string>
@@ -103,7 +103,7 @@
     <string name="manual_level_detail_stop">モーター停止</string>
     <string name="manual_level_detail">約 %1$d RPM · 伸縮 %2$s Hz</string>
     <string name="manual_stop_all">緊急停止</string>
-    <string name="manual_status_disconnected">Bluetooth に接続されていません。ホーム画面に戻ってデバイスに接続してください</string>
+    <string name="manual_status_disconnected">Bluetooth未接続です。ホーム画面に戻ってデバイスを接続してください。</string>
     <string name="manual_status_ready">接続済み。モードや強さを変更するとすぐに送信されます</string>
     <string name="manual_status_sent">送信済み：モード %1$d · 強さ %2$d</string>
     <string name="manual_status_sent_stop">送信済み：停止</string>
@@ -112,19 +112,19 @@
     <string name="manual_paused_body">アプリからの操作は一時停止しています。「操作を再開」をタップすると、この画面から操作できます。</string>
     <string name="manual_resume">操作を再開</string>
     <string name="manual_toast_paused">デバイスは本体ボタンで操作中です。先に「操作を再開」をタップしてください</string>
-    <string name="manual_toast_disconnected">Bluetooth に接続されていません。ホーム画面に戻ってデバイスに接続してください</string>
+    <string name="manual_toast_disconnected">Bluetooth未接続です。ホーム画面に戻ってデバイスを接続してください。</string>
     <string name="manual_toast_resuming">操作を再開しています…</string>
     <string name="manual_footer_hint">この画面を離れても自動では停止しません。止めるには「緊急停止」をタップしてください。</string>
 
     <!-- Manual control page: timed level boost for the video analysis modes -->
-    <string name="manual_section_boost">タイマーでレベルアップ</string>
-    <string name="manual_boost_title">一定時間再生すると自動でレベルアップ</string>
-    <string name="manual_boost_subtitle">再生時間に応じて段階的に強く · 動画解析モードのみ</string>
-    <string name="manual_boost_delay_label">レベルアップ開始</string>
-    <string name="manual_boost_delay_value">%1$d 分後</string>
+    <string name="manual_section_boost">クライマックスブースト</string>
+    <string name="manual_boost_title">設定時間後に強度を自動アップ</string>
+    <string name="manual_boost_subtitle">動画解析モード専用</string>
+    <string name="manual_boost_delay_label">ブースト開始まで</string>
+    <string name="manual_boost_delay_value">%1$d分</string>
     <string name="manual_boost_delay_min">1 分</string>
     <string name="manual_boost_delay_max">30 分</string>
-    <string name="manual_boost_levels_label">上げ幅</string>
+    <string name="manual_boost_levels_label">強度の上げ幅</string>
     <string name="manual_boost_levels_1">+1 レベル</string>
     <string name="manual_boost_levels_2">+2 レベル</string>
     <string name="manual_boost_summary">累計再生時間が %1$d 分に達すると、動画解析で決まった強さが自動的に %2$d レベル上がります（レベル 0 は停止のまま、最大はレベル 10）。</string>
