@@ -289,4 +289,4 @@ Apache License 2.0 grants no rights to the Xcup name, trademarks, product images
 
 ---
 
-If this project helps you, feel free to star it, send feedback or share your improvements. My QQ: 3247499719
+If this project helps you, feel free to star it, send feedback or share your improvements. My email:782234324@qq.com
